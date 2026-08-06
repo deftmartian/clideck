@@ -2,8 +2,17 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+  <meta name="theme-color" content="#0f172a">
+  <meta name="application-name" content="CliDeck">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="CliDeck">
   <title>CliDeck</title>
   <link rel="icon" type="image/png" href="/img/clideck-logo-icon.png">
+  <link rel="apple-touch-icon" href="/icons/clideck-apple-180.png">
+  <link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials">
   <link rel="stylesheet" href="/xterm.css">
   <link rel="stylesheet" href="/tailwind.css">
   <style>
@@ -14,6 +23,11 @@
       --color-list-row-hover: color-mix(in srgb, var(--color-chat-hover) 55%, transparent);
       --color-list-row-active: var(--color-chat-active);
       --color-session-icon-bg: #242626;
+    }
+    html, body { height: 100%; }
+    body {
+      height: 100vh;
+      height: var(--clideck-viewport-height, 100dvh);
     }
     .light {
       --color-project-header-bg: #f6f5f5;
@@ -56,7 +70,7 @@
     .terminal-input-actions {
       position: absolute;
       right: 18px;
-      bottom: 18px;
+      bottom: max(70px, calc(60px + env(safe-area-inset-bottom)));
       z-index: 20;
       display: flex;
       align-items: center;
@@ -107,9 +121,83 @@
     }
     #main { min-width: 0; }
     #mobile-nav-toggle,
+    #mobile-page-reload,
     #mobile-nav-close,
     #mobile-sidebar-backdrop { display: none; }
-    @media (max-width: 960px) {
+    .pwa-status-banner {
+      position: fixed;
+      left: 50%;
+      z-index: 520;
+      display: flex;
+      align-items: center;
+      gap: 0.65rem;
+      width: max-content;
+      max-width: min(32rem, calc(100vw - 112px));
+      padding: 0.62rem 0.72rem 0.62rem 0.85rem;
+      border: 1px solid color-mix(in srgb, var(--color-border) 78%, transparent);
+      border-radius: 0.9rem;
+      background: color-mix(in srgb, var(--color-raised) 96%, transparent);
+      color: var(--color-text);
+      box-shadow: 0 18px 44px -18px var(--color-shadow);
+      backdrop-filter: blur(14px);
+      transform: translateX(-50%);
+      font-size: 0.75rem;
+      line-height: 1.35;
+    }
+    .pwa-status-banner[hidden] { display: none; }
+    #connection-banner {
+      top: max(12px, env(safe-area-inset-top));
+    }
+    #connection-banner[data-state="offline"],
+    #connection-banner[data-state="unavailable"],
+    #connection-banner[data-state="auth"],
+    #connection-banner[data-state="incompatible"] {
+      border-color: color-mix(in srgb, var(--color-warning) 55%, var(--color-border));
+    }
+    #pwa-update-banner {
+      bottom: max(72px, calc(64px + env(safe-area-inset-bottom)));
+    }
+    .pwa-status-message {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    .pwa-status-action,
+    .pwa-status-dismiss {
+      flex-shrink: 0;
+      border: 0;
+      border-radius: 0.55rem;
+      cursor: pointer;
+      font: inherit;
+    }
+    .pwa-status-action {
+      padding: 0.42rem 0.62rem;
+      background: color-mix(in srgb, var(--color-dim) 26%, var(--color-surface));
+      color: var(--color-bright);
+      font-weight: 650;
+    }
+    .pwa-status-action:disabled {
+      cursor: wait;
+      opacity: 0.62;
+    }
+    .pwa-status-dismiss {
+      width: 1.8rem;
+      height: 1.8rem;
+      padding: 0;
+      background: transparent;
+      color: var(--color-soft);
+      font-size: 1rem;
+    }
+    body.protocol-incompatible::after {
+      content: "";
+      position: fixed;
+      inset: 0;
+      z-index: 510;
+      background: color-mix(in srgb, var(--color-base) 32%, transparent);
+      cursor: not-allowed;
+    }
+    /* The soft keyboard can make a portrait viewport look landscape. Use the
+       stable touch input signal instead of viewport orientation. */
+    @media (max-width: 960px), (hover: none) and (pointer: coarse) {
       #mobile-sidebar-backdrop {
         display: block;
         position: fixed;
@@ -134,19 +222,21 @@
       body.mobile-nav-open #sidebar-shell { transform: translateX(0); }
       body.mobile-nav-open #mobile-sidebar-backdrop { opacity: 1; pointer-events: auto; }
       #mobile-nav-toggle,
+      #mobile-page-reload,
       #mobile-nav-close {
         display: inline-flex;
         align-items: center;
         justify-content: center;
       }
       #mobile-nav-close { opacity: 0; pointer-events: none; }
-      body.mobile-nav-open #mobile-nav-toggle { opacity: 0; pointer-events: none; }
+      body.mobile-nav-open #mobile-nav-toggle,
+      body.mobile-nav-open #mobile-page-reload { opacity: 0; pointer-events: none; }
       body.mobile-nav-open #mobile-nav-close { opacity: 1; pointer-events: auto; }
-      #mobile-nav-toggle {
-        position: absolute;
+      #mobile-nav-toggle,
+      #mobile-page-reload {
+        position: fixed;
         top: max(12px, env(safe-area-inset-top));
-        left: 12px;
-        z-index: 220;
+        z-index: 300;
         width: 40px;
         height: 40px;
         border-radius: 12px;
@@ -156,6 +246,8 @@
         box-shadow: 0 12px 28px rgba(0, 0, 0, 0.22);
         backdrop-filter: blur(10px);
       }
+      #mobile-nav-toggle { left: 12px; }
+      #mobile-page-reload { left: 60px; }
       #mobile-nav-close {
         position: absolute;
         top: max(12px, env(safe-area-inset-top));
@@ -168,8 +260,22 @@
         background: color-mix(in srgb, var(--color-raised) 92%, transparent);
         color: var(--color-text);
       }
-      #nav-rail { width: 52px !important; min-width: 52px !important; padding-top: 56px; padding-bottom: 12px; }
-      #sidebar { width: auto !important; min-width: 0 !important; flex: 1 1 auto; padding-top: 52px; }
+      #nav-rail {
+        width: 52px !important;
+        min-width: 52px !important;
+        padding-top: 56px;
+        padding-bottom: max(12px, calc(8px + env(safe-area-inset-bottom)));
+      }
+      #sidebar {
+        width: auto !important;
+        min-width: 0 !important;
+        flex: 1 1 auto;
+        padding-top: 52px;
+        padding-bottom: env(safe-area-inset-bottom);
+      }
+      #connection-banner {
+        top: max(64px, calc(56px + env(safe-area-inset-top)));
+      }
       #plugin-toolbar { top: max(12px, env(safe-area-inset-top)); right: 12px; }
       #empty img { width: 9rem; }
       #empty p { max-width: 24ch; padding-inline: 1rem; }
@@ -182,8 +288,19 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@700&display=swap" rel="stylesheet">
 </head>
-<body class="flex h-screen bg-slate-950 text-slate-200 font-sans overflow-hidden">
+<body class="flex bg-slate-950 text-slate-200 font-sans overflow-hidden">
   <div id="mobile-sidebar-backdrop" aria-hidden="true"></div>
+
+  <div id="connection-banner" class="pwa-status-banner" data-state="connecting" role="status" aria-live="polite" hidden>
+    <span id="connection-message" class="pwa-status-message">Connecting to CliDeck…</span>
+    <button id="connection-action" class="pwa-status-action" type="button" hidden>Retry</button>
+  </div>
+
+  <div id="pwa-update-banner" class="pwa-status-banner" role="status" aria-live="polite" hidden>
+    <span id="pwa-update-message" class="pwa-status-message">A CliDeck update is ready.</span>
+    <button id="pwa-update-action" class="pwa-status-action" type="button">Prepare update</button>
+    <button id="pwa-update-dismiss" class="pwa-status-dismiss" type="button" aria-label="Dismiss update">×</button>
+  </div>
 
   <div id="sidebar-shell">
     <button id="mobile-nav-close" type="button" aria-label="Close sidebar">
@@ -300,7 +417,40 @@
     <button id="mobile-nav-toggle" type="button" aria-label="Open sidebar">
       <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
     </button>
+    <button id="mobile-page-reload" type="button" aria-label="Refresh CliDeck" title="Refresh CliDeck">
+      <svg class="w-5 h-5" aria-hidden="true" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.34 5.66"/><path d="M20 4v7h-7"/></svg>
+    </button>
     <div id="terminals" class="absolute inset-0" style="pointer-events:none"></div>
+    <section id="mobile-composer" aria-label="Mobile terminal input" aria-hidden="true">
+      <div id="mobile-composer-accessories" class="mobile-composer-accessories" aria-label="Terminal keys" aria-hidden="true">
+        <button type="button" data-terminal-key="escape" aria-label="Escape key">Esc</button>
+        <button type="button" data-terminal-key="tab" aria-label="Tab key">Tab</button>
+        <button type="button" data-terminal-key="up" aria-label="Up arrow">↑</button>
+        <button type="button" data-terminal-key="down" aria-label="Down arrow">↓</button>
+        <button type="button" data-terminal-key="enter" aria-label="Enter key">↵</button>
+        <button type="button" data-terminal-key="interrupt" aria-label="Control C">^C</button>
+        <span class="mobile-composer-spacer"></span>
+        <button id="mobile-composer-attach" type="button" title="Attach an image to the session">Attach</button>
+        <input id="mobile-composer-file" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+        <button id="mobile-composer-install" type="button" title="Install CliDeck as an app" hidden>Install</button>
+        <button id="mobile-selection-toggle" type="button" aria-pressed="false" title="Drag to select terminal text">Select</button>
+        <button id="mobile-composer-direct" type="button" aria-pressed="false" title="Switch between composed and direct terminal input">Direct</button>
+      </div>
+      <div id="mobile-selection-actions" aria-label="Terminal text selection" aria-hidden="true">
+        <span id="mobile-selection-status">Drag across terminal text</span>
+        <button id="mobile-selection-copy" type="button" disabled>Copy</button>
+        <button id="mobile-selection-done" type="button">Done</button>
+      </div>
+      <div class="mobile-composer-editor">
+        <button id="mobile-composer-tools" type="button" aria-expanded="false" aria-controls="mobile-composer-accessories" aria-label="Show terminal keys">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M10.5 10h.01M14 10h.01M17.5 10h.01M7 14h.01M10.5 14h7"/></svg>
+        </button>
+        <textarea id="mobile-composer-text" rows="1" autocomplete="on" autocorrect="on" autocapitalize="sentences" spellcheck="true" enterkeyhint="send" placeholder="Write a prompt or command…" aria-label="Prompt or command"></textarea>
+        <button id="mobile-composer-send" type="button" disabled aria-label="Send prompt or command">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 14-7-4 14-3-6-7-1Z"/><path d="m12 13 7-8"/></svg>
+        </button>
+      </div>
+    </section>
     <div id="plugin-toolbar" class="absolute top-2 right-3 z-10 flex gap-1.5 empty:hidden"></div>
     <div id="empty" class="absolute inset-0 flex flex-col items-center justify-center select-none">
       <img src="/img/clideck-logo-terminal-panel.png" alt="CliDeck" class="w-44 opacity-60 mb-5" draggable="false">
@@ -553,6 +703,7 @@
 
   <script src="/xterm.js"></script>
   <script src="/addon-fit.js"></script>
+  <script src="/addon-webgl.js"></script>
   <script type="module" src="/js/app.js"></script>
 </body>
 </html>

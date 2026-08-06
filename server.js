@@ -1,10 +1,16 @@
 const http = require('http');
-const { readFileSync, existsSync } = require('fs');
+const { readFileSync, existsSync, statSync } = require('fs');
 const { join, extname, resolve } = require('path');
 const { WebSocketServer } = require('ws');
 const { ensurePtyHelper } = require('./utils');
 const { PORT, HOST, localUrl } = require('./runtime');
 const { updateClaudeSessionToken } = require('./claude-session');
+const {
+  CLIENT_PROTOCOL_VERSION,
+  clientProtocolVersionFromUrl,
+  isClientProtocolCompatible,
+} = require('./protocol');
+const { CLIENT_BUILD_ID } = require('./client-build');
 
 function terminalLink(url, text = url) {
   return `\u001B]8;;${url}\u0007${text}\u001B]8;;\u0007`;
@@ -75,7 +81,15 @@ require('./pi-bridge').init(sessions.broadcast, sessions.getSessions);
 const config = require('./config');
 plugins.init(sessions.broadcast, sessions.getSessions, () => require('./handlers').getConfig(), (cfg) => config.save(cfg), sessions.input, sessions.createProgrammatic, sessions.close);
 
-const MIME = { '.html': 'text/html', '.css': 'text/css', '.js': 'application/javascript', '.png': 'image/png', '.svg': 'image/svg+xml', '.mp3': 'audio/mpeg' };
+const MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.webmanifest': 'application/manifest+json',
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml',
+  '.mp3': 'audio/mpeg',
+};
 const ALIASES = {
   '/xterm.css':    require.resolve('@xterm/xterm/css/xterm.css'),
   '/xterm.js':     require.resolve('@xterm/xterm/lib/xterm.js'),
@@ -84,6 +98,18 @@ const ALIASES = {
 
 const PUBLIC_ROOT = join(__dirname, 'public');
 const geminiMenuPoll = new Map();
+
+function staticHeaders(filePath) {
+  const stats = statSync(filePath);
+  const headers = {
+    'Content-Type': MIME[extname(filePath)] || 'application/octet-stream',
+    'Cache-Control': 'no-cache',
+    'ETag': `W/"${stats.size.toString(16)}-${Math.trunc(stats.mtimeMs).toString(16)}"`,
+    'X-Content-Type-Options': 'nosniff',
+  };
+  if (filePath === join(PUBLIC_ROOT, 'sw.js')) headers['Service-Worker-Allowed'] = '/';
+  return headers;
+}
 
 function startGeminiMenuPoll(id) {
   const prev = geminiMenuPoll.get(id);
@@ -173,7 +199,7 @@ const server = http.createServer((req, res) => {
         if (clideckId) {
           const sess = allSessions.get(clideckId);
           if (route !== 'session-end') {
-            updateClaudeSessionToken(sess, sessionId, clideckId, { label: 'Claude', source: `hook:${route}` });
+            updateClaudeSessionToken(sess, sessionId, clideckId, { label: 'Claude', source: `hook:${route}`, origin: 'hook' });
           }
           if (route === 'start') {
             sessions.broadcast({ type: 'session.status', id: clideckId, working: true, source: 'hook' });
@@ -232,6 +258,56 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // Grok Build hook endpoints — Claude-shaped lifecycle events (camelCase on wire)
+  if (req.method === 'POST' && req.url.startsWith('/hook/grok/')) {
+    let body = '';
+    req.on('data', chunk => { body += chunk; if (body.length > 1e5) req.destroy(); });
+    req.on('end', () => {
+      try {
+        const payload = JSON.parse(body);
+        const route = req.url.slice('/hook/grok/'.length);
+        const sessionId = payload.session_id || '';
+        const allSessions = sessions.getSessions();
+        const clideckId = payload.clideck_id && allSessions.has(payload.clideck_id)
+          ? payload.clideck_id
+          : sessionId
+            ? [...allSessions].find(([, s]) => s.sessionToken === sessionId)?.[0]
+            : null;
+        if (clideckId) {
+          const sess = allSessions.get(clideckId);
+          if (sess && sessionId && route !== 'session-end') {
+            if (sess.sessionToken !== sessionId) {
+              const prev = sess.sessionToken;
+              sess.sessionToken = sessionId;
+              sess.sessionTokenOrigin = 'hook';
+              const previous = prev ? `${prev.slice(0, 12)}... -> ` : '';
+              console.log(`Grok: updated session ID for ${clideckId.slice(0, 8)} via hook:${route}: ${previous}${sessionId.slice(0, 12)}...`);
+            }
+          }
+          if (route === 'start') {
+            sessions.broadcast({ type: 'session.status', id: clideckId, working: true, source: 'hook' });
+          } else if (route === 'stop' || route === 'session-end') {
+            sessions.broadcast({ type: 'session.status', id: clideckId, working: false, source: 'hook' });
+            setTimeout(() => sessions.broadcast({ type: 'terminal.capture', id: clideckId }), 500);
+          } else if (route === 'session-start') {
+            const source = String(payload.source || '').toLowerCase();
+            // Compact can fire mid-turn; only treat interactive starts as idle.
+            if (source !== 'compact') {
+              sessions.broadcast({ type: 'session.status', id: clideckId, working: false, source: 'hook' });
+              setTimeout(() => sessions.broadcast({ type: 'terminal.capture', id: clideckId }), 500);
+            }
+          } else if (route === 'menu') {
+            const menuVersion = sess ? ((sess._menuVersion || 0) + 1) : 1;
+            if (sess) sess._menuVersion = menuVersion;
+            setTimeout(() => sessions.broadcast({ type: 'terminal.capture', id: clideckId, menuVersion }), 500);
+          }
+        }
+      } catch {}
+      res.writeHead(200).end('{}');
+    });
+    return;
+  }
+
   // OpenCode plugin bridge events
   if (req.method === 'POST' && req.url === '/opencode-events') {
     let body = '';
@@ -266,6 +342,27 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // Programmatic session creation used by the `clideck spawn` CLI command.
+  if (req.method === 'POST' && req.url === '/api/session/spawn') {
+    require('./session-spawn').handleHttp(req, res, sessions, () => config.load());
+    return;
+  }
+
+  if (req.method === 'GET' && req.url === '/api/health') {
+    res.writeHead(200, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff',
+    });
+    res.end(JSON.stringify({
+      ok: true,
+      version: currentVersion,
+      buildId: CLIENT_BUILD_ID,
+      protocolVersion: CLIENT_PROTOCOL_VERSION,
+    }));
+    return;
+  }
+
   // DEBUG: log any POST (agents might use /v1/traces, /v1/metrics, or other paths)
   if (req.method === 'POST') {
     // console.log(`OTLP: received POST ${req.url} (not handled)`);
@@ -276,18 +373,31 @@ const server = http.createServer((req, res) => {
   if (req.url.startsWith('/plugins/')) {
     const pluginFile = plugins.resolveFile(req.url);
     if (pluginFile) {
-      res.writeHead(200, { 'Content-Type': MIME[extname(pluginFile)] || 'application/javascript' });
+      res.writeHead(200, {
+        'Content-Type': MIME[extname(pluginFile)] || 'application/javascript; charset=utf-8',
+        'Cache-Control': 'no-cache',
+        'X-Content-Type-Options': 'nosniff',
+      });
       return res.end(readFileSync(pluginFile));
     }
     return res.writeHead(404).end();
   }
 
-  const filePath = ALIASES[req.url]
-    || resolve(PUBLIC_ROOT, (req.url === '/' ? 'index.html' : req.url).replace(/^\//, ''));
-  if (!filePath.startsWith(PUBLIC_ROOT) && !ALIASES[req.url]) return res.writeHead(403).end();
+  let requestPath;
+  try { requestPath = new URL(req.url, 'http://clideck.local').pathname; }
+  catch { return res.writeHead(400).end(); }
+
+  const filePath = ALIASES[requestPath]
+    || resolve(PUBLIC_ROOT, (requestPath === '/' ? 'index.html' : requestPath).replace(/^\//, ''));
+  if (!filePath.startsWith(PUBLIC_ROOT) && !ALIASES[requestPath]) return res.writeHead(403).end();
   if (!existsSync(filePath)) return res.writeHead(404).end();
   try {
-    res.writeHead(200, { 'Content-Type': MIME[extname(filePath)] || 'application/octet-stream' });
+    const headers = staticHeaders(filePath);
+    if (req.headers['if-none-match'] === headers.ETag) {
+      res.writeHead(304, headers);
+      return res.end();
+    }
+    res.writeHead(200, headers);
     res.end(readFileSync(filePath));
   } catch { res.writeHead(500).end(); }
 });
@@ -312,7 +422,24 @@ const wss = new WebSocketServer({
     return isAllowedWsOrigin(req.headers.origin, req.headers.host);
   },
 });
-wss.on('connection', onConnection);
+wss.on('connection', (ws, req) => {
+  const receivedProtocolVersion = clientProtocolVersionFromUrl(req.url);
+  if (!isClientProtocolCompatible(receivedProtocolVersion)) {
+    const payload = JSON.stringify({
+      type: 'protocol.incompatible',
+      expectedProtocolVersion: CLIENT_PROTOCOL_VERSION,
+      receivedProtocolVersion: receivedProtocolVersion ?? null,
+      version: currentVersion,
+      buildId: CLIENT_BUILD_ID,
+    });
+    const close = () => {
+      try { ws.close(1008, 'unsupported CliDeck client protocol'); } catch {}
+    };
+    try { ws.send(payload, close); } catch { close(); }
+    return;
+  }
+  onConnection(ws);
+});
 
 sessions.startAutoSave(() => require('./handlers').getConfig());
 

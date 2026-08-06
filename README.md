@@ -18,7 +18,7 @@
   <img src="assets/clideck-themes.jpg" width="720" alt="clideck dashboard">
 </p>
 
-clideck is a local app for running multiple AI coding agents without juggling terminals. Claude Code, Codex, Gemini CLI, OpenCode, and Pi all live in one browser window with a chat-style sidebar, live status, message previews, session resume, and projects to keep things organized. an autopilot routes work between agents automatically, and an E2E encrypted mobile relay gives full control over all agents from a phone.
+clideck is a local app for running multiple AI coding agents without juggling terminals. Claude Code, Codex, Gemini CLI, Grok Build, OpenCode, and Pi all live in one browser window with a chat-style sidebar, live status, message previews, session resume, and projects to keep things organized. an autopilot routes work between agents automatically, and an E2E encrypted mobile relay gives full control over all agents from a phone.
 
 the main problem with using multiple agents is not starting them. it is managing them. terminals pile up, finished work gets missed, good sessions disappear after a restart. clideck does not sit in the middle rewriting prompts or output - it only watches lightweight status signals from each agent so it can tell which agent is working, which is idle, and which is waiting. everything runs locally, no data leaves your machine.
 
@@ -55,7 +55,7 @@ clideck --port 4001
 
 ## What makes it useful
 
-**Live status** - see which agent is working and which is waiting. Status detection for Claude Code, Codex, Gemini CLI, OpenCode, and Pi.
+**Live status** - see which agent is working and which is waiting. Status detection for Claude Code, Codex, Gemini CLI, Grok Build, OpenCode, and Pi.
 
 **Session resume** - close the lid, reopen tomorrow, pick up where things left off. each agent's session ID is captured automatically.
 
@@ -81,13 +81,21 @@ clideck ask "@website/Docs Writer" "Check if the docs mention the new CLI flags.
 
 If project or session names contain spaces, quote the whole target. The target is another LLM agent, not a fast CLI command, so callers should set both `clideck ask --timeout` and their own shell/tool timeout high enough. If the target session is busy, CliDeck does not queue the message; the caller gets a clear busy response and can retry later or ask another idle session.
 
+Agents can also create their own workers. `clideck spawn` starts a new session in an explicitly named project (same agent as the caller by default, `--preset` to pick another), optionally in a fresh git worktree, and can hand it an initial prompt:
+
+```bash
+clideck spawn --project myproject --name "Worker 1" --worktree --prompt "Fix DO-123. Report when done."
+```
+
+Spawn is fire-and-forget: it returns once the worker exists and the prompt is submitted, and the orchestrating agent collects results later with `clideck ask`.
+
 **Mobile remote** - the agents keep running on the local machine. status, prompts, history, and replies stay available from a phone while away. E2E encrypted, no account needed.
 
 **Native terminals** - each session opens into its real terminal. keys go straight to the agent, nothing sits in the middle.
 
 ## Supported agents
 
-Claude Code, Codex, Gemini CLI, OpenCode, Pi, Shell, and any other terminal tool.
+Claude Code, Codex, Gemini CLI, Grok Build, OpenCode, Pi, Shell, and any other terminal tool.
 
 ## Also
 

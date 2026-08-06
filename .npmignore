@@ -19,6 +19,7 @@ npm-debug.log*
 
 # Workplans
 workplan-*.txt
+LOCAL-MAINTENANCE.md
 
 # Local Codex skill experiments
 skills/autonomous-session/

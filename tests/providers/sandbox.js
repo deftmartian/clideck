@@ -164,10 +164,17 @@ class Sandbox {
     this.proc = null;
     if (!proc || proc.exitCode !== null) return Promise.resolve();
     return new Promise((resolve) => {
-      const done = () => resolve();
+      let killTimer;
+      const done = () => {
+        clearTimeout(killTimer);
+        resolve();
+      };
       proc.once('exit', done);
+      killTimer = setTimeout(() => {
+        try { proc.kill('SIGKILL'); } catch {}
+        resolve();
+      }, 8000);
       proc.kill(graceful ? 'SIGTERM' : 'SIGKILL');
-      setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} resolve(); }, 8000);
     });
   }
 

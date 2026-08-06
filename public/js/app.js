@@ -1,4 +1,4 @@
-import { state, send, flushQueuedSends } from './state.js';
+import { state, send, discardQueuedSends, flushQueuedSends } from './state.js';
 import { esc, binName, resolveIconPath, randomUUID } from './utils.js';
 import { addTerminal, removeTerminal, select, startRename, startProjectRename, setSessionTheme, openMenu, closeMenu, setStatus, updateMuteIndicator, updatePreview, markUnread, applyFilter, setTab, renderResumable, regroupSessions, toggleProjectCollapse, setSessionProject, estimateSize, restartComplete, positionMenu, addPill, updatePill, removePill, appendPillLog, setPillLogs, closePillLog, addTerminalInputAction, removeTerminalInputActionsForPlugin, trackTerminalInputData, copySessionName } from './terminals.js';
 import { renderSettings, updateVersionFooter } from './settings.js';
@@ -12,9 +12,160 @@ import './nav.js';
 import { initDrag, wasDragging } from './drag.js';
 import { registerHotkey, unregisterHotkey, unregisterAllForPlugin } from './hotkeys.js';
 import { renderPrompts } from './prompts.js';
+import {
+  diagnoseConnectionFailure,
+  noteServerVersion,
+  registerPwa,
+  requirePageReload,
+  showConnectionState,
+} from './pwa.js';
+import {
+  commitTerminalHistory,
+  commitTerminalReplay,
+  noteTerminalLiveOutput,
+  planTerminalHistory,
+  planTerminalReplay,
+} from './terminal-recovery.js';
 
+const CLIENT_PROTOCOL_VERSION = 2;
+const CLIENT_PROTOCOL_PARAM = 'clideckProtocol';
 const shownAgentHealthToasts = new Set();
-let reconnectReplaySkip = null;
+let reconnectTimer = null;
+let lastForegroundReconnectAt = 0;
+let connectionBlocked = false;
+const replayGapWarnings = new Set();
+const MAX_CLIPBOARD_IMAGE_BYTES = 25 * 1024 * 1024;
+
+function clipboardImageItems(event) {
+  const items = [...(event.clipboardData?.items || [])];
+  return items.filter(item => item.kind === 'file' && /^image\//i.test(item.type || ''));
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(reader.error || new Error('Failed to read clipboard image.'));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function sendImageFile(file, sessionId, mimeFallback = 'image/png') {
+  if (!file) throw new Error('Image was not available as a file.');
+  if (file.size > MAX_CLIPBOARD_IMAGE_BYTES) {
+    throw new Error(`Image is too large (${Math.ceil(file.size / 1024 / 1024)} MB).`);
+  }
+  const dataUrl = await readFileAsDataUrl(file);
+  const comma = dataUrl.indexOf(',');
+  if (comma < 0) throw new Error('Image could not be encoded.');
+  if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+    throw new Error('CliDeck reconnected before the image was ready. Attach it again.');
+  }
+  const sent = send({
+    type: 'clipboard.image',
+    id: sessionId,
+    mime: file.type || mimeFallback,
+    name: file.name || '',
+    data: dataUrl.slice(comma + 1),
+  });
+  if (!sent) throw new Error('Image could not be sent.');
+}
+
+async function sendClipboardImage(item, sessionId) {
+  const file = item.getAsFile?.();
+  if (!file) throw new Error('Clipboard image was not available as a file.');
+  await sendImageFile(file, sessionId, item.type || 'image/png');
+}
+
+async function handleClipboardImagePaste(event) {
+  const items = clipboardImageItems(event);
+  if (!items.length) return;
+
+  event.preventDefault();
+  event.stopPropagation();
+
+  const sessionId = state.active;
+  if (!sessionId || !state.ws || state.ws.readyState !== WebSocket.OPEN) {
+    showToast('No active session is ready for image paste.', { type: 'error', title: 'Image Paste', duration: 4000 });
+    return;
+  }
+
+  const count = items.length;
+  showToast(`Attaching ${count} image${count === 1 ? '' : 's'}...`, {
+    id: 'clipboard-image-paste', type: 'info', title: 'Image Paste', duration: 1200,
+  });
+
+  for (const item of items) {
+    try {
+      await sendClipboardImage(item, sessionId);
+    } catch (e) {
+      showToast(e.message || 'Image paste failed.', { type: 'error', title: 'Image Paste', duration: 5000 });
+    }
+  }
+}
+
+document.addEventListener('paste', handleClipboardImagePaste, true);
+
+const ATTACH_MAX_DIMENSION = 2048;
+const ATTACH_JPEG_QUALITY = 0.85;
+
+// Camera photos are 10+ MB and become a third larger as base64 on the
+// websocket; agents don't need more than ~2048px. Screenshots and small
+// images pass through untouched, GIFs keep their animation, and the
+// original wins whenever re-encoding does not actually shrink it.
+async function downscaleImageFile(file) {
+  if (!/^image\/(png|jpeg|webp)$/i.test(file.type || '')) return file;
+  let bitmap;
+  try { bitmap = await createImageBitmap(file); } catch { return file; }
+  const scale = ATTACH_MAX_DIMENSION / Math.max(bitmap.width, bitmap.height);
+  if (scale >= 1) { bitmap.close?.(); return file; }
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(bitmap.width * scale);
+  canvas.height = Math.round(bitmap.height * scale);
+  canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  bitmap.close?.();
+  const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', ATTACH_JPEG_QUALITY));
+  if (!blob || blob.size >= file.size) return file;
+  const name = `${(file.name || 'image').replace(/\.[a-z0-9]+$/i, '')}.jpg`;
+  return new File([blob], name, { type: 'image/jpeg' });
+}
+
+async function handleComposerAttach(files) {
+  const sessionId = state.active;
+  if (!sessionId || !state.ws || state.ws.readyState !== WebSocket.OPEN) {
+    showToast('No active session is ready for image attach.', { type: 'error', title: 'Image Attach', duration: 4000 });
+    return;
+  }
+  const count = files.length;
+  for (let index = 0; index < count; index += 1) {
+    showToast(count === 1 ? 'Attaching image…' : `Attaching image ${index + 1} of ${count}…`, {
+      id: 'clipboard-image-paste', type: 'info', title: 'Image Attach', duration: 4000,
+    });
+    try {
+      await sendImageFile(await downscaleImageFile(files[index]), sessionId);
+    } catch (e) {
+      showToast(e.message || 'Image attach failed.', { type: 'error', title: 'Image Attach', duration: 5000 });
+    }
+  }
+}
+
+{
+  const attachButton = document.getElementById('mobile-composer-attach');
+  const attachInput = document.getElementById('mobile-composer-file');
+  if (attachButton && attachInput) {
+    // Keep an open keyboard: focus must not move to the button (mousedown
+    // needs cancelling too for Firefox).
+    attachButton.addEventListener('pointerdown', event => event.preventDefault());
+    attachButton.addEventListener('mousedown', event => event.preventDefault());
+    attachButton.addEventListener('click', () => attachInput.click());
+    attachInput.addEventListener('change', async () => {
+      const files = [...(attachInput.files || [])];
+      attachInput.value = '';
+      if (files.length) await handleComposerAttach(files);
+    });
+  }
+
+}
 
 function normalizeTerminalHistoryText(text) {
   return `${text || ''}\n`.replace(/\r?\n/g, '\r\n');
@@ -45,21 +196,73 @@ function playAskDispatchSound(msg) {
   new Audio(`/fx/${sound}.mp3`).play().catch(() => {});
 }
 
+function clearReconnectTimer() {
+  if (reconnectTimer === null) return;
+  clearTimeout(reconnectTimer);
+  reconnectTimer = null;
+}
+
+function scheduleReconnect() {
+  if (connectionBlocked || reconnectTimer !== null) return;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connect();
+  }, 1000);
+}
+
+function stopConnectionUntilReload(ws, reason) {
+  connectionBlocked = true;
+  state.protocolReady = false;
+  state.protocolBlocked = true;
+  discardQueuedSends();
+  if (state.ws === ws) state.ws = null;
+  ws.onopen = null;
+  ws.onmessage = null;
+  ws.onclose = null;
+  ws.onerror = null;
+  try { ws.close(1000, reason); } catch {}
+}
+
+function blockIncompatibleConnection(ws) {
+  stopConnectionUntilReload(ws, 'client protocol mismatch');
+  setServerConnectionState('incompatible');
+}
+
+function requireTerminalRecoveryReload(ws, message) {
+  stopConnectionUntilReload(ws, 'terminal recovery requires reload');
+  requirePageReload(message);
+}
+
 function connect() {
+  if (connectionBlocked || state.protocolBlocked) return;
+  if (state.ws && (
+    state.ws.readyState === WebSocket.CONNECTING
+    || state.ws.readyState === WebSocket.OPEN
+  )) return;
+
+  clearReconnectTimer();
+  state.protocolReady = false;
+  setServerConnectionState('connecting');
   const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  state.ws = new WebSocket(`${wsProtocol}//${location.host}`);
+  const wsUrl = new URL(`${wsProtocol}//${location.host}`);
+  wsUrl.searchParams.set(CLIENT_PROTOCOL_PARAM, String(CLIENT_PROTOCOL_VERSION));
+  const ws = new WebSocket(wsUrl);
+  state.ws = ws;
 
-  state.ws.onopen = () => {
-    reconnectReplaySkip = new Set(state.terms.keys());
-    setServerConnectionState(true);
-    flushQueuedSends();
-    send({ type: 'remote.status', forceUpdate: true });
-  };
-
-  state.ws.onmessage = ({ data }) => {
+  ws.onmessage = ({ data }) => {
+    if (state.ws !== ws) return;
     const msg = JSON.parse(data);
     switch (msg.type) {
-      case 'config':
+      case 'config': {
+        const serverProtocol = Number(msg.config?.protocolVersion ?? CLIENT_PROTOCOL_VERSION);
+        if (serverProtocol !== CLIENT_PROTOCOL_VERSION) {
+          blockIncompatibleConnection(ws);
+          break;
+        }
+
+        const firstConfigForSocket = !state.protocolReady;
+        state.protocolReady = true;
+        noteServerVersion(msg.config?.version, msg.config?.buildId);
         state.cfg = msg.config;
         applyMode(state.cfg.colorMode || 'dark');
         regroupSessions();
@@ -67,6 +270,15 @@ function connect() {
         renderPrompts();
         refreshCreator();
         for (const [, entry] of state.terms) applyTheme(entry.term, entry.themeId);
+        setServerConnectionState('connected');
+        if (firstConfigForSocket) {
+          flushQueuedSends();
+          send({ type: 'remote.status', forceUpdate: true });
+        }
+        break;
+      }
+      case 'protocol.incompatible':
+        blockIncompatibleConnection(ws);
         break;
       case 'themes':
         state.themes = msg.themes;
@@ -113,10 +325,28 @@ function connect() {
         break;
       case 'output': {
         const entry = state.terms.get(msg.id);
-        if (msg.replay && reconnectReplaySkip?.has(msg.id) && entry) break;
-        if (entry && !entry.queue(msg.data)) entry.term.write(msg.data);
+        let output = msg.data;
+        if (msg.replay && entry) {
+          const recovery = planTerminalReplay(entry, output, msg);
+          output = recovery.data;
+          commitTerminalReplay(entry, recovery);
+          if (
+            (recovery.status === 'gap' || recovery.status === 'legacy-gap')
+            && !replayGapWarnings.has(msg.id)
+          ) {
+            replayGapWarnings.add(msg.id);
+            requireTerminalRecoveryReload(
+              ws,
+              'Terminal output changed beyond the recovery window. Reload to rebuild its recent view.',
+            );
+          }
+        }
+        if (entry && output) {
+          if (!entry.queue(output, !!msg.replay)) entry.writeChunk(output, !!msg.replay);
+        }
+        if (entry && !msg.replay) noteTerminalLiveOutput(entry, msg.data, msg);
         updatePreview(msg.id);
-        markUnread(msg.id);
+        if (output) markUnread(msg.id);
         break;
       }
       case 'closed':
@@ -146,9 +376,24 @@ function connect() {
       }
       case 'session.history': {
         const entry = state.terms.get(msg.id);
-        if (msg.replay && reconnectReplaySkip?.has(msg.id) && entry) break;
         const historyText = normalizeTerminalHistoryText(msg.text);
-        if (entry && !entry.queue(historyText)) entry.term.write(historyText);
+        const recovery = entry
+          ? planTerminalHistory(entry, historyText, msg)
+          : { status: 'current', data: '' };
+        if (entry) commitTerminalHistory(entry, recovery);
+        if (entry && recovery.data) {
+          if (!entry.queue(recovery.data, true)) entry.writeChunk(recovery.data, true);
+        }
+        if (
+          (recovery.status === 'gap' || recovery.status === 'legacy-gap')
+          && !replayGapWarnings.has(msg.id)
+        ) {
+          replayGapWarnings.add(msg.id);
+          requireTerminalRecoveryReload(
+            ws,
+            'Terminal history changed beyond the recovery window. Reload to rebuild its recent view.',
+          );
+        }
         updatePreview(msg.id);
         break;
       }
@@ -393,20 +638,61 @@ function connect() {
           finishRemotePreflight();
         }
         break;
+      case 'clipboard.image.saved':
+        showToast('Image attached to session.', { type: 'success', title: 'Image Paste', duration: 2200 });
+        break;
+      case 'clipboard.image.error':
+        showToast(msg.error || 'Image paste failed.', { type: 'error', title: 'Image Paste', duration: 5000 });
+        break;
       default:
         if (msg.type?.startsWith('plugin.')) dispatchPluginMessage(msg);
         break;
     }
   };
 
-  state.ws.onclose = () => {
-    setServerConnectionState(false);
-    setTimeout(connect, 1000);
+  ws.onclose = () => {
+    if (state.ws !== ws) return;
+    state.ws = null;
+    state.protocolReady = false;
+    setServerConnectionState(navigator.onLine ? 'reconnecting' : 'offline');
+    diagnoseConnectionFailure().then(result => {
+      if (!state.ws && !connectionBlocked) setServerConnectionState(result);
+    });
+    scheduleReconnect();
+  };
+
+  ws.onerror = () => {
+    if (state.ws !== ws || ws.readyState === WebSocket.CLOSED) return;
+    try { ws.close(); } catch {}
   };
 }
 
+function suspendSocket(reason) {
+  clearReconnectTimer();
+  const ws = state.ws;
+  state.ws = null;
+  state.protocolReady = false;
+  if (!ws) return;
+  ws.onopen = null;
+  ws.onmessage = null;
+  ws.onclose = null;
+  ws.onerror = null;
+  try { ws.close(1000, reason); } catch {}
+}
+
+function reconnectForegroundSocket() {
+  if (connectionBlocked || document.visibilityState === 'hidden') return;
+  const now = Date.now();
+  if (now - lastForegroundReconnectAt < 750) return;
+  lastForegroundReconnectAt = now;
+
+  suspendSocket('foreground resume');
+  setServerConnectionState(navigator.onLine ? 'reconnecting' : 'offline');
+  connect();
+}
+
 // Mobile sidebar
-const mobileQuery = window.matchMedia('(max-width: 960px)');
+const mobileQuery = window.matchMedia('(max-width: 960px), (hover: none) and (pointer: coarse)');
 function closeMobileSidebar() { document.body.classList.remove('mobile-nav-open'); }
 document.getElementById('mobile-nav-toggle').addEventListener('click', () => {
   if (mobileQuery.matches) document.body.classList.toggle('mobile-nav-open');
@@ -414,6 +700,64 @@ document.getElementById('mobile-nav-toggle').addEventListener('click', () => {
 document.getElementById('mobile-nav-close').addEventListener('click', closeMobileSidebar);
 document.getElementById('mobile-sidebar-backdrop').addEventListener('click', closeMobileSidebar);
 mobileQuery.addEventListener('change', (e) => { if (!e.matches) closeMobileSidebar(); });
+
+let backgroundedAt = 0;
+let windowBlurredAt = 0;
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') {
+    backgroundedAt = Date.now();
+    return;
+  }
+  closeMobileSidebar();
+  windowBlurredAt = 0;
+  if (!backgroundedAt || Date.now() - backgroundedAt >= 1000) reconnectForegroundSocket();
+  backgroundedAt = 0;
+});
+window.addEventListener('blur', () => {
+  if (document.visibilityState === 'visible') windowBlurredAt = Date.now();
+});
+window.addEventListener('focus', () => {
+  closeMobileSidebar();
+  const blurredAt = windowBlurredAt;
+  windowBlurredAt = 0;
+  if (
+    document.visibilityState === 'visible'
+    && blurredAt
+    && Date.now() - blurredAt >= 1000
+    && (!state.ws || state.ws.readyState !== WebSocket.OPEN)
+  ) {
+    reconnectForegroundSocket();
+  }
+});
+window.addEventListener('pageshow', (event) => {
+  closeMobileSidebar();
+  if (event.persisted) reconnectForegroundSocket();
+});
+window.addEventListener('online', () => {
+  setServerConnectionState('reconnecting');
+  reconnectForegroundSocket();
+});
+window.addEventListener('offline', () => {
+  suspendSocket('browser offline');
+  setServerConnectionState('offline');
+});
+window.addEventListener('clideck:retry-connection', reconnectForegroundSocket);
+if (screen.orientation?.addEventListener) {
+  screen.orientation.addEventListener('change', closeMobileSidebar);
+} else {
+  window.addEventListener('orientationchange', closeMobileSidebar);
+}
+
+// These controls move the user from the sidebar to content in the main pane.
+// Close the mobile drawer after their own click handlers have run.
+document.addEventListener('click', (e) => {
+  const promptRow = e.target.closest('#prompts-list .prompt-row');
+  const promptAction = e.target.closest('.prompt-edit, .prompt-del');
+  const mainDestination = e.target.closest(
+    '#rail-settings, #btn-remote, #settings-nav .settings-cat'
+  );
+  if (mainDestination || (promptRow && !promptAction)) closeMobileSidebar();
+});
 
 // Sidebar events
 const sessionList = document.getElementById('session-list');
@@ -456,8 +800,12 @@ sessionList.addEventListener('click', (e) => {
     return;
   }
 
-  // Pill row click — handled by pill's own listener
-  if (e.target.closest('.pill-row')) return;
+  // Pill row click is handled by the pill's own listener; it still navigates
+  // the main pane, so close the mobile drawer after selection.
+  if (e.target.closest('.pill-row')) {
+    closeMobileSidebar();
+    return;
+  }
 
   const item = e.target.closest('.group');
   if (!item) return;
@@ -491,11 +839,13 @@ sessionList.addEventListener('dblclick', (e) => {
   }
 });
 
-// Session delete from context menu — always confirm
+// Session delete from context menu — confirm unless the setting opts out
 sessionList.addEventListener('session-delete', async (e) => {
   const id = e.detail.id;
-  const ok = await confirmClose();
-  if (!ok) return;
+  if (state.cfg.confirmClose !== false) {
+    const ok = await confirmClose();
+    if (!ok) return;
+  }
   send({ type: 'close', id });
 });
 
@@ -1140,7 +1490,7 @@ function renderProjectActions() {
 let saveTimer = null;
 function flashSaveIndicator() {
   const el = document.getElementById('save-indicator');
-  if (!el || el.classList.contains('offline')) return;
+  if (!el || el.dataset.connectionState !== 'connected') return;
   clearTimeout(saveTimer);
   el.classList.add('saving');
   el.classList.remove('saved');
@@ -1151,19 +1501,31 @@ function flashSaveIndicator() {
   }, 1500);
 }
 
-function setServerConnectionState(online) {
+function setServerConnectionState(connectionState) {
   const el = document.getElementById('save-indicator');
   if (!el) return;
-  el.classList.toggle('offline', !online);
-  if (!online) {
+  const connected = connectionState === 'connected';
+  const tooltips = {
+    connecting: 'Connecting to CliDeck. Terminal input is not queued.',
+    reconnecting: 'Connection interrupted. Reconnecting; terminal input is not queued.',
+    offline: 'This phone is offline. Agents continue on the VM; terminal input is not queued.',
+    unavailable: 'CliDeck server unavailable. Agents may still be running; terminal input is not queued.',
+    auth: 'Your sign-in expired. Sign in again to reconnect.',
+    incompatible: 'CliDeck was updated. Reload before sending commands.',
+  };
+  el.dataset.connectionState = connectionState;
+  el.classList.toggle('offline', !connected);
+  if (!connected) {
     clearTimeout(saveTimer);
     el.classList.remove('saving', 'saved');
   }
-  el.title = online
+  el.title = connected
     ? 'Sessions saved'
     : '';
-  if (online) el.removeAttribute('data-tooltip');
-  else el.dataset.tooltip = 'CliDeck server offline. Changes you make here will run when the server reconnects.';
+  if (connected) el.removeAttribute('data-tooltip');
+  else el.dataset.tooltip = tooltips[connectionState] || tooltips.reconnecting;
+  el.setAttribute('aria-label', connected ? 'Connected to CliDeck' : el.dataset.tooltip);
+  showConnectionState(connectionState);
 }
 
 function initSessionScrollbarVisibility() {
@@ -1567,3 +1929,4 @@ document.getElementById('remote-disconnect2').addEventListener('click', doRemote
 initDrag();
 initSessionScrollbarVisibility();
 connect();
+registerPwa();

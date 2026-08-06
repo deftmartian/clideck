@@ -3,6 +3,7 @@
 // (for resume) and detect whether telemetry is configured (setup prompts).
 
 const { updateClaudeSessionToken } = require('./claude-session');
+const { markCodexUserPrompt } = require('./resume-readiness');
 
 const activity = new Map(); // sessionId → has received events
 const lastEvent = new Map(); // sessionId → last OTEL event name (+ kind)
@@ -209,14 +210,21 @@ function handleLogs(req, res) {
           codexOutputDone.delete(resolvedId);
           cancelCodexMenuPoll(resolvedId);
         }
-
         // Codex: use conversation.id (maps to thread-id in notify hook)
         const agentSessionId = serviceName === 'codex_cli_rs'
           ? attrs['conversation.id']
           : (attrs['session.id'] || attrs['conversation.id']);
+        const priorSessionId = sess?.sessionToken;
+        const wasResumeReady = sess?._resumeReady === true;
+        if (markCodexUserPrompt(sess, serviceName, eventName, agentSessionId)) {
+          if (!wasResumeReady || priorSessionId !== agentSessionId) {
+            console.log(`Telemetry: Codex resume ready with session ID ${agentSessionId} for ${agent} (${resolvedId.slice(0, 8)})`);
+          }
+          continue;
+        }
         if (agentSessionId && sess) {
           if (serviceName === 'claude-code') {
-            updateClaudeSessionToken(sess, agentSessionId, resolvedId, { label: 'Telemetry' });
+            updateClaudeSessionToken(sess, agentSessionId, resolvedId, { label: 'Telemetry', origin: 'telemetry' });
             continue;
           }
           // Prefer interactive session ID (Gemini sends non-interactive init events first)

@@ -98,22 +98,28 @@ function renderPresetButtons() {
 }
 
 function sortedPresets() {
-  const missing = [...state.presets]
-    .filter(p => isPresetMissing(p) || isPresetOutdated(p))
+  const presetEntries = [...state.presets]
+    .filter(p => !findCommandForPreset(p) || isPresetMissing(p) || isPresetOutdated(p))
     .map(p => ({ type: 'preset', preset: p }));
   const commands = (state.cfg.commands || [])
     .filter(c => c.enabled !== false)
     .map(c => ({ type: 'command', command: c, preset: presetForCommand(c) || { name: c.label, icon: c.icon || 'terminal', isAgent: !!c.isAgent } }));
   const seenShell = new Set();
-  const shell = commands.filter(item => {
-    if (item.command.isAgent) return false;
-    const isBuiltinShell = item.command.presetId === 'shell' || item.preset?.presetId === 'shell';
-    if (!isBuiltinShell) return true;
-    if (seenShell.has('shell')) return false;
-    seenShell.add('shell');
-    return true;
-  });
-  const agents = [...missing, ...commands.filter(item => item.command.isAgent)];
+  const shell = [
+    ...presetEntries.filter(item => !item.preset.isAgent),
+    ...commands.filter(item => {
+      if (item.command.isAgent) return false;
+      const isBuiltinShell = item.command.presetId === 'shell' || item.preset?.presetId === 'shell';
+      if (!isBuiltinShell) return true;
+      if (seenShell.has('shell')) return false;
+      seenShell.add('shell');
+      return true;
+    }),
+  ];
+  const agents = [
+    ...presetEntries.filter(item => item.preset.isAgent),
+    ...commands.filter(item => item.command.isAgent),
+  ];
   const lastId = localStorage.getItem(MRU_KEY);
   if (lastId) {
     const idx = agents.findIndex(item => (item.command?.id || item.preset?.presetId) === lastId);

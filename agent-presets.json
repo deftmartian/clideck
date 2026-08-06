@@ -104,6 +104,24 @@
     }
   },
   {
+    "presetId": "grok",
+    "name": "Grok Build",
+    "icon": "/img/grok.svg",
+    "command": "grok",
+    "minVersion": "0.2.100",
+    "installCmd": "curl -fsSL https://x.ai/cli/install.sh | bash",
+    "isAgent": true,
+    "canResume": true,
+    "resumeCommand": "grok --resume {{sessionId}}",
+    "sessionIdPattern": null,
+    "outputMarker": null,
+    "telemetryConfigPath": "~/.grok/hooks/clideck.json",
+    "telemetrySetup": "Required for working/idle status, resume, Autopilot, notifications, and mobile remote.\n\nCliDeck will install lifecycle hooks to ~/.grok/hooks/clideck.json (SessionStart, UserPromptSubmit, Stop, SessionEnd, PreToolUse).",
+    "telemetryAutoSetup": {
+      "label": "Patch Grok"
+    }
+  },
+  {
     "presetId": "antigravity",
     "name": "Antigravity",
     "icon": "/img/antigravity.svg",

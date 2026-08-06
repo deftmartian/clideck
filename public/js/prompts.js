@@ -1,6 +1,7 @@
 // Prompt Library — manage saved prompts and // trigger autocomplete
 import { state, send } from './state.js';
 import { esc, randomUUID } from './utils.js';
+import { getViewportRect, onViewportChange } from './viewport.js';
 
 // --- Panel rendering ---
 
@@ -299,6 +300,8 @@ let active = false;      // autocomplete is open
 let dropdown = null;
 let selectedIdx = 0;
 let mode = 'prompt';     // 'prompt' (//) or 'agent' (@@) — set when the menu opens
+let dropdownPositionRaf = 0;
+let removeViewportListener = null;
 
 // Per-mode config: match source, how each row renders, and what completion does.
 const AUTOCOMPLETE_MODES = {
@@ -322,6 +325,43 @@ function getMatches() {
   return AUTOCOMPLETE_MODES[mode].matches();
 }
 
+function positionDropdown() {
+  if (!dropdown?.isConnected) return;
+  const viewport = getViewportRect();
+  const viewportLeft = viewport.left;
+  const viewportTop = viewport.top;
+  const viewportWidth = viewport.width;
+  const viewportHeight = viewport.height;
+  const viewportRight = viewport.right;
+  const viewportBottom = viewport.bottom;
+  const gap = 8;
+
+  dropdown.style.width = Math.max(0, Math.min(340, viewportWidth - gap * 2)) + 'px';
+  dropdown.style.maxHeight = Math.max(0, viewportHeight - gap * 2) + 'px';
+
+  const sidebar = document.getElementById('sidebar');
+  const sidebarRect = sidebar ? sidebar.getBoundingClientRect() : { right: 60 };
+  const width = dropdown.offsetWidth;
+  const height = dropdown.offsetHeight;
+  let left = sidebarRect.right + 32;
+  let top = viewportBottom - height - gap;
+
+  if (left + width > viewportRight - gap) left = viewportRight - width - gap;
+  if (left < viewportLeft + gap) left = viewportLeft + gap;
+  if (top < viewportTop + gap) top = viewportTop + gap;
+
+  dropdown.style.left = left + 'px';
+  dropdown.style.top = top + 'px';
+}
+
+function scheduleDropdownPosition() {
+  if (!dropdown || dropdownPositionRaf) return;
+  dropdownPositionRaf = requestAnimationFrame(() => {
+    dropdownPositionRaf = 0;
+    positionDropdown();
+  });
+}
+
 function showDropdown() {
   closeDropdown();
   const matches = getMatches();
@@ -330,21 +370,12 @@ function showDropdown() {
   dropdown.className = 'prompt-autocomplete';
   renderDropdownContent(matches);
 
-  // Position: append hidden, measure, bottom-anchor to viewport
-  const sidebar = document.getElementById('sidebar');
-  const sidebarRect = sidebar ? sidebar.getBoundingClientRect() : { right: 60 };
-  const gap = 8;
+  // Append hidden, measure, then anchor inside the visible viewport.
   dropdown.style.visibility = 'hidden';
   document.body.appendChild(dropdown);
-  const h = dropdown.offsetHeight;
-  let left = sidebarRect.right + 32;
-  let top = window.innerHeight - h - gap;
-  if (left + 340 > window.innerWidth - gap) left = window.innerWidth - 340 - gap;
-  if (left < gap) left = gap;
-  if (top < gap) top = gap;
-  dropdown.style.left = left + 'px';
-  dropdown.style.top = top + 'px';
+  positionDropdown();
   dropdown.style.visibility = '';
+  removeViewportListener = onViewportChange(scheduleDropdownPosition);
 
   // Only activate input capture after dropdown is successfully mounted
   active = true;
@@ -394,12 +425,19 @@ function updateDropdown() {
   const matches = getMatches();
   selectedIdx = Math.min(selectedIdx, Math.max(0, matches.length - 1));
   renderDropdownContent(matches);
+  positionDropdown();
 }
 
 export function closeDropdown() {
   active = false;
   buffer = '';
   selectedIdx = 0;
+  if (dropdownPositionRaf) {
+    cancelAnimationFrame(dropdownPositionRaf);
+    dropdownPositionRaf = 0;
+  }
+  removeViewportListener?.();
+  removeViewportListener = null;
   if (dropdown) { dropdown.remove(); dropdown = null; }
 }
 

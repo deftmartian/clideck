@@ -1,5 +1,7 @@
 export const state = {
   ws: null,
+  protocolReady: false,
+  protocolBlocked: false,
   terms: new Map(),
   active: null,
   cfg: { commands: [], defaultPath: '', defaultTheme: 'catppuccin-mocha' },
@@ -36,7 +38,10 @@ const QUEUEABLE_TYPES = new Set([
 ]);
 
 function canSendNow() {
-  return state.ws && state.ws.readyState === WebSocket.OPEN;
+  return !state.protocolBlocked
+    && state.protocolReady
+    && state.ws
+    && state.ws.readyState === WebSocket.OPEN;
 }
 
 function enqueue(msg) {
@@ -52,9 +57,14 @@ function enqueue(msg) {
 }
 
 export function send(msg) {
+  if (state.protocolBlocked) return false;
   if (!canSendNow()) return enqueue(msg);
   state.ws.send(JSON.stringify(msg));
   return true;
+}
+
+export function discardQueuedSends() {
+  queuedMessages.length = 0;
 }
 
 export function flushQueuedSends() {

@@ -4,8 +4,14 @@ function updateClaudeSessionToken(sess, token, clideckId, options = {}) {
   const next = String(token || '').trim();
   if (!sess || sess.presetId !== 'claude-code' || !CLAUDE_SESSION_ID_RE.test(next)) return false;
   if (sess.sessionToken === next) return false;
+  // Hooks report the session ID synchronously from the running process.
+  // Telemetry batches can arrive out of order and must not thrash a
+  // hook-established token back to a stale ID.
+  const origin = options.origin || 'telemetry';
+  if (origin !== 'hook' && sess.sessionTokenOrigin === 'hook') return false;
   const prev = sess.sessionToken;
   sess.sessionToken = next;
+  sess.sessionTokenOrigin = origin;
 
   const label = options.label || 'Claude';
   const source = options.source ? ` via ${options.source}` : '';

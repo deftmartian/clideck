@@ -8,7 +8,10 @@ const themes = require('./themes');
 const presets = JSON.parse(readFileSync(join(__dirname, 'agent-presets.json'), 'utf8'));
 const { listDirs, binName, defaultShell } = require('./utils');
 const { presetForCommand: findPresetForCommand, menuStartsWork } = require('./preset-utils');
-const { PORT } = require('./runtime');
+const { PORT, localUrl } = require('./runtime');
+const { saveClipboardImage, bracketedPaste } = require('./clipboard-images');
+const { CLIENT_PROTOCOL_VERSION } = require('./protocol');
+const { CLIENT_BUILD_ID } = require('./client-build');
 for (const p of presets) if (p.presetId === 'shell') p.command = defaultShell;
 function isPresetEnabled(preset) {
   if (!preset?.enabledIfEnv) return true;
@@ -98,7 +101,26 @@ function configRootFor(preset, cmd) {
   if (preset?.presetId === 'codex') return expandHomePath(env.CODEX_HOME) || join(os.homedir(), '.codex');
   if (preset?.presetId === 'gemini-cli') return join(expandHomePath(env.GEMINI_CLI_HOME) || os.homedir(), '.gemini');
   if (preset?.presetId === 'pi') return expandHomePath(env.PI_CODING_AGENT_DIR) || join(os.homedir(), '.pi', 'agent');
+  if (preset?.presetId === 'grok') return expandHomePath(env.GROK_HOME) || join(os.homedir(), '.grok');
   return os.homedir();
+}
+
+function grokHooksPath(preset, cmd) {
+  return join(configRootFor(preset, cmd), 'hooks', 'clideck.json');
+}
+
+function grokHooksHealthy(preset, cmd) {
+  try {
+    const s = JSON.parse(readFileSync(grokHooksPath(preset, cmd), 'utf8'));
+    const hooks = s.hooks || {};
+    return hasExistingHook(hooks.UserPromptSubmit, 'grok-hook.js', 'start')
+      && hasExistingHook(hooks.Stop, 'grok-hook.js', 'stop')
+      && hasExistingHook(hooks.SessionStart, 'grok-hook.js', 'session-start')
+      && hasExistingHook(hooks.SessionEnd, 'grok-hook.js', 'session-end')
+      && hasExistingHook(hooks.PreToolUse, 'grok-hook.js', 'menu');
+  } catch {
+    return false;
+  }
 }
 
 function checkRemoteUpdate(ws, force = false) {
@@ -274,6 +296,15 @@ function detectTelemetryConfig(c) {
                   && hasExistingHook(hooks.BeforeTool, 'gemini-hook.js', 'menu');
           if (!detected) reason = 'Needs re-patch';
         } catch {}
+      } else if (preset.presetId === 'grok') {
+        try {
+          repairAllowed = repairAllowed || hasAnyExistingHook(
+            JSON.parse(readFileSync(grokHooksPath(preset, cmd), 'utf8')).hooks || {},
+            'grok-hook.js',
+          );
+        } catch {}
+        detected = grokHooksHealthy(preset, cmd);
+        if (!detected) reason = 'Needs re-patch';
       } else if (preset.presetId === 'opencode') {
         detected = opencodeBridgeLooksHealthy();
         if (!detected) reason = 'Needs re-patch';
@@ -310,7 +341,14 @@ function detectTelemetryConfig(c) {
 const appVersion = require('./package.json').version;
 
 function configForClient() {
-  return { ...cfg, commands: filterClientCommands(cfg.commands), pluginsDir: plugins.PLUGINS_DIR, version: appVersion };
+  return {
+    ...cfg,
+    commands: filterClientCommands(cfg.commands),
+    pluginsDir: plugins.PLUGINS_DIR,
+    version: appVersion,
+    buildId: CLIENT_BUILD_ID,
+    protocolVersion: CLIENT_PROTOCOL_VERSION,
+  };
 }
 
 function remoteCliEnv() {
@@ -346,6 +384,22 @@ function onConnection(ws) {
       case 'session.resume':  sessions.resume(msg, ws, cfg); break;
       case 'session.restart': console.log('[handler] session.restart', msg.id); sessions.restart(msg, ws, cfg); break;
       case 'input':                sessions.input(msg); break;
+      case 'clipboard.image': {
+        const result = sessions.getSessions().has(String(msg.id || ''))
+          ? saveClipboardImage(msg)
+          : { success: false, error: 'No active session selected for image paste.' };
+        if (!result.success) {
+          ws.send(JSON.stringify({ type: 'clipboard.image.error', id: msg.id, error: result.error }));
+          break;
+        }
+        // Codex treats a pasted image path as an image attachment. Bracketed
+        // paste keeps this on the same path as ordinary terminal paste.
+        sessions.input({ id: msg.id, data: bracketedPaste(result.path) });
+        ws.send(JSON.stringify({
+          type: 'clipboard.image.saved', id: msg.id, path: result.path, bytes: result.bytes,
+        }));
+        break;
+      }
       case 'session.statusReport':
         if (sessions.getSessions().has(msg.id)) {
           sessions.broadcast({ type: 'session.status', id: msg.id, working: !!msg.working, source: 'client' });
@@ -426,13 +480,13 @@ function onConnection(ws) {
       case 'config.update':
         delete msg.config.pluginsDir;
         delete msg.config.version;
+        delete msg.config.buildId;
+        delete msg.config.protocolVersion;
         // The client only ever sees the filtered command list — keep the
-        // commands hidden from it so a settings save can't delete them.
-        if (msg.config.commands) {
-          const visibleIds = new Set(filterClientCommands(cfg.commands).map(c => c.id));
-          msg.config.commands.push(...cfg.commands.filter(c => !visibleIds.has(c.id)));
-        }
-        cfg = { ...cfg, ...msg.config };
+        // hidden commands and shipped presets so a stale reconnect cannot
+        // overwrite Codex/Shell with an empty command list.
+        const visibleIds = new Set(filterClientCommands(cfg.commands).map(c => c.id));
+        cfg = config.mergeClientUpdate(cfg, msg.config, visibleIds);
         detectTelemetryConfig(cfg);
         config.save(cfg);
         plugins.notifyConfig(cfg);
@@ -895,6 +949,45 @@ function applyTelemetryConfig(preset, cmd = null) {
       return { success: true, message: `Installed Pi extension to ${dest}` };
     }
 
+    if (preset.presetId === 'grok') {
+      const configPath = grokHooksPath(preset, cmd);
+      let settings = {};
+      if (existsSync(configPath)) {
+        try { settings = JSON.parse(readFileSync(configPath, 'utf8')); } catch {}
+      }
+      const hooks = settings.hooks || {};
+      const helperPath = join(__dirname, 'bin', 'grok-hook.js').replace(/\\/g, '/');
+      const nodePath = process.execPath.replace(/\\/g, '/');
+      const hookCmd = (route) => `"${nodePath}" "${helperPath}" ${port} ${route}`;
+      const clideckHook = (route) => ({
+        hooks: [{ type: 'command', command: hookCmd(route), timeout: 5 }],
+      });
+      const has = (arr, route) => arr?.some(h => h.hooks?.some(x => x.command === hookCmd(route)));
+      if (has(hooks.UserPromptSubmit, 'start')
+          && has(hooks.Stop, 'stop')
+          && has(hooks.SessionStart, 'session-start')
+          && has(hooks.SessionEnd, 'session-end')
+          && has(hooks.PreToolUse, 'menu')) {
+        return { success: true, message: 'Already configured' };
+      }
+      const stripOld = (arr) => (arr || []).filter(h => !h.hooks?.some(x =>
+        x.command?.includes('grok-hook.js') || x.url?.includes('/hook/grok/')));
+      hooks.UserPromptSubmit = stripOld(hooks.UserPromptSubmit);
+      hooks.Stop = stripOld(hooks.Stop);
+      hooks.SessionStart = stripOld(hooks.SessionStart);
+      hooks.SessionEnd = stripOld(hooks.SessionEnd);
+      hooks.PreToolUse = stripOld(hooks.PreToolUse);
+      if (!has(hooks.UserPromptSubmit, 'start')) hooks.UserPromptSubmit = [...(hooks.UserPromptSubmit || []), clideckHook('start')];
+      if (!has(hooks.Stop, 'stop')) hooks.Stop = [...(hooks.Stop || []), clideckHook('stop')];
+      if (!has(hooks.SessionStart, 'session-start')) hooks.SessionStart = [...(hooks.SessionStart || []), clideckHook('session-start')];
+      if (!has(hooks.SessionEnd, 'session-end')) hooks.SessionEnd = [...(hooks.SessionEnd || []), clideckHook('session-end')];
+      if (!has(hooks.PreToolUse, 'menu')) hooks.PreToolUse = [...(hooks.PreToolUse || []), clideckHook('menu')];
+      settings.hooks = hooks;
+      mkdirSync(dirname(configPath), { recursive: true });
+      writeFileSync(configPath, JSON.stringify(settings, null, 2) + '\n');
+      return { success: true, message: `Added CliDeck hooks to ${configPath}` };
+    }
+
     return { success: false, message: `No auto-setup for ${preset.presetId}` };
   } catch (err) {
     return { success: false, message: err.message };
@@ -968,6 +1061,29 @@ function removeTelemetryConfig(preset, cmd = null) {
     if (preset.presetId === 'pi') {
       try { unlinkSync(piBridgePath(cmd)); } catch {}
       return { success: true, message: 'Removed Pi extension' };
+    }
+
+    if (preset.presetId === 'grok') {
+      const configPath = grokHooksPath(preset, cmd);
+      if (!existsSync(configPath)) return { success: true, message: 'No config file to clean' };
+      let settings = {};
+      try { settings = JSON.parse(readFileSync(configPath, 'utf8')); } catch {}
+      if (!settings.hooks) return { success: true, message: 'No hooks to remove' };
+      for (const event of ['UserPromptSubmit', 'Stop', 'SessionStart', 'SessionEnd', 'PreToolUse']) {
+        const arr = settings.hooks[event];
+        if (!arr) continue;
+        settings.hooks[event] = arr.filter(h => !h.hooks?.some(x =>
+          x.command?.includes('grok-hook.js') || x.url?.includes('/hook/grok/')));
+        if (!settings.hooks[event].length) delete settings.hooks[event];
+      }
+      if (!Object.keys(settings.hooks).length) {
+        try { unlinkSync(configPath); } catch {
+          writeFileSync(configPath, '{}\n');
+        }
+      } else {
+        writeFileSync(configPath, JSON.stringify(settings, null, 2) + '\n');
+      }
+      return { success: true, message: `Removed CliDeck hooks from ${configPath}` };
     }
 
     return { success: false, message: `No removal logic for ${preset.presetId}` };

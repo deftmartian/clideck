@@ -9,6 +9,13 @@ const route = String(process.argv[3] || '').replace(/[^a-z]/g, '');
 const clideckId = process.env.CLIDECK_SESSION_ID || '';
 if (!port || !route) process.exit(0);
 
+let endpoint;
+try {
+  endpoint = new URL(process.env.CLIDECK_URL || `http://localhost:${port}`);
+} catch {
+  endpoint = new URL(`http://localhost:${port}`);
+}
+
 let body = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', chunk => {
@@ -22,8 +29,8 @@ process.stdin.on('end', () => {
   payload.source = 'hook';
 
   const req = http.request({
-    hostname: 'localhost',
-    port,
+    hostname: endpoint.hostname,
+    port: endpoint.port || port,
     path: `/hook/codex/${route}`,
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

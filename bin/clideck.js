@@ -11,6 +11,7 @@ function usage() {
     '  clideck agents [--json] [--all]',
     '  clideck ask status [--json] [--all]',
     '  clideck ask --session <name-or-id> --message <text> [--timeout 10m]',
+    '  clideck spawn --project <name|id> [--name <name>] [--prompt <text>] [--worktree]',
     '',
     'Options:',
     '  --host <host>     Host to bind. Default: 127.0.0.1. Use 0.0.0.0 for LAN access.',
@@ -28,6 +29,13 @@ function usage() {
     '    Use from inside a CliDeck session when one agent needs an answer from another session.',
     '    This lets agents communicate with each other without manual copy/paste through the user.',
     '    Use `clideck ask status` first when the agent only needs idle/busy state.',
+    '',
+    '  clideck spawn',
+    '    Use from inside a CliDeck session to create a new peer agent session and optionally',
+    '    hand it an initial prompt. --project is required (--no-project for none); cwd',
+    '    defaults to the project path. Add --worktree to run the worker in a fresh git',
+    '    worktree for conflict-free parallel work. Fire-and-forget: check on workers later',
+    '    with `clideck ask`. Run `clideck spawn --help` for the exact contract.',
     '',
     'Ask behavior:',
     '  Unscoped target lookup is limited to the same project as the caller session.',
@@ -57,7 +65,7 @@ function usage() {
     '',
     'Notes for agents:',
     '  CliDeck supports agent-to-agent communication: discover teammates with `clideck agents`,',
-    '  then ask them directly with `clideck ask`.',
+    '  then ask them directly with `clideck ask`, or create new workers with `clideck spawn`.',
     '  Run `clideck agents` to discover available same-project sessions.',
     '  Run `clideck ask status` to check who is idle or busy before dispatching work.',
     '  Run `clideck agents --all` before a cross-project ask.',
@@ -70,6 +78,8 @@ if (args[0] === 'agents') {
   require('../clideck-agents-cli').run(args.slice(1));
 } else if (args[0] === 'ask') {
   require('../clideck-ask-cli').run(args.slice(1));
+} else if (args[0] === 'spawn') {
+  require('../clideck-spawn-cli').run(args.slice(1));
 } else if (args.includes('--help') || args.includes('-h')) {
   console.log(usage());
 } else if (args.includes('--version') || args.includes('-v')) {

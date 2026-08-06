@@ -9,6 +9,13 @@ const raw = process.argv[process.argv.length - 1];
 const clideckId = process.env.CLIDECK_SESSION_ID || '';
 if (!port || !raw || raw === String(port)) process.exit(0);
 
+let endpoint;
+try {
+  endpoint = new URL(process.env.CLIDECK_URL || `http://localhost:${port}`);
+} catch {
+  endpoint = new URL(`http://localhost:${port}`);
+}
+
 let payload = raw;
 try {
   const parsed = JSON.parse(raw);
@@ -17,7 +24,7 @@ try {
 
 const http = require('http');
 const req = http.request({
-  hostname: 'localhost', port, path: '/hook/codex/stop',
+  hostname: endpoint.hostname, port: endpoint.port || port, path: '/hook/codex/stop',
   method: 'POST', headers: { 'Content-Type': 'application/json' },
   timeout: 2000,
 });

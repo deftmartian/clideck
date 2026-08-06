@@ -8,6 +8,7 @@ Use clideck ask "<target>" "<message>" --timeout 10m to ask an idle peer agent.
 Use the exact @project/session address from clideck agents --all for cross-project asks.
 Keep clideck ask running until it exits; the answer returns on stdout.
 If a target is busy, the request is not queued. Try later or ask another idle agent.
+Use clideck spawn --project "<project>" --name "<name>" --prompt "<task>" to create a new peer agent session (--project is required; add --worktree for an isolated git worktree). Spawn is fire-and-forget: collect results later with clideck ask.
 If CLIDECK_SESSION_ID is missing, ignore this guide.`;
 
 function commandStart(parts) {
@@ -25,6 +26,13 @@ function hasCodexDeveloperInstructions(parts) {
   });
 }
 
+function hasGrokRules(parts) {
+  return parts.some((part) => {
+    if (part === '--rules') return true;
+    return String(part || '').startsWith('--rules=');
+  });
+}
+
 function withCliDeckGuide(parts, presetId) {
   const next = [...parts];
   const idx = commandStart(next);
@@ -35,6 +43,13 @@ function withCliDeckGuide(parts, presetId) {
   } else if (presetId === 'codex') {
     if (hasCodexDeveloperInstructions(next)) return next;
     next.splice(idx + 1, 0, '-c', `developer_instructions=${JSON.stringify(GUIDE)}`);
+  } else if (presetId === 'grok') {
+    // Grok appends --rules to the system prompt. Skip when the user already
+    // supplies rules or a full system-prompt override.
+    if (hasGrokRules(next) || next.includes('--system-prompt-override') || next.includes('--system-prompt')) {
+      return next;
+    }
+    next.splice(idx + 1, 0, '--rules', GUIDE);
   }
 
   return next;

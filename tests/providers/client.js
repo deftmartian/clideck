@@ -4,6 +4,7 @@
 
 const WebSocket = require('ws');
 const { stripAnsi } = require('../../ansi-utils');
+const { CLIENT_PROTOCOL_PARAM, CLIENT_PROTOCOL_VERSION } = require('../../protocol');
 
 class Client {
   constructor(port) {
@@ -20,7 +21,9 @@ class Client {
 
   connect(timeoutMs = 10000) {
     return new Promise((resolve, reject) => {
-      this.ws = new WebSocket(`ws://127.0.0.1:${this.port}`);
+      const url = new URL(`ws://127.0.0.1:${this.port}`);
+      url.searchParams.set(CLIENT_PROTOCOL_PARAM, String(CLIENT_PROTOCOL_VERSION));
+      this.ws = new WebSocket(url);
       const timer = setTimeout(() => reject(new Error('ws connect timeout')), timeoutMs);
       this.ws.on('open', () => { clearTimeout(timer); resolve(); });
       this.ws.on('error', (e) => { clearTimeout(timer); reject(e); });

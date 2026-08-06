@@ -13,6 +13,7 @@ const { presetForCommand } = require('./preset-utils');
 const { lineageOf } = require('./lineage');
 const { stripAnsi } = require('./ansi-utils');
 const { withCliDeckGuide } = require('./agent-session-guide');
+const { initialResumeReady, hasUsableResumeToken } = require('./resume-readiness');
 
 const THEMES = require('./themes');
 const MAX_BUFFER = 2 * 1024 * 1024;
@@ -116,9 +117,25 @@ function spawnSession(id, cmd, parts, cwd, name, themeId, commandId, savedToken,
   }
 
   const sessionIdRe = cmd.sessionIdPattern ? new RegExp(cmd.sessionIdPattern, 'i') : null;
-  const session = { name, themeId, commandId, cwd, pty: term, chunks: [], chunksSize: 0, sessionToken: savedToken || null, projectId: projectId || null, presetId: preset?.presetId || 'shell', working: undefined, _finalizeOnCapture: !!preset?.finalizeOnCapture };
+  const session = {
+    name,
+    themeId,
+    commandId,
+    cwd,
+    pty: term,
+    chunks: [],
+    chunksSize: 0,
+    outputGeneration: crypto.randomUUID(),
+    outputSeq: 0,
+    sessionToken: savedToken || null,
+    _resumeReady: initialResumeReady(preset?.presetId || 'shell', savedToken),
+    projectId: projectId || null,
+    presetId: preset?.presetId || 'shell',
+    working: undefined,
+    _finalizeOnCapture: !!preset?.finalizeOnCapture,
+  };
   sessions.set(id, session);
-  transcript.setFinalizeOnIdle(id, ['claude-code', 'codex', 'gemini-cli', 'opencode', 'pi', 'clideck-agent'].includes(lineageOf(session.presetId)) ? session.presetId : null);
+  transcript.setFinalizeOnIdle(id, ['claude-code', 'codex', 'gemini-cli', 'opencode', 'pi', 'clideck-agent', 'grok'].includes(lineageOf(session.presetId)) ? session.presetId : null);
 
   // Always watch telemetry-backed agents so OTLP fallback matching can attach
   // early events to this session even when the agent omits clideck.session_id.
@@ -127,10 +144,17 @@ function spawnSession(id, cmd, parts, cwd, name, themeId, commandId, savedToken,
   if (preset?.bridge === 'opencode') opencodeBridge.watchSession(id, cwd);
 
   term.onData((data) => {
+    const startSeq = session.outputSeq;
+    session.outputSeq += data.length;
     session.chunks.push(data);
     session.chunksSize += data.length;
     while (session.chunksSize > MAX_BUFFER && session.chunks.length > 1) {
       session.chunksSize -= session.chunks.shift().length;
+    }
+    if (session.chunksSize > MAX_BUFFER) {
+      const overflow = session.chunksSize - MAX_BUFFER;
+      session.chunks[0] = session.chunks[0].slice(overflow);
+      session.chunksSize = MAX_BUFFER;
     }
     // Capture session ID from output
     if (sessionIdRe && !session.sessionToken) {
@@ -144,7 +168,14 @@ function spawnSession(id, cmd, parts, cwd, name, themeId, commandId, savedToken,
     activity.trackOut(id, data);
     transcript.trackOutput(id, data);
     plugins.notifyOutput(id, data);
-    broadcast({ type: 'output', id, data });
+    broadcast({
+      type: 'output',
+      id,
+      data,
+      generation: session.outputGeneration,
+      startSeq,
+      endSeq: session.outputSeq,
+    });
   });
 
   term.onExit(() => {
@@ -156,8 +187,9 @@ function spawnSession(id, cmd, parts, cwd, name, themeId, commandId, savedToken,
     opencodeBridge.clear(id);
     piBridge.clear(id);
     plugins.clearStatus(id);
-    // If resumable and token captured, move to resumable list (keep transcript for search)
-    if (!s.ephemeral && cmd.canResume && cmd.resumeCommand && s.sessionToken) {
+    const canPersist = !s.ephemeral && cmd.canResume && cmd.resumeCommand && hasUsableResumeToken(s);
+    // If resumable and a durable token was captured, move to resumable list.
+    if (canPersist) {
       resumable.push({
         id, name: s.name, commandId: s.commandId, presetId: s.presetId || 'shell', cwd: s.cwd,
         themeId: s.themeId, sessionToken: s.sessionToken, projectId: s.projectId, muted: !!s.muted,
@@ -170,7 +202,7 @@ function spawnSession(id, cmd, parts, cwd, name, themeId, commandId, savedToken,
     }
     sessions.delete(id);
     broadcast({ type: 'closed', id });
-    if (!s.ephemeral && cmd.canResume && s.sessionToken) {
+    if (canPersist) {
       broadcast({ type: 'sessions.resumable', list: getResumable() });
     }
   });
@@ -274,6 +306,7 @@ function resume(msg, ws, cfg) {
   }
 
   // Build the resume command, substituting {{sessionId}} if present
+  const cwd = resolveValidDir(saved.cwd || cfg.defaultPath);
   let resumeStr = cmd.resumeCommand;
   if (resumeStr.includes('{{sessionId}}')) {
     if (!saved.sessionToken) {
@@ -284,7 +317,6 @@ function resume(msg, ws, cfg) {
   }
 
   const parts = parseCommand(resumeStr);
-  const cwd = resolveValidDir(saved.cwd || cfg.defaultPath);
   const id = saved.id;
 
   const err = spawnSession(id, cmd, parts, cwd, saved.name, saved.themeId || saved.profileId || 'default', saved.commandId, saved.sessionToken, saved.projectId);
@@ -392,7 +424,7 @@ function restart(msg, ws, cfg) {
   if (!cmd) { ws.send(JSON.stringify({ type: 'session.restarted', id, error: 'command missing' })); return; }
 
   const themeId = msg.themeId || s.themeId;
-  const canResume = cmd.canResume && cmd.resumeCommand && s.sessionToken;
+  const canResume = cmd.canResume && cmd.resumeCommand && hasUsableResumeToken(s);
 
   let parts;
   if (canResume) {
@@ -401,7 +433,7 @@ function restart(msg, ws, cfg) {
     parts = parseCommand(cmd.command);
   }
 
-  const savedToken = s.sessionToken;
+  const savedToken = canResume ? s.sessionToken : null;
   const { name, cwd, commandId, projectId, muted, lastPreview, lastActivityAt } = s;
 
   activity.clear(id);
@@ -434,6 +466,9 @@ function list() {
   return [...sessions].map(([id, s]) => ({
     id, name: s.name, themeId: s.themeId, commandId: s.commandId, presetId: s.presetId || 'shell', projectId: s.projectId, muted: !!s.muted,
     working: !!s.working,
+    outputGeneration: s.outputGeneration,
+    outputSeq: s.outputSeq,
+    bufferStartSeq: s.outputSeq - s.chunksSize,
     // Last preview text for sidebar display on reconnect
     lastPreview: s.lastPreview || '', lastActivityAt: s.lastActivityAt || null,
     menu: s._menuKey ? JSON.parse(s._menuKey) : undefined,
@@ -475,13 +510,28 @@ function sendBuffers(ws) {
   for (const [id, s] of sessions) {
     if (s.chunks.length) {
       const data = s.chunks.join('');
-      ws.send(JSON.stringify({ type: 'output', id, data, replay: true }));
+      ws.send(JSON.stringify({
+        type: 'output',
+        id,
+        data,
+        replay: true,
+        generation: s.outputGeneration,
+        startSeq: s.outputSeq - data.length,
+        endSeq: s.outputSeq,
+      }));
       continue;
     }
     if (['claude-code', 'codex', 'gemini-cli', 'opencode', 'pi', 'clideck-agent'].includes(lineageOf(s.presetId)) && !s.working) {
       const text = transcript.getReplayText(id, s.presetId);
       if (text) {
-        ws.send(JSON.stringify({ type: 'session.history', id, text, replay: true }));
+        ws.send(JSON.stringify({
+          type: 'session.history',
+          id,
+          text,
+          replay: true,
+          generation: s.outputGeneration,
+          snapshotId: crypto.createHash('sha256').update(text).digest('hex').slice(0, 16),
+        }));
         continue;
       }
     }
@@ -493,6 +543,7 @@ function sendBuffers(ws) {
 function saveSessions(cfg) {
   // Only persist live sessions that are actually resumable
   let skippedNoToken = 0;
+  let skippedNotReady = 0;
   const live = [...sessions]
     .filter(([, s]) => {
       if (s.ephemeral) return false;
@@ -501,6 +552,10 @@ function saveSessions(cfg) {
       // If resume needs a session ID, we must have captured one
       if (cmd.resumeCommand.includes('{{sessionId}}') && !s.sessionToken) {
         skippedNoToken++;
+        return false;
+      }
+      if (cmd.resumeCommand.includes('{{sessionId}}') && !hasUsableResumeToken(s)) {
+        skippedNotReady++;
         return false;
       }
       return true;
@@ -521,7 +576,11 @@ function saveSessions(cfg) {
   if (skippedNoToken > 0 && skippedNoToken !== lastSkippedNoTokenWarn) {
     console.warn(`Skipped ${skippedNoToken} resumable session(s): no session token captured`);
   }
+  if (skippedNotReady > 0 && skippedNotReady !== lastSkippedNotReadyWarn) {
+    console.warn(`Skipped ${skippedNotReady} resumable session(s): token is not durable yet`);
+  }
   lastSkippedNoTokenWarn = skippedNoToken || null;
+  lastSkippedNotReadyWarn = skippedNotReady || null;
   return data.length;
 }
 
@@ -536,6 +595,7 @@ function loadSessions() {
 let autoSaveInterval = null;
 let getConfigFn = null;
 let lastSkippedNoTokenWarn = null;
+let lastSkippedNotReadyWarn = null;
 
 function startAutoSave(getConfig) {
   getConfigFn = getConfig;

@@ -4,6 +4,11 @@ import { resolveTheme, resolveAccent, applyTheme } from './profiles.js';
 import { attachToTerminal, registerHotkey } from './hotkeys.js';
 import { closeDropdown } from './prompts.js';
 import { showToast } from './toast.js';
+import { syncViewport } from './viewport.js';
+import { createMobileComposer, loadStoredDraft } from './mobile-composer.js';
+import { createMobileSelection } from './mobile-selection.js';
+import { createMobileTouchScroll } from './mobile-touch-scroll.js';
+
 function isLightBg(themeId) {
   const bg = resolveTheme(themeId)?.background;
   if (!bg || bg[0] !== '#') return false;
@@ -91,6 +96,65 @@ const JUMP_LATEST_VISIBLE_CLASS = 'is-visible';
 const terminalInputActions = new Map();
 let terminalInputActionSeq = 0;
 let terminalInputActionsEl = null;
+const mobileComposer = createMobileComposer({
+  getActiveId: () => state.active,
+  getEntry: id => state.terms.get(id),
+  getEntries: () => state.terms.values(),
+  sendInput: (id, data) => send({ type: 'input', id, data }),
+  onControlInput: trackTerminalInputData,
+  onDraftChange: refreshTerminalInputActions,
+  onCommitted: (id) => {
+    closeDropdown();
+    resetAppWheelScroll(state.terms.get(id));
+    refreshTerminalInputActions();
+  },
+  onSendFailure: () => showToast('The terminal is not connected. Your draft was kept.', {
+    title: 'Mobile input', type: 'error', duration: 3500,
+  }),
+});
+const mobileTouchScroll = createMobileTouchScroll({
+  isSelectionActive: () => mobileSelection.isActive(),
+  sendInput: (id, data) => send({ type: 'input', id, data }),
+  onDragClaim: () => mobileComposer.blurInput(),
+  onTap: (_id, term, screen, touch) => activateTerminalLinkAtPoint(term, screen, touch),
+  // Holding a still finger on the terminal arms Select mode without a trip
+  // through the drawer.
+  onLongPress: () => mobileSelection.activate(),
+  onAppScroll: reportAppWheelScroll,
+});
+const mobileSelection = createMobileSelection({
+  getActiveId: () => state.active,
+  getEntry: id => state.terms.get(id),
+  available: () => mobileComposer.available(),
+  writeText: writeClipboardText,
+  onActivate: () => {
+    mobileComposer.closeTools();
+    mobileComposer.blurInput();
+  },
+  onModeChange: refreshTerminalInputActions,
+  onCopied: length => showToast(`${length} character${length === 1 ? '' : 's'} copied.`, {
+    title: 'Terminal selection', duration: 1800,
+  }),
+  onCopyError: () => showToast('Could not copy the terminal selection.', {
+    title: 'Copy failed', type: 'error', duration: 3000,
+  }),
+});
+
+function recoverActiveTerminalSurface() {
+  syncViewport();
+  requestAnimationFrame(() => {
+    const entry = state.active ? state.terms.get(state.active) : null;
+    if (!entry?.term) return;
+    try { entry.term.clearTextureAtlas?.(); } catch {}
+    try { entry.term.refresh(0, Math.max(0, entry.term.rows - 1)); } catch {}
+    entry.requestFit?.();
+  });
+}
+
+window.addEventListener('pageshow', recoverActiveTerminalSurface, { passive: true });
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') recoverActiveTerminalSurface();
+});
 
 function ensureTerminalInputActionsEl() {
   if (terminalInputActionsEl?.isConnected) return terminalInputActionsEl;
@@ -114,7 +178,8 @@ function refreshTerminalInputActions() {
     action.button.classList.toggle('is-busy', !!action.busy);
     if (visible) visibleCount++;
   }
-  el.classList.toggle('is-hidden', !entry || visibleCount === 0 || !!entry.inputHasText || !!entry.scrolledUp);
+  el.classList.toggle('is-hidden', !entry || visibleCount === 0 || !!entry.inputHasText
+    || !!entry.composerDraft || !!entry.scrolledUp || mobileSelection.isActive());
 }
 
 function setTerminalInputAction(action, patch) {
@@ -183,11 +248,15 @@ export function trackTerminalInputData(id, data) {
   const entry = state.terms.get(id);
   if (!entry || !data || data.startsWith('\x1b')) return;
   let length = entry.inputLength || 0;
+  let submitted = false;
   for (const ch of data) {
-    if (ch === '\r' || ch === '\n' || ch === '\x03' || ch === '\x15') length = 0;
+    if (ch === '\r' || ch === '\n' || ch === '\x03' || ch === '\x15') { length = 0; submitted = true; }
     else if (ch === '\x7f' || ch === '\b') length = Math.max(0, length - 1);
     else if (ch >= ' ') length += 1;
   }
+  // Submitting input makes mouse-tracking TUIs follow their newest output
+  // again, so the app-scrollback row count is stale.
+  if (submitted) resetAppWheelScroll(entry);
   entry.inputLength = length;
   const hasText = length > 0;
   if (entry.inputHasText !== hasText) {
@@ -212,6 +281,25 @@ function cleanUrlMatch(text, index) {
 function openTerminalLink(url) {
   const win = window.open(url, '_blank', 'noopener,noreferrer');
   if (win) win.opener = null;
+}
+
+function activateTerminalLinkAtPoint(term, screen, touch) {
+  // xterm's linkifier discovers both OSC 8 and registered plain-text links on
+  // mousemove, then activates the discovered link across mousedown/mouseup.
+  // Touch browsers do not reliably synthesize that sequence, so replay the tap
+  // through xterm instead of maintaining a second URL parser here.
+  const common = {
+    bubbles: true,
+    cancelable: true,
+    clientX: touch.clientX,
+    clientY: touch.clientY,
+    button: 0,
+  };
+  screen.dispatchEvent(new MouseEvent('mousemove', { ...common, buttons: 0 }));
+  if (!screen.classList.contains('xterm-cursor-pointer')) return false;
+  screen.dispatchEvent(new MouseEvent('mousedown', { ...common, buttons: 1 }));
+  screen.dispatchEvent(new MouseEvent('mouseup', { ...common, buttons: 0 }));
+  return true;
 }
 
 function addLinkProvider(term) {
@@ -244,7 +332,43 @@ function shouldShowJumpLatest(term) {
   return (maxViewportY - buf.viewportY) > JUMP_LATEST_THRESHOLD_ROWS;
 }
 
-function createJumpLatestButton(term) {
+// Mouse-tracking TUIs own their scrollback: touch drags become wheel reports
+// and xterm's viewport never moves, so shouldShowJumpLatest is blind there.
+// Count the reported rows instead — wheel-up rows accumulate as "away from
+// latest", wheel-down rows unwind them.
+const APP_SCROLL_ROWS_CAP = 2000;
+function reportAppWheelScroll(id, steps) {
+  const entry = state.terms.get(id);
+  if (!entry) return;
+  const rows = Math.min(APP_SCROLL_ROWS_CAP, Math.max(0, (entry.appScrollRows || 0) - steps));
+  if (rows === (entry.appScrollRows || 0)) return;
+  entry.appScrollRows = rows;
+  entry.refreshJumpLatest?.();
+}
+
+function resetAppWheelScroll(entry) {
+  if (!entry?.appScrollRows) return;
+  entry.appScrollRows = 0;
+  entry.refreshJumpLatest?.();
+}
+
+// Desktop wheel over a mouse-tracking session: xterm reroutes the wheel to
+// the app as SGR reports through term.onData instead of moving its viewport,
+// so count them exactly like the touch layer's drag reports. 64 scrolls
+// toward earlier content (accumulates), 65 toward latest (unwinds).
+const WHEEL_REPORT_RE = /\x1b\[<6([45]);\d+;\d+M/g;
+function countWheelReports(id, data) {
+  if (!data || !data.includes('\x1b[<6')) return;
+  let up = 0;
+  let down = 0;
+  for (const match of data.matchAll(WHEEL_REPORT_RE)) {
+    if (match[1] === '4') up += 1;
+    else down += 1;
+  }
+  if (up || down) reportAppWheelScroll(id, down - up);
+}
+
+function createJumpLatestButton(id, term) {
   const btn = document.createElement('button');
   btn.type = 'button';
   btn.className = 'tmx-jump-latest';
@@ -262,17 +386,53 @@ function createJumpLatestButton(term) {
     event.preventDefault();
     event.stopPropagation();
     btn.classList.add('settling');
+    mobileTouchScroll.interrupt(id);
+    const entry = state.terms.get(id);
+    const appRows = entry?.appScrollRows || 0;
+    if (appRows > 0 && term.modes.mouseTrackingMode !== 'none') {
+      // Unwind the app's own scrollback with the same wheel reports the drag
+      // sent; extra reports clamp at the bottom, so overshoot is harmless.
+      const col = Math.max(1, Math.ceil(term.cols / 2));
+      const row = Math.max(1, Math.ceil(term.rows / 2));
+      send({ type: 'input', id, data: `\u001b[<65;${col};${row}M`.repeat(appRows + JUMP_LATEST_THRESHOLD_ROWS) });
+    }
+    resetAppWheelScroll(entry);
     term.scrollToBottom();
-    term.focus();
+    if (!mobileComposer.ownsInput(entry)) term.focus();
     setTimeout(() => btn.classList.remove('settling'), 260);
   });
   return btn;
 }
 
+function enableAcceleratedRenderer(term, el) {
+  el.dataset.renderer = 'dom';
+  const WebglAddonCtor = globalThis.WebglAddon?.WebglAddon;
+  if (!WebglAddonCtor) {
+    el.dataset.rendererFallback = 'addon-unavailable';
+    return;
+  }
+
+  let addon;
+  try {
+    addon = new WebglAddonCtor();
+    addon.onContextLoss(() => {
+      addon.dispose();
+      el.dataset.renderer = 'dom';
+    });
+    term.loadAddon(addon);
+    el.dataset.renderer = 'webgl';
+    delete el.dataset.rendererFallback;
+  } catch {
+    try { addon?.dispose(); } catch {}
+    el.dataset.rendererFallback = 'webgl-unavailable';
+  }
+}
+
 function updateJumpLatestButton(id, term, btn) {
-  const scrolledUp = shouldShowJumpLatest(term);
-  btn.classList.toggle(JUMP_LATEST_VISIBLE_CLASS, scrolledUp);
   const entry = state.terms.get(id);
+  const scrolledUp = shouldShowJumpLatest(term)
+    || (entry?.appScrollRows || 0) > JUMP_LATEST_THRESHOLD_ROWS;
+  btn.classList.toggle(JUMP_LATEST_VISIBLE_CLASS, scrolledUp);
   if (!entry || entry.scrolledUp === scrolledUp) return;
   entry.scrolledUp = scrolledUp;
   if (id === state.active) refreshTerminalInputActions();
@@ -630,12 +790,18 @@ export function addTerminal(id, name, themeId, commandId, projectId, muted, last
     cursorBlink: true,
     scrollback: 10000,
     smoothScrollDuration: 180,
+    linkHandler: {
+      activate: (_event, url) => openTerminalLink(url),
+    },
   });
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
   addLinkProvider(term);
   term.onData(data => {
+    const entry = state.terms.get(id);
+    if (mobileComposer.ownsInput(entry)) return;
     trackTerminalInputData(id, data);
+    countWheelReports(id, data);
     send({ type: 'input', id, data });
   });
 
@@ -721,12 +887,24 @@ export function addTerminal(id, name, themeId, commandId, projectId, muted, last
   }, 0);
 
   term.open(el);
-  const jumpLatestBtn = createJumpLatestButton(term);
+  mobileComposer.syncTerminalInput({ term, mobileDirect: false });
+  mobileSelection.attach(id, term, el);
+  mobileTouchScroll.attach(id, term, el);
+  enableAcceleratedRenderer(term, el);
+  const jumpLatestBtn = createJumpLatestButton(id, term);
   el.appendChild(jumpLatestBtn);
   const refreshJumpLatest = () => updateJumpLatestButton(id, term, jumpLatestBtn);
   term.onScroll(refreshJumpLatest);
   term.onWriteParsed(refreshJumpLatest);
-  attachToTerminal(term, presetId);
+  // Replayed writes are bracketed so parser-driven side effects (OSC 52
+  // clipboard copies) can tell replayed scrollback from live output.
+  const replayState = { count: 0 };
+  const writeChunk = (data, replay) => {
+    if (!replay) { term.write(data); return; }
+    replayState.count += 1;
+    term.write(data, () => { replayState.count -= 1; });
+  };
+  attachToTerminal(term, presetId, () => replayState.count > 0);
   const onContextMenu = (e) => {
     if (e.shiftKey) return;
     e.preventDefault();
@@ -742,8 +920,21 @@ export function addTerminal(id, name, themeId, commandId, projectId, muted, last
   function doFit() {
     const dims = fit.proposeDimensions();
     if (!dims || (dims.cols === term.cols && dims.rows === term.rows)) return;
+    const oldBuffer = term.buffer.active;
+    const distanceFromBottom = Math.max(0, oldBuffer.baseY - oldBuffer.viewportY);
     fit.fit();
+    // A visual viewport resize (usually the Android keyboard) changes row
+    // count. Preserve the user's scrollback distance instead of letting xterm
+    // occasionally reset the viewport to the start of the buffer.
+    if (distanceFromBottom > 0) {
+      const newBuffer = term.buffer.active;
+      term.scrollToLine(Math.max(0, newBuffer.baseY - distanceFromBottom));
+    }
     send({ type: 'resize', id, cols: term.cols, rows: term.rows });
+  }
+  function requestFit() {
+    if (fitRaf) return;
+    fitRaf = requestAnimationFrame(() => { fitRaf = 0; doFit(); });
   }
   const ro = new ResizeObserver(() => {
     if (!el.offsetWidth) return;
@@ -751,14 +942,13 @@ export function addTerminal(id, name, themeId, commandId, projectId, muted, last
       fitted = true;
       fit.fit();
       send({ type: 'resize', id, cols: term.cols, rows: term.rows });
-      for (const chunk of pending) term.write(chunk);
+      for (const chunk of pending) writeChunk(chunk.data, chunk.replay);
       pending = null;
       updatePreview(id);
       refreshJumpLatest();
       return;
     }
-    if (fitRaf) return;
-    fitRaf = requestAnimationFrame(() => { fitRaf = 0; doFit(); });
+    requestFit();
   });
   ro.observe(el);
   // Safety: if RO hasn't fired within 500ms, let visible terminals proceed.
@@ -774,14 +964,14 @@ export function addTerminal(id, name, themeId, commandId, projectId, muted, last
         return;
       }
       fitted = true;
-      for (const chunk of pending) term.write(chunk);
+      for (const chunk of pending) writeChunk(chunk.data, chunk.replay);
       pending = null;
       updatePreview(id);
       refreshJumpLatest();
     }
   }, 500);
   const cancelFitRaf = () => { if (fitRaf) { cancelAnimationFrame(fitRaf); fitRaf = 0; } };
-  state.terms.set(id, { term, fit, el, ro, cancelFitRaf, onContextMenu, inputLength: 0, inputHasText: false, scrolledUp: false, themeId, commandId, presetId: presetId || null, projectId: projectId || null, muted: !!muted, working: false, workStartedAt: null, stopBounce, queue: (data) => { if (!fitted) { pending.push(data); return true; } return false; }, lastActivityAt: Date.now(), unread: false, lastPreviewText: lastPreview || '', searchText: '' });
+  state.terms.set(id, { term, fit, el, ro, requestFit, cancelFitRaf, onContextMenu, inputLength: 0, inputHasText: false, composerDraft: loadStoredDraft(id), mobileDirect: false, scrolledUp: false, appScrollRows: 0, refreshJumpLatest, themeId, commandId, presetId: presetId || null, projectId: projectId || null, muted: !!muted, working: false, workStartedAt: null, stopBounce, queue: (data, replay = false) => { if (!fitted) { pending.push({ data, replay }); return true; } return false; }, writeChunk, lastActivityAt: Date.now(), unread: false, lastPreviewText: lastPreview || '', searchText: '' });
   if (working) setStatus(id, true);
   else renderSessionStatus(state.terms.get(id), statusEl, false); // idle sessions get the zᶻZ icon now, not a blank slot until their first transition
   refreshTerminalInputActions();
@@ -799,6 +989,8 @@ export function removeTerminal(id) {
   entry.cancelFitRaf?.();
   entry.ro?.disconnect();
   entry.el.removeEventListener?.('contextmenu', entry.onContextMenu);
+  mobileSelection.detach(id);
+  mobileTouchScroll.detach(id);
   entry.term.dispose();
   entry.el.remove();
   state.terms.delete(id);
@@ -809,6 +1001,8 @@ export function removeTerminal(id) {
     if (next) select(next);
     else {
       state.active = null;
+      mobileComposer.refresh();
+      mobileSelection.refresh();
       refreshTerminalInputActions();
       document.getElementById('empty').style.display = 'flex';
       document.getElementById('terminals').style.pointerEvents = 'none';
@@ -833,6 +1027,7 @@ export function select(id) {
   const entry = state.terms.get(id);
   if (entry) {
     entry.el.classList.add('active');
+    entry.requestFit?.();
     if (entry.unread) {
       entry.unread = false;
       const dot = document.querySelector(`.group[data-id="${id}"] .unread-dot`);
@@ -845,9 +1040,12 @@ export function select(id) {
       }
     }
     entry.term.scrollToBottom();
-    if (!document.querySelector('[contenteditable="true"]')) entry.term.focus();
+    if (!document.querySelector('[contenteditable="true"]')
+      && !mobileComposer.ownsInput(entry)) entry.term.focus();
   }
   state.active = id;
+  mobileComposer.refresh();
+  mobileSelection.refresh();
   refreshTerminalInputActions();
   localStorage.setItem('clideck.activeSessionId', id);
 }
