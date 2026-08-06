@@ -564,6 +564,12 @@ async function verifyMobileSelection(page, browserName, client, sessionId, cdp =
 }
 
 async function verifyBottomActionClearance(page, browserName) {
+  await waitFor(() => page.evaluate(() => {
+    const actions = document.querySelector('.terminal-input-actions');
+    const mic = document.querySelector('.terminal-input-action[data-plugin-id="voice-input"]');
+    return !!mic && !actions?.classList.contains('is-hidden')
+      && getComputedStyle(mic).display !== 'none';
+  }), `${browserName} real voice-input action visible`);
   // Compare on-screen positions, not computed `bottom` values: the two
   // controls resolve `bottom` against different containing blocks
   // (.terminal-input-actions against #terminals, .tmx-jump-latest against the
@@ -571,8 +577,9 @@ async function verifyBottomActionClearance(page, browserName) {
   // the jump button far from the mic slot it is meant to take over.
   const geometry = await page.evaluate(() => {
     const inputActions = document.querySelector('.terminal-input-actions');
+    const mic = document.querySelector('.terminal-input-action[data-plugin-id="voice-input"]');
     const jumpLatest = document.querySelector('.term-wrap.active .tmx-jump-latest');
-    if (!inputActions || !jumpLatest) return null;
+    if (!inputActions || !mic || !jumpLatest) return null;
     // Measure both controls where they sit when shown: their hidden states
     // carry translateY/scale transforms that would skew the rects (the mic
     // container is hidden-empty when no plugin buttons are registered).
@@ -585,6 +592,7 @@ async function verifyBottomActionClearance(page, browserName) {
     const jumpRect = jumpLatest.getBoundingClientRect();
     const result = {
       inputBottom: viewportHeight - inputActions.getBoundingClientRect().bottom,
+      micBottom: viewportHeight - mic.getBoundingClientRect().bottom,
       jumpBottom: viewportHeight - jumpRect.bottom,
       jumpClipped: jumpRect.top < wrap.top - 1 || jumpRect.bottom > wrap.bottom + 1,
     };
@@ -599,6 +607,7 @@ async function verifyBottomActionClearance(page, browserName) {
   }
   if (
     geometry.inputBottom < 64
+    || Math.abs(geometry.inputBottom - geometry.micBottom) > 1
     || geometry.jumpBottom < 64
     || Math.abs(geometry.inputBottom - geometry.jumpBottom) > 2
     || geometry.jumpClipped
@@ -964,11 +973,14 @@ async function verifyTouchScrollDuringStream(page, cdp, client, sessionId) {
 
 // Grok-style session: the app owns the mouse (SGR tracking on the alternate
 // screen), so a touch drag must reach it as wheel reports, not die silently.
+// This fake app deliberately moves three rows up but only one row down per
+// report, proving that jump recovery is conservative rather than a fragile 1:1
+// estimate of an application's private scroll position.
 async function verifyTouchScrollWithMouseTracking(page, cdp, client, sessionId) {
   client.send({
     type: 'input',
     id: sessionId,
-    data: `node -e "process.stdout.write('\\u001b[?1049h\\u001b[?1000h\\u001b[?1002h\\u001b[?1003h\\u001b[?1006h');process.stdin.setRawMode(true);process.stdin.resume();process.stdin.on('data',d=>{const s=d.toString('latin1');if(s.includes('q')){process.stdout.write('\\u001b[?1006l\\u001b[?1003l\\u001b[?1002l\\u001b[?1000l\\u001b[?1049l');process.exit(0)}process.stdout.write('RX['+s.replace(/\\u001b/g,'E')+']')})"\r`,
+    data: `node -e "let p=0;process.stdout.write('\\u001b[?1049h\\u001b[?1000h\\u001b[?1002h\\u001b[?1003h\\u001b[?1006hAPP_POS_0');process.stdin.setRawMode(true);process.stdin.resume();process.stdin.on('data',d=>{const s=d.toString('latin1');if(s.includes('q')){process.stdout.write('\\u001b[?1006l\\u001b[?1003l\\u001b[?1002l\\u001b[?1000l\\u001b[?1049l');process.exit(0)}const before=p;let m,n=0;const wheel=/\\u001b\\[<6([45]);\\d+;\\d+M/g;while((m=wheel.exec(s))){p=m[1]==='4'?Math.min(999,p+3):Math.max(0,p-1);n++}if(n){const bottom=before>0&&p===0?' AT_BOTTOM_AFTER_JUMP':'';process.stdout.write('\\u001b[2J\\u001b[HAPP_POS_'+p+bottom+' RX['+s.replace(/\\u001b/g,'E')+']')}})"\r`,
   });
   await waitFor(async () => page.evaluate(async id => {
     const { state } = await import('/js/state.js');
@@ -977,6 +989,8 @@ async function verifyTouchScrollWithMouseTracking(page, cdp, client, sessionId) 
   const sawWheelReport = waitForOutput(client, sessionId, 'E[<64;', 'Chromium touch wheel report');
   await dispatchTouchDrag(page, cdp);
   await sawWheelReport;
+  await waitFor(async () => /APP_POS_[1-9]\d*/.test(await terminalText(page, sessionId)),
+    'Chromium asymmetric app moved away from latest');
   const echoed = await terminalText(page, sessionId);
   if (echoed.includes('NaN')) {
     throw new Error('Chromium touch wheel reports carried NaN coordinates');
@@ -986,17 +1000,48 @@ async function verifyTouchScrollWithMouseTracking(page, cdp, client, sessionId) 
   await waitFor(async () => page.evaluate(async id => {
     const { state } = await import('/js/state.js');
     const btn = document.querySelector('.term-wrap.active .tmx-jump-latest');
-    return (state.terms.get(id)?.appScrollRows || 0) > 0
-      && btn?.classList.contains('is-visible');
+    const actions = document.querySelector('.terminal-input-actions');
+    const mic = document.querySelector('.terminal-input-action[data-plugin-id="voice-input"]');
+    return (state.terms.get(id)?.appScrollDebt || 0) > 0
+      && btn?.classList.contains('is-visible')
+      && !!mic
+      && actions?.classList.contains('is-hidden');
   }, sessionId), 'Chromium mouse-mode jump button visible');
+  // Prompt submission is not proof that an arbitrary TUI returned to latest.
+  // Let momentum settle, submit harmless input, and require the conservative
+  // debt and mic-to-jump handoff to remain intact.
+  await new Promise(resolve => setTimeout(resolve, 1300));
+  const debtBeforeCommit = await page.evaluate(async id => {
+    const { state } = await import('/js/state.js');
+    return state.terms.get(id)?.appScrollDebt || 0;
+  }, sessionId);
+  await page.locator('#mobile-composer-text').fill('x');
+  await page.locator('#mobile-composer-send').click();
+  await waitFor(async () => page.evaluate(async ({ id, expected }) => {
+    const { state } = await import('/js/state.js');
+    const btn = document.querySelector('.term-wrap.active .tmx-jump-latest');
+    const actions = document.querySelector('.terminal-input-actions');
+    return document.getElementById('mobile-composer-text')?.value === ''
+      && state.terms.get(id)?.appScrollDebt === expected
+      && btn?.classList.contains('is-visible')
+      && actions?.classList.contains('is-hidden');
+  }, { id: sessionId, expected: debtBeforeCommit }),
+  'Chromium prompt commit preserved uncertain app scrollback');
   const sawUnwind = waitForOutput(client, sessionId, 'E[<65;', 'Chromium jump unwind wheel reports');
+  const reachedBottom = waitForOutput(client, sessionId, 'AT_BOTTOM_AFTER_JUMP',
+    'Chromium conservative jump reached app bottom');
   await page.evaluate(() => document.querySelector('.term-wrap.active .tmx-jump-latest').click());
   await sawUnwind;
+  await reachedBottom;
   await waitFor(async () => page.evaluate(async id => {
     const { state } = await import('/js/state.js');
     const btn = document.querySelector('.term-wrap.active .tmx-jump-latest');
-    return (state.terms.get(id)?.appScrollRows || 0) === 0
-      && !btn?.classList.contains('is-visible');
+    const actions = document.querySelector('.terminal-input-actions');
+    const mic = document.querySelector('.terminal-input-action[data-plugin-id="voice-input"]');
+    return (state.terms.get(id)?.appScrollDebt || 0) === 0
+      && !btn?.classList.contains('is-visible')
+      && !!mic
+      && !actions?.classList.contains('is-hidden');
   }, sessionId), 'Chromium mouse-mode jump button hidden after click');
   const focus = await page.evaluate(async id => {
     const { state } = await import('/js/state.js');
@@ -1258,6 +1303,13 @@ async function run(browserName) {
   if (!engine) throw new Error(`Unsupported browser: ${browserName}`);
 
   const sandbox = new Sandbox();
+  // Exercise the real floating microphone action in the isolated browser run.
+  // No API key or audio backend is used; only the enabled client control loads.
+  sandbox.seedConfig([], {
+    pluginSettings: {
+      'voice-input': { enabled: true, backend: 'openai' },
+    },
+  });
   const client = new Client();
   let browser;
   try {

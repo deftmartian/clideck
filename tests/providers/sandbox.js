@@ -96,7 +96,7 @@ class Sandbox {
   // needs `codex --dangerously-bypass-hook-trust` and CODEX_HOME). migrate()
   // keeps non-default command strings intact and backfills the rest, then adds
   // any presets not listed here. No-op if a config already exists.
-  seedConfig(overrides = []) {
+  seedConfig(overrides = [], extraConfig = {}) {
     mkdirSync(this.dataDir(), { recursive: true });
     const cfgPath = join(this.dataDir(), 'config.json');
     if (existsSync(cfgPath)) return;
@@ -108,7 +108,11 @@ class Sandbox {
       ...(o.resumeCommand ? { resumeCommand: o.resumeCommand } : {}),
       ...(o.env ? { env: o.env } : {}),
     }));
-    writeFileSync(cfgPath, JSON.stringify({ defaultPath: join(this.tmpHome, 'work'), commands }, null, 2));
+    writeFileSync(cfgPath, JSON.stringify({
+      defaultPath: join(this.tmpHome, 'work'),
+      commands,
+      ...extraConfig,
+    }, null, 2));
   }
 
   dataDir() { return join(this.tmpHome, '.clideck'); }

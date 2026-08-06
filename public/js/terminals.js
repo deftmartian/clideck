@@ -103,9 +103,8 @@ const mobileComposer = createMobileComposer({
   sendInput: (id, data) => send({ type: 'input', id, data }),
   onControlInput: trackTerminalInputData,
   onDraftChange: refreshTerminalInputActions,
-  onCommitted: (id) => {
+  onCommitted: () => {
     closeDropdown();
-    resetAppWheelScroll(state.terms.get(id));
     refreshTerminalInputActions();
   },
   onSendFailure: () => showToast('The terminal is not connected. Your draft was kept.', {
@@ -248,15 +247,11 @@ export function trackTerminalInputData(id, data) {
   const entry = state.terms.get(id);
   if (!entry || !data || data.startsWith('\x1b')) return;
   let length = entry.inputLength || 0;
-  let submitted = false;
   for (const ch of data) {
-    if (ch === '\r' || ch === '\n' || ch === '\x03' || ch === '\x15') { length = 0; submitted = true; }
+    if (ch === '\r' || ch === '\n' || ch === '\x03' || ch === '\x15') length = 0;
     else if (ch === '\x7f' || ch === '\b') length = Math.max(0, length - 1);
     else if (ch >= ' ') length += 1;
   }
-  // Submitting input makes mouse-tracking TUIs follow their newest output
-  // again, so the app-scrollback row count is stale.
-  if (submitted) resetAppWheelScroll(entry);
   entry.inputLength = length;
   const hasText = length > 0;
   if (entry.inputHasText !== hasText) {
@@ -334,21 +329,31 @@ function shouldShowJumpLatest(term) {
 
 // Mouse-tracking TUIs own their scrollback: touch drags become wheel reports
 // and xterm's viewport never moves, so shouldShowJumpLatest is blind there.
-// Count the reported rows instead — wheel-up rows accumulate as "away from
-// latest", wheel-down rows unwind them.
-const APP_SCROLL_ROWS_CAP = 2000;
+// Keep a conservative scroll debt instead. Mouse reports do not expose the
+// application's real scroll position and applications may move several rows
+// per report, so a 1:1 counter can hide the button before the app reaches the
+// bottom. Upward reports accrue safety-weighted debt; downward reports repay it
+// one at a time. The button (or an explicit overscroll) is therefore the
+// authoritative way to clear uncertain app-owned scrollback.
+const APP_SCROLL_DEBT_CAP = 2000;
+const APP_SCROLL_UP_DEBT_MULTIPLIER = 4;
+const APP_SCROLL_JUMP_MIN_VIEWPORTS = 2;
 function reportAppWheelScroll(id, steps) {
   const entry = state.terms.get(id);
   if (!entry) return;
-  const rows = Math.min(APP_SCROLL_ROWS_CAP, Math.max(0, (entry.appScrollRows || 0) - steps));
-  if (rows === (entry.appScrollRows || 0)) return;
-  entry.appScrollRows = rows;
+  const current = entry.appScrollDebt || 0;
+  const delta = steps < 0
+    ? -steps * APP_SCROLL_UP_DEBT_MULTIPLIER
+    : -steps;
+  const debt = Math.min(APP_SCROLL_DEBT_CAP, Math.max(0, current + delta));
+  if (debt === current) return;
+  entry.appScrollDebt = debt;
   entry.refreshJumpLatest?.();
 }
 
 function resetAppWheelScroll(entry) {
-  if (!entry?.appScrollRows) return;
-  entry.appScrollRows = 0;
+  if (!entry?.appScrollDebt) return;
+  entry.appScrollDebt = 0;
   entry.refreshJumpLatest?.();
 }
 
@@ -387,14 +392,21 @@ function createJumpLatestButton(id, term) {
     event.stopPropagation();
     btn.classList.add('settling');
     mobileTouchScroll.interrupt(id);
+    mobileComposer.blurInput();
     const entry = state.terms.get(id);
-    const appRows = entry?.appScrollRows || 0;
-    if (appRows > 0 && term.modes.mouseTrackingMode !== 'none') {
+    const appDebt = entry?.appScrollDebt || 0;
+    if (appDebt > 0 && term.modes.mouseTrackingMode !== 'none') {
       // Unwind the app's own scrollback with the same wheel reports the drag
-      // sent; extra reports clamp at the bottom, so overshoot is harmless.
+      // sent. Conservative debt covers apps that move multiple rows per upward
+      // report, while the viewport floor handles shallow or uncertain state.
+      // The hard cap keeps a broken application from causing an unbounded send.
       const col = Math.max(1, Math.ceil(term.cols / 2));
       const row = Math.max(1, Math.ceil(term.rows / 2));
-      send({ type: 'input', id, data: `\u001b[<65;${col};${row}M`.repeat(appRows + JUMP_LATEST_THRESHOLD_ROWS) });
+      const reports = Math.min(
+        APP_SCROLL_DEBT_CAP,
+        Math.max(appDebt, term.rows * APP_SCROLL_JUMP_MIN_VIEWPORTS),
+      ) + JUMP_LATEST_THRESHOLD_ROWS;
+      send({ type: 'input', id, data: `\u001b[<65;${col};${row}M`.repeat(reports) });
     }
     resetAppWheelScroll(entry);
     term.scrollToBottom();
@@ -430,8 +442,13 @@ function enableAcceleratedRenderer(term, el) {
 
 function updateJumpLatestButton(id, term, btn) {
   const entry = state.terms.get(id);
+  // Leaving mouse tracking is authoritative: the application no longer owns
+  // wheel scrollback, so any remaining conservative debt is obsolete.
+  if (entry?.appScrollDebt && term.modes.mouseTrackingMode === 'none') {
+    entry.appScrollDebt = 0;
+  }
   const scrolledUp = shouldShowJumpLatest(term)
-    || (entry?.appScrollRows || 0) > JUMP_LATEST_THRESHOLD_ROWS;
+    || (entry?.appScrollDebt || 0) > 0;
   btn.classList.toggle(JUMP_LATEST_VISIBLE_CLASS, scrolledUp);
   if (!entry || entry.scrolledUp === scrolledUp) return;
   entry.scrolledUp = scrolledUp;
@@ -971,7 +988,7 @@ export function addTerminal(id, name, themeId, commandId, projectId, muted, last
     }
   }, 500);
   const cancelFitRaf = () => { if (fitRaf) { cancelAnimationFrame(fitRaf); fitRaf = 0; } };
-  state.terms.set(id, { term, fit, el, ro, requestFit, cancelFitRaf, onContextMenu, inputLength: 0, inputHasText: false, composerDraft: loadStoredDraft(id), mobileDirect: false, scrolledUp: false, appScrollRows: 0, refreshJumpLatest, themeId, commandId, presetId: presetId || null, projectId: projectId || null, muted: !!muted, working: false, workStartedAt: null, stopBounce, queue: (data, replay = false) => { if (!fitted) { pending.push({ data, replay }); return true; } return false; }, writeChunk, lastActivityAt: Date.now(), unread: false, lastPreviewText: lastPreview || '', searchText: '' });
+  state.terms.set(id, { term, fit, el, ro, requestFit, cancelFitRaf, onContextMenu, inputLength: 0, inputHasText: false, composerDraft: loadStoredDraft(id), mobileDirect: false, scrolledUp: false, appScrollDebt: 0, refreshJumpLatest, themeId, commandId, presetId: presetId || null, projectId: projectId || null, muted: !!muted, working: false, workStartedAt: null, stopBounce, queue: (data, replay = false) => { if (!fitted) { pending.push({ data, replay }); return true; } return false; }, writeChunk, lastActivityAt: Date.now(), unread: false, lastPreviewText: lastPreview || '', searchText: '' });
   if (working) setStatus(id, true);
   else renderSessionStatus(state.terms.get(id), statusEl, false); // idle sessions get the zᶻZ icon now, not a blank slot until their first transition
   refreshTerminalInputActions();
