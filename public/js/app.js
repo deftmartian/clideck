@@ -26,6 +26,7 @@ import {
   planTerminalHistory,
   planTerminalReplay,
 } from './terminal-recovery.js';
+import { TOUCH_FIRST_MEDIA } from './touch-ui.js';
 
 const CLIENT_PROTOCOL_VERSION = 2;
 const CLIENT_PROTOCOL_PARAM = 'clideckProtocol';
@@ -691,15 +692,16 @@ function reconnectForegroundSocket() {
   connect();
 }
 
-// Mobile sidebar
-const mobileQuery = window.matchMedia('(max-width: 960px), (hover: none) and (pointer: coarse)');
+// Compact navigation is a layout concern: narrow desktop windows still need
+// the drawer, while touch-specific terminal controls use touch-ui.js instead.
+const compactLayoutQuery = window.matchMedia(`(max-width: 960px), ${TOUCH_FIRST_MEDIA}`);
 function closeMobileSidebar() { document.body.classList.remove('mobile-nav-open'); }
 document.getElementById('mobile-nav-toggle').addEventListener('click', () => {
-  if (mobileQuery.matches) document.body.classList.toggle('mobile-nav-open');
+  if (compactLayoutQuery.matches) document.body.classList.toggle('mobile-nav-open');
 });
 document.getElementById('mobile-nav-close').addEventListener('click', closeMobileSidebar);
 document.getElementById('mobile-sidebar-backdrop').addEventListener('click', closeMobileSidebar);
-mobileQuery.addEventListener('change', (e) => { if (!e.matches) closeMobileSidebar(); });
+compactLayoutQuery.addEventListener('change', (e) => { if (!e.matches) closeMobileSidebar(); });
 
 let backgroundedAt = 0;
 let windowBlurredAt = 0;

@@ -101,6 +101,116 @@ function showTestToast(page, message) {
   }, message);
 }
 
+async function setTouchUiModeFromSettings(page, mode) {
+  await page.evaluate(value => {
+    const select = document.getElementById('cfg-touch-ui-mode');
+    if (!select) throw new Error('Touch controls setting is unavailable');
+    select.value = value;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  }, mode);
+}
+
+async function touchUiState(page) {
+  return page.evaluate(() => ({
+    mode: document.getElementById('cfg-touch-ui-mode')?.value,
+    stored: localStorage.getItem('clideck.touchUiMode'),
+    capability: matchMedia('(hover: none) and (pointer: coarse)').matches,
+    compactNavVisible: getComputedStyle(document.getElementById('mobile-nav-toggle')).display !== 'none',
+    composerEnabled: document.body.classList.contains('mobile-composer-enabled'),
+    composerHidden: document.getElementById('mobile-composer')?.getAttribute('aria-hidden'),
+  }));
+}
+
+async function verifyNarrowDesktopTouchUi(browser, baseUrl, browserName, sessionId, marker) {
+  const context = await browser.newContext({
+    viewport: { width: 800, height: 844 },
+    isMobile: false,
+    hasTouch: false,
+  });
+  const page = await context.newPage();
+  const errors = [];
+  page.on('console', message => {
+    if (message.type() === 'error') errors.push(message.text());
+  });
+  page.on('pageerror', error => errors.push(error.message));
+  await page.route('https://fonts.googleapis.com/**', route => route.fulfill({
+    status: 200,
+    contentType: 'text/css',
+    body: '',
+  }));
+  try {
+    await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
+    await waitFor(
+      async () => (await terminalText(page, sessionId)).includes(marker),
+      `${browserName} narrow-desktop replay`,
+    );
+    const initial = await touchUiState(page);
+    if (
+      initial.capability
+      || !initial.compactNavVisible
+      || initial.composerEnabled
+      || initial.composerHidden !== 'true'
+    ) {
+      throw new Error(`${browserName} narrow desktop was misclassified: ${JSON.stringify(initial)}`);
+    }
+
+    await setTouchUiModeFromSettings(page, 'touch');
+    await waitFor(async () => (await touchUiState(page)).composerEnabled,
+      `${browserName} explicit touch override`);
+    const forced = await touchUiState(page);
+    if (forced.mode !== 'touch' || forced.stored !== 'touch') {
+      throw new Error(`${browserName} touch override was not stored: ${JSON.stringify(forced)}`);
+    }
+
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await waitFor(
+      async () => (await terminalText(page, sessionId)).includes(marker),
+      `${browserName} touch-override reload replay`,
+    );
+    const persisted = await touchUiState(page);
+    if (!persisted.composerEnabled || persisted.mode !== 'touch' || persisted.stored !== 'touch') {
+      throw new Error(`${browserName} touch override did not survive reload: ${JSON.stringify(persisted)}`);
+    }
+
+    await setTouchUiModeFromSettings(page, 'auto');
+    await waitFor(async () => !(await touchUiState(page)).composerEnabled,
+      `${browserName} narrow-desktop auto restore`);
+    const restored = await touchUiState(page);
+    if (restored.mode !== 'auto' || restored.stored !== null || !restored.compactNavVisible) {
+      throw new Error(`${browserName} Auto mode did not restore desktop input: ${JSON.stringify(restored)}`);
+    }
+    if (errors.length) throw new Error(`${browserName} narrow-desktop errors: ${errors.join(' | ')}`);
+  } finally {
+    await context.close();
+  }
+}
+
+async function verifyTouchFirstDesktopOverride(page, browserName) {
+  const initial = await touchUiState(page);
+  if (!initial.capability || !initial.composerEnabled || initial.mode !== 'auto') {
+    throw new Error(`${browserName} touch-first Auto mode failed: ${JSON.stringify(initial)}`);
+  }
+
+  await setTouchUiModeFromSettings(page, 'desktop');
+  await waitFor(async () => !(await touchUiState(page)).composerEnabled,
+    `${browserName} explicit desktop override`);
+  const desktop = await touchUiState(page);
+  if (desktop.stored !== 'desktop' || !desktop.compactNavVisible || desktop.composerHidden !== 'true') {
+    throw new Error(`${browserName} Desktop override failed: ${JSON.stringify(desktop)}`);
+  }
+
+  await setTouchUiModeFromSettings(page, 'auto');
+  await waitFor(async () => (await touchUiState(page)).composerEnabled,
+    `${browserName} touch-first Auto restore`);
+  const restored = await touchUiState(page);
+  if (restored.stored !== null || restored.mode !== 'auto') {
+    throw new Error(`${browserName} Auto mode was not restored: ${JSON.stringify(restored)}`);
+  }
+  // Both transitions intentionally request a terminal refit. Let those frames
+  // settle before the viewport coalescing probe starts counting layout work.
+  await waitForAnimationFrames(page);
+}
+
 // Every drawer control must be tappable: the row wraps rather than sliding
 // under the composer editor, and no toast may sit on top of it.
 async function verifyDrawerControlsReachable(page, browserName) {
@@ -1340,6 +1450,13 @@ async function run(browserName) {
       headless: true,
       ...(executablePath ? { executablePath } : {}),
     });
+    await verifyNarrowDesktopTouchUi(
+      browser,
+      `http://127.0.0.1:${port}/`,
+      browserName,
+      id,
+      base,
+    );
     const context = await browser.newContext({
       viewport: { width: 390, height: 844 },
       isMobile: true,
@@ -1361,6 +1478,7 @@ async function run(browserName) {
       async () => (await terminalText(page, id)).includes(base),
       `${browserName} initial replay`,
     );
+    await verifyTouchFirstDesktopOverride(page, browserName);
     await verifyBottomActionClearance(page, browserName);
     await verifyVisualViewportHeight(page, browserName, id);
     const renderer = await verifyAcceleratedRenderer(page, browserName);

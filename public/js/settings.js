@@ -1,6 +1,7 @@
 import { state, send } from './state.js';
 import { esc, debounce, agentIcon, binName, randomUUID } from './utils.js';
 import { openFolderPicker } from './folder-picker.js';
+import { getTouchUiMode, setTouchUiMode } from './touch-ui.js';
 
 // ── Category navigation ──
 
@@ -84,6 +85,7 @@ export function renderSettings() {
   const focusSnapshot = captureSettingsFocus();
   document.getElementById('cfg-default-path').value = state.cfg.defaultPath || '';
   document.getElementById('cfg-confirm-close').checked = state.cfg.confirmClose !== false;
+  document.getElementById('cfg-touch-ui-mode').value = getTouchUiMode();
   renderAgentList();
   renderThemeSection();
   renderNotifications();
@@ -656,6 +658,9 @@ function saveConfig() {
 document.getElementById('cfg-default-path').addEventListener('input', debounce(saveConfig, 500));
 document.getElementById('cfg-confirm-close').addEventListener('change', saveConfig);
 // ── Events: Appearance ──
+document.getElementById('cfg-touch-ui-mode').addEventListener('change', event => {
+  setTouchUiMode(event.target.value);
+});
 document.getElementById('default-theme-trigger').addEventListener('click', (e) => {
   openThemeMenu(e.currentTarget);
 });

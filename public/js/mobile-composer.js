@@ -1,4 +1,5 @@
-const MOBILE_COMPOSER_MEDIA = '(max-width: 960px), (hover: none) and (pointer: coarse)';
+import { isTouchUiEnabled, onTouchUiChange } from './touch-ui.js';
+
 const BRACKETED_PASTE_START = '\x1b[200~';
 const BRACKETED_PASTE_END = '\x1b[201~';
 const EDITOR_MIN_HEIGHT = 44;
@@ -57,7 +58,6 @@ export function createMobileComposer({
   onSendFailure,
 }) {
   let initialized = false;
-  let media = null;
   let toolsOpen = false;
   let pendingCommit = null;
   // Focus snapshot taken on control-button pointerdown, before Firefox moves
@@ -77,8 +77,7 @@ export function createMobileComposer({
   }
 
   function available() {
-    media ||= window.matchMedia(MOBILE_COMPOSER_MEDIA);
-    return media.matches;
+    return isTouchUiEnabled();
   }
 
   function ownsInput(entry) {
@@ -311,8 +310,7 @@ export function createMobileComposer({
       button.addEventListener('click', () => sendControl(button.dataset.terminalKey));
     });
 
-    media ||= window.matchMedia(MOBILE_COMPOSER_MEDIA);
-    media.addEventListener?.('change', () => refresh());
+    onTouchUiChange(() => refresh());
   }
 
   return {

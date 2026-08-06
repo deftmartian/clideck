@@ -195,8 +195,8 @@
       background: color-mix(in srgb, var(--color-base) 32%, transparent);
       cursor: not-allowed;
     }
-    /* The soft keyboard can make a portrait viewport look landscape. Use the
-       stable touch input signal instead of viewport orientation. */
+    /* Compact navigation is independent of touch-specific terminal input.
+       Narrow desktop windows use this drawer without enabling the composer. */
     @media (max-width: 960px), (hover: none) and (pointer: coarse) {
       #mobile-sidebar-backdrop {
         display: block;
@@ -563,6 +563,15 @@
       <!-- Appearance -->
       <div id="settings-appearance" class="settings-panel hidden p-6 max-w-xl">
         <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-4">Appearance</h3>
+        <div class="mb-5">
+          <label class="block text-xs text-slate-400 mb-1.5" for="cfg-touch-ui-mode">Touch controls</label>
+          <select id="cfg-touch-ui-mode" class="w-full px-3 py-2 text-sm bg-slate-800 border border-slate-600 rounded-md text-slate-200 outline-none focus:border-blue-500 transition-colors cursor-pointer">
+            <option value="auto">Auto — touch-first devices</option>
+            <option value="desktop">Desktop — always hide</option>
+            <option value="touch">Touch — always show</option>
+          </select>
+          <p class="text-xs text-slate-500 mt-1.5">Stored only in this browser. Compact navigation still follows the available window width.</p>
+        </div>
         <div class="mb-5">
           <label class="block text-xs text-slate-400 mb-1.5">Default terminal theme</label>
           <input type="hidden" id="cfg-default-theme" name="cfg-default-theme" value="default">

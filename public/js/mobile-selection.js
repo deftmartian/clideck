@@ -1,6 +1,5 @@
 import { copyTrimmedTerminalSelection } from './terminal-clipboard.js';
-
-const MOBILE_SELECTION_MEDIA = '(max-width: 960px), (hover: none) and (pointer: coarse)';
+import { onTouchUiChange } from './touch-ui.js';
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
@@ -50,7 +49,6 @@ export function createMobileSelection({
 }) {
   const attachments = new Map();
   let initialized = false;
-  let media = null;
   let modeId = null;
   let anchor = null;
   let touchId = null;
@@ -66,8 +64,7 @@ export function createMobileSelection({
   }
 
   function isAvailable() {
-    media ||= window.matchMedia(MOBILE_SELECTION_MEDIA);
-    return media.matches && available();
+    return available();
   }
 
   function isActive(id = null) {
@@ -233,8 +230,7 @@ export function createMobileSelection({
     });
     copyButton.addEventListener('click', copySelection);
     doneButton.addEventListener('click', () => deactivate());
-    media ||= window.matchMedia(MOBILE_SELECTION_MEDIA);
-    media.addEventListener?.('change', refresh);
+    onTouchUiChange(refresh);
   }
 
   return { attach, detach, refresh, isActive, activate, deactivate };

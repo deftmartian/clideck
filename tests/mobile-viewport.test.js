@@ -78,6 +78,8 @@ test('mobile composer owns predictive text until an explicit coherent send', () 
   const builtCss = read('public/tailwind.css');
   const terminals = read('public/js/terminals.js');
   const composer = read('public/js/mobile-composer.js');
+  const touchUi = read('public/js/touch-ui.js');
+  const selection = read('public/js/mobile-selection.js');
   const app = read('public/js/app.js');
 
   assert.match(index, /id="mobile-composer"[^>]*aria-hidden="true"/);
@@ -106,10 +108,34 @@ test('mobile composer owns predictive text until an explicit coherent send', () 
   assert.match(composer, /sendTerminalData\(transaction\.id, '\\r'\)/);
   assert.match(composer, /interrupt:\s*'\\x03'/);
   assert.match(composer, /EDITOR_MAX_HEIGHT = 82/);
+  assert.match(composer, /return isTouchUiEnabled\(\)/);
+  assert.doesNotMatch(composer, /max-width:\s*960px/);
+  assert.doesNotMatch(selection, /max-width:\s*960px/);
+  assert.match(touchUi, /TOUCH_FIRST_MEDIA = '\(hover: none\) and \(pointer: coarse\)'/);
+  assert.match(touchUi, /VALID_MODES = new Set\(\['auto', 'desktop', 'touch'\]\)/);
+  assert.match(touchUi, /if \(mode === 'desktop'\) return false/);
+  assert.match(touchUi, /if \(mode === 'touch'\) return true/);
+  assert.match(app, /compactLayoutQuery = window\.matchMedia\(`\(max-width: 960px\), \$\{TOUCH_FIRST_MEDIA\}`\)/);
   assert.match(terminals, /distanceFromBottom[\s\S]{0,320}scrollToLine/);
   assert.doesNotMatch(terminals, /onMobileTerminalClick/);
   assert.doesNotMatch(terminals, /function commitMobileComposer/);
   assert.doesNotMatch(app, /getElementById\('mobile-composer-paste'\)/);
+});
+
+test('touch UI override is browser-local and exposed in Appearance settings', () => {
+  const index = read('public/index.html');
+  const settings = read('public/js/settings.js');
+  const touchUi = read('public/js/touch-ui.js');
+
+  assert.match(index, /id="cfg-touch-ui-mode"/);
+  assert.match(index, /value="auto">Auto/);
+  assert.match(index, /value="desktop">Desktop/);
+  assert.match(index, /value="touch">Touch/);
+  assert.match(settings, /getTouchUiMode\(\)/);
+  assert.match(settings, /setTouchUiMode\(event\.target\.value\)/);
+  assert.match(touchUi, /clideck\.touchUiMode/);
+  assert.match(touchUi, /window\.localStorage\.setItem/);
+  assert.doesNotMatch(settings, /state\.cfg\.touchUiMode/);
 });
 
 test('mobile Select mode owns drag only while armed and uses xterm public selection APIs', () => {
