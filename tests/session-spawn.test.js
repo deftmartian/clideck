@@ -4,7 +4,10 @@ const { mkdtempSync, rmSync, writeFileSync, existsSync } = require('fs');
 const { join } = require('path');
 const os = require('os');
 const { execFileSync } = require('child_process');
-const { spawnForCaller, randomSessionName, slugify, waitForReady } = require('../session-spawn');
+const {
+  spawnForCaller, randomSessionName, slugify, waitForReady, activeSpawnedCount, submitWithWorkingRetry,
+} = require('../session-spawn');
+const { parseArgs: parseSpawnArgs } = require('../clideck-spawn-cli');
 
 test('randomSessionName avoids taken names and falls back to numbered suffix', () => {
   const name = randomSessionName(() => false);
@@ -41,6 +44,8 @@ function fakeSessionsApi(overrides = {}) {
       return { id };
     }),
     input: () => {},
+    broadcast: () => {},
+    close: overrides.close || ((msg) => sessions.delete(msg.id)),
   };
 }
 
@@ -73,6 +78,10 @@ test('spawn requires an explicit project and inherits caller cwd and command', a
   assert.equal(captured[0].commandId, 'cmd-grok');
   assert.equal(captured[0].projectId, 'proj-2');
   assert.equal(captured[0].cwd, '/tmp/work');
+  assert.equal(captured[0].ephemeral, true);
+  assert.equal(captured[0].spawnedBySessionId, 'caller-id');
+  assert.equal(captured[0].spawnRootSessionId, 'caller-id');
+  assert.equal(captured[0].spawnDepth, 1);
   assert.equal(res.name, 'Worker');
   assert.equal(res.project, 'Beta');
   assert.equal(res.promptDelivered, null);
@@ -110,6 +119,32 @@ test('spawn rejects unknown callers, presets, and projects', async () => {
   );
 });
 
+test('spawn caps active workers and prevents recursive spawning', async () => {
+  const active = [1, 2, 3].map(n => [
+    `worker-${n}`,
+    { name: `Worker ${n}`, spawnedBySessionId: 'another-root', spawnRootSessionId: 'another-root' },
+  ]);
+  const capped = fakeSessionsApi({
+    sessions: [['caller-id', { name: 'Master', commandId: 'cmd-claude' }], ...active],
+  });
+  await assert.rejects(
+    spawnForCaller({ callerSessionId: 'caller-id', project: 'Alpha', prompt: 'review' }, capped, CFG),
+    /Active spawned worker limit reached \(3\/3\)/,
+  );
+  assert.equal(activeSpawnedCount(capped.getSessions()), 3);
+
+  const nested = fakeSessionsApi({
+    sessions: [[
+      'child-id',
+      { name: 'Child', commandId: 'cmd-claude', spawnedBySessionId: 'root-id', spawnRootSessionId: 'root-id', spawnDepth: 1 },
+    ]],
+  });
+  await assert.rejects(
+    spawnForCaller({ callerSessionId: 'child-id', project: 'Alpha', prompt: 'delegate again' }, nested, CFG),
+    /Spawned workers cannot spawn more workers/,
+  );
+});
+
 test('spawn with prompt waits for readiness and injects it', async () => {
   const api = fakeSessionsApi({
     sessions: [['caller-id', { name: 'Master', projectId: null, commandId: 'cmd-claude', cwd: '/tmp' }]],
@@ -130,10 +165,70 @@ test('spawn with prompt waits for readiness and injects it', async () => {
   assert.match(inputs[0].data, /do the thing/);
 });
 
+test('spawn --wait returns the first answer and closes the worker', async () => {
+  const api = fakeSessionsApi({
+    sessions: [['caller-id', { name: 'Master', projectId: null, commandId: 'cmd-claude', cwd: '/tmp' }]],
+  });
+  api.createProgrammatic = (opts) => {
+    api.getSessions().set('wait-worker', { ...opts, working: undefined });
+    return { id: 'wait-worker' };
+  };
+
+  const pending = spawnForCaller({
+    callerSessionId: 'caller-id', name: 'Reviewer', prompt: 'review this', waitForResult: true,
+    readyTimeoutMs: 5000, resultTimeoutMs: 5000, noProject: true,
+  }, api, CFG);
+
+  setTimeout(() => api.emit({ type: 'session.status', id: 'wait-worker', working: false, source: 'hook' }), 20);
+  setTimeout(() => api.emit({ type: 'session.status', id: 'wait-worker', working: true, source: 'hook' }), 40);
+  setTimeout(() => {
+    const worker = api.getSessions().get('wait-worker');
+    worker.working = false;
+    worker.lastPreview = 'No findings.';
+    worker.lastActivityAt = new Date().toISOString();
+    api.emit({ type: 'session.status', id: 'wait-worker', working: false, source: 'hook' });
+  }, 80);
+
+  const res = await pending;
+  assert.equal(res.response, 'No findings.');
+  assert.equal(res.closed, true);
+  assert.equal(api.getSessions().has('wait-worker'), false);
+});
+
+test('spawn CLI parses bounded wait options', () => {
+  const opts = parseSpawnArgs([
+    '--project', 'Alpha', '--name', 'Reviewer', '--prompt', 'review', '--wait', '--timeout', '12m', '--keep',
+  ]);
+  assert.equal(opts.waitForResult, true);
+  assert.equal(opts.resultTimeoutMs, 12 * 60 * 1000);
+  assert.equal(opts.keepOpen, true);
+});
+
 test('waitForReady falls back to timeout when no status arrives', async () => {
   const api = fakeSessionsApi();
   const mode = await waitForReady(api, 'some-id', 50);
   assert.equal(mode, 'timeout');
+});
+
+test('waiting prompt delivery retries only until a working acknowledgement', async () => {
+  const retrying = fakeSessionsApi({ sessions: [['worker', { name: 'Worker', working: false }]] });
+  let retryInputs = 0;
+  retrying.input = () => { retryInputs++; };
+  const delivery = submitWithWorkingRetry(retrying, 'worker', 'task', { retryMs: 15, maxAttempts: 3 });
+  await new Promise(resolve => setTimeout(resolve, 42));
+  delivery.cancel();
+  assert.equal(delivery.attempts(), 3);
+  assert.equal(retryInputs, 3);
+
+  const acknowledged = fakeSessionsApi({ sessions: [['worker', { name: 'Worker', working: false }]] });
+  let acknowledgedInputs = 0;
+  acknowledged.input = () => { acknowledgedInputs++; };
+  const one = submitWithWorkingRetry(acknowledged, 'worker', 'task', { retryMs: 15, maxAttempts: 3 });
+  setTimeout(() => acknowledged.emit({ type: 'session.status', id: 'worker', working: true }), 5);
+  await new Promise(resolve => setTimeout(resolve, 42));
+  one.cancel();
+  assert.equal(one.attempts(), 1);
+  assert.equal(acknowledgedInputs, 1);
 });
 
 test('setupWorktree creates a worktree and branch from a real repo', async () => {

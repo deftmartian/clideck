@@ -2,13 +2,11 @@ const { binName } = require('./utils');
 
 const GUIDE = `CliDeck session guide:
 You are running inside CliDeck only when CLIDECK_SESSION_ID is set.
-Use clideck agents to discover peer sessions.
-Use clideck ask status to see which sessions are idle or busy.
-Use clideck ask "<target>" "<message>" --timeout 10m to ask an idle peer agent.
-Use the exact @project/session address from clideck agents --all for cross-project asks.
-Keep clideck ask running until it exits; the answer returns on stdout.
-If a target is busy, the request is not queued. Try later or ask another idle agent.
-Use clideck spawn --project "<project>" --name "<name>" --prompt "<task>" to create a new peer agent session (--project is required; add --worktree for an isolated git worktree). Spawn is fire-and-forget: collect results later with clideck ask.
+Existing sessions are user-owned conversations. Do not send work to one with clideck ask: it injects a prompt and interrupts that session even when it is idle.
+Do the task yourself by default. If a bounded independent review would materially improve the result, create one dedicated worker with clideck spawn --project "<project>" --name "<name>" --prompt "<bounded task>" --wait --timeout 10m.
+The waiting spawn command returns the worker's first answer on stdout and closes the worker. Add --worktree only when the worker needs isolated repository writes.
+Do not spawn for routine or self-contained work. Use at most one worker unless the user explicitly requests parallel work, and never exceed the server cap of three active spawned workers. Spawned workers cannot spawn more workers.
+Only use clideck ask --interrupt-existing when the user explicitly asks you to contact that exact existing session.
 If CLIDECK_SESSION_ID is missing, ignore this guide.`;
 
 function commandStart(parts) {

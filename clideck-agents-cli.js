@@ -7,10 +7,9 @@ function usage() {
     '  clideck agents [--json] [--all]',
     '',
     'Lists active CliDeck sessions in the same project as the caller session.',
-    'Use this to discover other agents before communicating with them through `clideck ask`.',
-    'Use this from inside a CliDeck session before `clideck ask` to discover target names.',
-    'Use --all to discover cross-project targets and their @project/session ask addresses.',
-    'Use the printed ask= value exactly when present, and prefer idle targets for `clideck ask`.',
+    'Existing sessions are user-owned conversations, not a pool of idle workers.',
+    'Use `clideck spawn --wait` for independent work. Use this list to inspect a worker',
+    'you already spawned, or when the user explicitly requests an existing-session handoff.',
     '',
     'Options:',
     '  --json       Print machine-readable JSON.',
@@ -62,10 +61,10 @@ function getJson(url, callerSessionId, all = false) {
 function formatAgents(agents, opts = {}) {
   if (!agents.length) return opts.all ? 'No active sessions found.' : 'No active sessions found in this project.';
   return agents.map(a => {
-    const marker = a.caller ? 'self' : 'peer';
+    const marker = a.caller ? 'self' : (a.spawned ? 'spawned worker' : 'existing');
     const status = a.working ? 'working' : 'idle';
     const preview = a.lastPreview ? ` - ${a.lastPreview}` : '';
-    const address = a.address && a.address !== a.name ? ` ask=${a.address}` : '';
+    const address = a.address && a.address !== a.name ? ` address=${a.address}` : '';
     const project = opts.all && a.project ? ` project="${a.project}"` : '';
     return `${a.name} (${marker}, ${a.preset}, ${status}) id=${a.id}${address}${project}${preview}`;
   }).join('\n');

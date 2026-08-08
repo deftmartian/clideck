@@ -283,10 +283,22 @@ function createProgrammatic(opts, cfg) {
   if (err) return { error: err.message };
 
   const s = sessions.get(id);
-  if (s && opts.ephemeral) s.ephemeral = true;
+  if (s) {
+    if (opts.ephemeral) s.ephemeral = true;
+    if (opts.spawnedBySessionId) {
+      s.spawnedBySessionId = opts.spawnedBySessionId;
+      s.spawnRootSessionId = opts.spawnRootSessionId || opts.spawnedBySessionId;
+      s.spawnDepth = Number(opts.spawnDepth) || 1;
+    }
+  }
 
   const presetId = matchPreset(cmd)?.presetId || 'shell';
-  broadcast({ type: 'created', id, name, themeId, commandId: cmd.id, presetId, projectId });
+  broadcast({
+    type: 'created', id, name, themeId, commandId: cmd.id, presetId, projectId,
+    spawnedBySessionId: s?.spawnedBySessionId || null,
+    spawnRootSessionId: s?.spawnRootSessionId || null,
+    spawnDepth: s?.spawnDepth || 0,
+  });
   return { id };
 }
 

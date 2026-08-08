@@ -59,35 +59,22 @@ clideck --port 4001
 
 **Session resume** - close the lid, reopen tomorrow, pick up where things left off. each agent's session ID is captured automatically.
 
-**Ask another session** - from inside any CliDeck session, an agent can consult another session and get the answer back as command output:
-
-<p align="center">
-  <img src="assets/clideck-ask.png" width="720" alt="One agent asking another session and getting findings back">
-</p>
+**Bounded workers** - an agent can create a dedicated session for independent work without injecting a prompt into somebody else's conversation. `--wait` returns the worker's first answer on stdout and closes the worker:
 
 ```bash
-clideck agents
-clideck ask --session "Reviewer" --message "Review this output and return findings." --timeout 10m
+clideck spawn --project myproject --name Reviewer \
+  --prompt "Review this diff. Return findings only." --wait --timeout 10m
 ```
 
-CliDeck injects the message into the real target terminal, submits it, waits for the target session to finish, then returns the latest response to the caller.
+CliDeck permits at most three active agent-spawned workers, spawned workers cannot recursively spawn, and waiting workers are ephemeral. Initial delivery retries at most three times and stops as soon as the worker acknowledges the task, covering fresh worktree trust/startup screens without unbounded duplicate prompts. Use `--worktree` when a worker needs isolated repository writes. Omitting `--wait` leaves the dedicated worker open for an explicitly long-running task.
 
-By default, target lookup is limited to the caller's project. For cross-project asks, discover the full address first:
+**Explicit session handoff** - `clideck ask` still exists for a user-requested handoff or a follow-up to a worker the caller spawned. Because it pastes a new prompt into the target's real terminal, unrelated existing sessions are protected by default. Contacting one requires the deliberately named `--interrupt-existing` flag:
 
 ```bash
-clideck agents --all
-clideck ask "@website/Docs Writer" "Check if the docs mention the new CLI flags." --timeout 15m
+clideck ask --interrupt-existing "Docs Writer" "User-requested handoff." --timeout 10m
 ```
 
-If project or session names contain spaces, quote the whole target. The target is another LLM agent, not a fast CLI command, so callers should set both `clideck ask --timeout` and their own shell/tool timeout high enough. If the target session is busy, CliDeck does not queue the message; the caller gets a clear busy response and can retry later or ask another idle session.
-
-Agents can also create their own workers. `clideck spawn` starts a new session in an explicitly named project (same agent as the caller by default, `--preset` to pick another), optionally in a fresh git worktree, and can hand it an initial prompt:
-
-```bash
-clideck spawn --project myproject --name "Worker 1" --worktree --prompt "Fix DO-123. Report when done."
-```
-
-Spawn is fire-and-forget: it returns once the worker exists and the prompt is submitted, and the orchestrating agent collects results later with `clideck ask`.
+The target must be idle; asks are never queued. Use `clideck agents` to inspect sessions, not as a pool of idle workers.
 
 **Mobile remote** - the agents keep running on the local machine. status, prompts, history, and replies stay available from a phone while away. E2E encrypted, no account needed.
 

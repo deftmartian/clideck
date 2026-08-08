@@ -12,6 +12,10 @@ function agentRow(id, s, callerId, projects) {
     working: !!s.working,
     lastPreview: s.lastPreview || '',
     lastActivityAt: s.lastActivityAt || null,
+    spawned: !!s.spawnedBySessionId,
+    spawnedBySessionId: s.spawnedBySessionId || null,
+    spawnRootSessionId: s.spawnRootSessionId || null,
+    spawnDepth: s.spawnDepth || 0,
     caller: id === callerId,
   };
 }

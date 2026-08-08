@@ -4,20 +4,21 @@ const https = require('https');
 function usage() {
   return [
     'Usage:',
-    '  clideck spawn --project <name|id> [--name <name>] [--prompt <text>] [--worktree] [options]',
+    '  clideck spawn --project <name|id> [--name <name>] --prompt <text> --wait [options]',
     '  cat task.md | clideck spawn --project <name|id> --name <name> --worktree',
     '',
     'Use from inside a CliDeck session to create a new peer agent session.',
     'A project is required (use --no-project to create one outside any project).',
-    'The new session runs the same agent as the caller unless --preset overrides,',
-    'appears in every open CliDeck window, and can be delegated to and queried',
-    'afterwards with `clideck ask`.',
+    'The new session runs the same agent as the caller unless --preset overrides.',
+    'Use --wait for bounded delegation: the first answer is returned on stdout and',
+    'the worker session is closed automatically.',
     '',
     'Important for agents:',
-    '  Spawn is fire-and-forget: it returns as soon as the new session exists and',
-    '  the initial prompt (if any) has been submitted. It does NOT wait for the',
-    '  work to finish. Check progress later with `clideck ask status`, and collect',
-    '  results with `clideck ask --session <name>`.',
+    '  Do the work locally by default. Spawn one worker only when a bounded independent',
+    '  task or review materially helps. The server permits at most three active spawned',
+    '  workers, and a spawned worker cannot spawn another worker.',
+    '  Without --wait, spawn remains fire-and-forget and the worker stays open. Use this',
+    '  only when the user wants a visible long-running worker.',
     '  With --worktree the new session runs in a fresh git worktree of the current',
     '  repository, so parallel workers never touch each other\'s checkout. Worktrees',
     '  live under ~/.clideck/worktrees/<repo>/ and are not auto-removed; clean up',
@@ -40,13 +41,16 @@ function usage() {
     '                           An existing branch is checked out; a new one is created.',
     '      --ready-timeout <d>  Max wait for the agent to look ready before submitting',
     '                           the prompt anyway. Examples: 10s, 30s. Default: 15s.',
+    '      --wait               Wait for the first answer, print it, and close the worker.',
+    '  -t, --timeout <d>        Result wait time with --wait. Default: 10m; maximum: 1h.',
+    '      --keep               Keep the worker open after --wait returns its answer.',
     '      --url <url>          CliDeck server URL. Default: CLIDECK_URL or local port.',
     '      --json               Print the full spawn result as JSON.',
     '  -h, --help               Show this help.',
     '',
     'Examples:',
-    '  clideck spawn -p kb --name "Worker 1" --worktree --prompt "Fix DO-123: ..."',
-    '  clideck spawn -p kb -n Reviewer --preset codex -m "Review the diff on branch X."',
+    '  clideck spawn -p kb -n Reviewer -m "Review the diff. Return findings only." --wait',
+    '  clideck spawn -p kb --name "Worker 1" --worktree --prompt "Fix DO-123: ..." --wait',
     '  clideck spawn -p Website -n "Docs Writer" --cwd ~/repos/website',
   ].join('\n');
 }
@@ -62,7 +66,13 @@ function parseDuration(value) {
 
 function parseArgs(args) {
   const port = process.env.CLIDECK_PORT || process.env.PORT || '4000';
-  const out = { url: process.env.CLIDECK_URL || `http://127.0.0.1:${port}`, json: false };
+  const out = {
+    url: process.env.CLIDECK_URL || `http://127.0.0.1:${port}`,
+    json: false,
+    waitForResult: false,
+    keepOpen: false,
+    resultTimeoutMs: 10 * 60 * 1000,
+  };
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === '--name' || arg === '-n') out.name = args[++i];
@@ -78,7 +88,13 @@ function parseArgs(args) {
       const parsed = parseDuration(args[++i]);
       if (!parsed) throw new Error('Invalid --ready-timeout value');
       out.readyTimeoutMs = parsed;
-    } else if (arg === '--url') out.url = args[++i];
+    } else if (arg === '--wait') out.waitForResult = true;
+    else if (arg === '--timeout' || arg === '-t') {
+      const parsed = parseDuration(args[++i]);
+      if (!parsed) throw new Error('Invalid --timeout value');
+      out.resultTimeoutMs = Math.min(parsed, 60 * 60 * 1000);
+    } else if (arg === '--keep') out.keepOpen = true;
+    else if (arg === '--url') out.url = args[++i];
     else if (arg === '--json') out.json = true;
     else if (arg === '--help' || arg === '-h') out.help = true;
     else throw new Error(`Unknown spawn argument: ${arg}`);
@@ -137,7 +153,7 @@ function formatResult(res) {
     lines.push(res.promptDelivered === 'timeout'
       ? 'prompt: submitted after ready-timeout fallback; verify with `clideck ask status`.'
       : 'prompt: submitted.');
-    lines.push('The worker runs independently; collect results later with `clideck ask`.');
+    lines.push('The dedicated worker remains open; follow up with `clideck ask` or close it when done.');
   }
   return lines.join('\n');
 }
@@ -158,9 +174,13 @@ async function run(args) {
     if (!opts.project && !opts.noProject) {
       throw new Error('--project <name-or-id> is required (or pass --no-project). Run `clideck agents --all` to see project names.');
     }
+    if (opts.waitForResult && !opts.prompt) throw new Error('--wait requires an initial prompt.');
+    if (opts.keepOpen && !opts.waitForResult) throw new Error('--keep requires --wait.');
 
     // Worktree setup plus the ready-wait both happen server-side within this call.
-    const httpTimeout = (opts.readyTimeoutMs || 15000) + 45000;
+    const httpTimeout = (opts.readyTimeoutMs || 15000)
+      + (opts.waitForResult ? opts.resultTimeoutMs : 0)
+      + 45000;
     const res = await postJson(opts.url, {
       callerSessionId,
       name: opts.name,
@@ -173,8 +193,14 @@ async function run(args) {
       worktree: opts.worktree,
       branch: opts.branch,
       readyTimeoutMs: opts.readyTimeoutMs,
+      waitForResult: opts.waitForResult,
+      resultTimeoutMs: opts.resultTimeoutMs,
+      keepOpen: opts.keepOpen,
     }, httpTimeout);
-    process.stdout.write((opts.json ? JSON.stringify(res, null, 2) : formatResult(res)) + '\n');
+    const output = opts.json
+      ? JSON.stringify(res, null, 2)
+      : (res.response != null ? String(res.response).trimEnd() : formatResult(res));
+    process.stdout.write(output + '\n');
   } catch (e) {
     process.stderr.write(`${e.message}\n`);
     process.exitCode = 1;
