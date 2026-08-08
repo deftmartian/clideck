@@ -2,6 +2,13 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 const { withCliDeckGuide, GUIDE } = require('../agent-session-guide');
 
+test('guide protects existing sessions and bounds spawned review', () => {
+  assert.match(GUIDE, /Do not send work to one with clideck ask/);
+  assert.match(GUIDE, /clideck spawn .* --wait --timeout 10m/);
+  assert.match(GUIDE, /server cap of three active spawned workers/);
+  assert.doesNotMatch(GUIDE, /ask another idle agent/);
+});
+
 test('claude and codex keep existing guide injection', () => {
   const claude = withCliDeckGuide(['claude'], 'claude-code');
   assert.deepEqual(claude.slice(0, 3), ['claude', '--append-system-prompt', GUIDE]);

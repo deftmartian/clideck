@@ -6,16 +6,18 @@ function usage() {
     'Usage:',
     '  clideck ask status [--json] [--all]',
     '  clideck ask --session <name-or-id> --message <text> [--timeout 10m]',
-    '  clideck ask <name-or-id> <message> [--timeout 10m]',
-    '  clideck ask "@project-name/session-name" <message> [--timeout 10m]',
+    '  clideck ask <spawned-worker> <message> [--timeout 10m]',
+    '  clideck ask --interrupt-existing <name-or-id> <message> [--timeout 10m]',
     '  cat file.txt | clideck ask --session <name-or-id> [--timeout 10m]',
     '',
-    'Use from inside a CliDeck session when this agent needs an answer from another active session.',
-    'CliDeck ask lets agents communicate with each other without manual copy/paste through the user.',
+    'Use from inside a CliDeck session to send a follow-up to a worker this session spawned.',
+    'Existing sessions are user-owned conversations. Asking one injects a new prompt and interrupts it,',
+    'so --interrupt-existing is required and should only be used on the user\'s explicit request.',
     'Unscoped target lookup is limited to the same project as the caller session.',
     'Use @project/session only when you intentionally need to ask across projects.',
-    'Run `clideck agents` or `clideck agents --all` first to discover available target sessions.',
-    'Run `clideck ask status` to quickly see which project sessions are idle or busy.',
+    'For independent review, prefer `clideck spawn --wait`; it creates a dedicated worker, returns',
+    'the answer on stdout, and closes the worker without touching another conversation.',
+    'Run `clideck ask status` to check a spawned worker before sending a follow-up.',
     'Copy and use the target exactly as listed by `clideck agents`; quote it if it contains spaces.',
     '',
     'Important for agents:',
@@ -27,14 +29,14 @@ function usage() {
     '  Set BOTH `clideck ask --timeout` and your own shell/tool-call timeout high enough.',
     '  Waiting progress is printed to stderr; the target response is printed to stdout.',
     '  CliDeck only sends to idle target agents. If the target is busy, the ask fails immediately;',
-    '  it is not queued. Try again later or ask another idle agent.',
-    '  To ask multiple agents, start one `clideck ask` command per target and keep each command open.',
+    '  it is not queued. Wait for the dedicated worker rather than choosing another user session.',
     '',
     'Options:',
     '  status                   Show idle/busy state for active project sessions.',
     '  -s, --session <name-or-id>  Target session name or id.',
     '  -m, --message <text>       Message to send. If omitted, stdin is used.',
     '  -t, --timeout <duration>   Wait time. Examples: 30s, 10m, 1h. Default: 10m.',
+    '  --interrupt-existing       Allow prompting an existing non-worker session. This interrupts it.',
     '  --url <url>                CliDeck server URL. Default: CLIDECK_URL or local port.',
     '  --json                     With status: print machine-readable JSON.',
     '  --all                      With status: include all projects.',
@@ -69,7 +71,12 @@ function parseDuration(value) {
 
 function parseArgs(args) {
   const port = process.env.CLIDECK_PORT || process.env.PORT || '4000';
-  const out = { timeoutMs: 10 * 60 * 1000, url: process.env.CLIDECK_URL || `http://127.0.0.1:${port}`, progress: true };
+  const out = {
+    timeoutMs: 10 * 60 * 1000,
+    url: process.env.CLIDECK_URL || `http://127.0.0.1:${port}`,
+    progress: true,
+    allowExisting: false,
+  };
   const positional = [];
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -81,6 +88,7 @@ function parseArgs(args) {
       out.timeoutMs = parsed;
     } else if (arg === '--url') out.url = args[++i];
     else if (arg === '--no-progress') out.progress = false;
+    else if (arg === '--interrupt-existing') out.allowExisting = true;
     else if (arg === '--help' || arg === '-h') out.help = true;
     else positional.push(arg);
   }
@@ -278,6 +286,7 @@ async function run(args) {
       target: opts.session,
       message: opts.message,
       timeoutMs: opts.timeoutMs,
+      allowExisting: opts.allowExisting,
     }, opts.timeoutMs).finally(stopProgress);
     process.stdout.write((res.response || '').trimEnd() + '\n');
   } catch (e) {

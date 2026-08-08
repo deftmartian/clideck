@@ -101,6 +101,10 @@ function findTarget(sessions, callerId, caller, target, cfg = {}) {
   return findInProject(sameProjectSessions, trimmed, `project "${projectName(projects, caller.projectId)}"`);
 }
 
+function canAskWithoutInterrupt(callerId, target) {
+  return !!target && target.spawnedBySessionId === callerId;
+}
+
 function latestAgentTextSince(sessionId, sinceTs) {
   const entries = transcript.getEntriesSince(sessionId, sinceTs)
     .filter(e => e.role === 'agent' && String(e.text || '').trim());
@@ -201,8 +205,14 @@ async function askSession(payload, sessionsApi, cfg = {}) {
   if (!caller) throw jsonError('Caller session is not active', 404);
 
   const [targetId, target] = findTarget(sessions, callerId, caller, payload.target, cfg);
+  if (!canAskWithoutInterrupt(callerId, target) && !payload.allowExisting) {
+    throw jsonError(
+      `Target agent "${target.name}" is an existing session. Asking it would inject a prompt and interrupt its conversation. Use clideck spawn --wait for a dedicated worker, or pass --interrupt-existing only when the user explicitly requested this exact target.`,
+      409,
+    );
+  }
   if (target.working) {
-    throw jsonError(`Target agent "${target.name}" is busy right now. CliDeck ask only sends to idle agents and does not queue requests because the context can become stale. If you need this specific agent, try again later or set a reminder to retry. You can also ask another idle agent.`, 409);
+    throw jsonError(`Target agent "${target.name}" is busy right now. CliDeck ask does not queue requests because the context can become stale. Wait for this target to finish before retrying.`, 409);
   }
 
   const message = String(payload.message || '').trim();
@@ -239,4 +249,6 @@ async function handleHttp(req, res, sessionsApi, getConfig = () => ({})) {
   }
 }
 
-module.exports = { handleHttp, askSession, askSubmitDelay };
+module.exports = {
+  handleHttp, askSession, askSubmitDelay, submitAskInput, waitForAnswer, canAskWithoutInterrupt,
+};

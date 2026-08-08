@@ -2,6 +2,7 @@ const { execFile } = require('child_process');
 const { mkdirSync, existsSync } = require('fs');
 const { join, basename } = require('path');
 const { sendJson, isSameHost, projectName, sessionAddress } = require('./http-util');
+const { waitForAnswer } = require('./session-ask');
 const { DATA_DIR } = require('./paths');
 
 const MAX_BODY = 2 * 1024 * 1024;
@@ -9,6 +10,12 @@ const DEFAULT_PROMPT_READY_MS = 15 * 1000;
 const MAX_PROMPT_READY_MS = 2 * 60 * 1000;
 const BRACKETED_PASTE_START = '\x1b[200~';
 const BRACKETED_PASTE_END = '\x1b[201~';
+const DEFAULT_RESULT_TIMEOUT_MS = 10 * 60 * 1000;
+const MAX_RESULT_TIMEOUT_MS = 60 * 60 * 1000;
+const DEFAULT_MAX_ACTIVE_SPAWNED = 3;
+const MAX_CONFIGURED_ACTIVE_SPAWNED = 32;
+const DEFAULT_PROMPT_ACK_RETRY_MS = 10 * 1000;
+const DEFAULT_PROMPT_ATTEMPTS = 3;
 
 function jsonError(message, status = 400) {
   const error = new Error(message);
@@ -50,17 +57,20 @@ function resolveProject(projects, nameOrId) {
 
 function submitSpawnInput(sessionsApi, targetId, message) {
   const sessions = sessionsApi.getSessions();
+  const timers = [];
   const payload = `\n\n${message}`;
   sessionsApi.input({
     id: targetId,
     data: `${BRACKETED_PASTE_START}${payload}${BRACKETED_PASTE_END}`,
   });
   const delay = Math.min(2500, Math.max(500, 300 + Math.ceil(message.length / 80) * 100));
-  setTimeout(() => sessionsApi.input({ id: targetId, data: '\r' }), delay);
-  setTimeout(() => {
+  timers.push(setTimeout(() => sessionsApi.input({ id: targetId, data: '\r' }), delay));
+  timers.push(setTimeout(() => {
     const target = sessions.get(targetId);
     if (target && !target.working) sessionsApi.input({ id: targetId, data: '\r' });
-  }, delay + 1500);
+  }, delay + 1500));
+
+  return () => timers.forEach(clearTimeout);
 }
 
 // Same pool the browser creator uses; spawned workers get the same kind of
@@ -137,6 +147,22 @@ function normalizeReadyTimeout(ms) {
   return Math.min(Math.round(n), MAX_PROMPT_READY_MS);
 }
 
+function normalizeResultTimeout(ms) {
+  const n = Number(ms || DEFAULT_RESULT_TIMEOUT_MS);
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_RESULT_TIMEOUT_MS;
+  return Math.min(Math.round(n), MAX_RESULT_TIMEOUT_MS);
+}
+
+function activeSpawnLimit() {
+  const configured = Number(process.env.CLIDECK_MAX_ACTIVE_SPAWNED || DEFAULT_MAX_ACTIVE_SPAWNED);
+  if (!Number.isFinite(configured) || configured <= 0) return DEFAULT_MAX_ACTIVE_SPAWNED;
+  return Math.min(Math.floor(configured), MAX_CONFIGURED_ACTIVE_SPAWNED);
+}
+
+function activeSpawnedCount(sessions) {
+  return [...sessions.values()].filter(s => !!s.spawnedBySessionId).length;
+}
+
 // Resolves once the new agent looks ready for input: the first idle
 // session.status broadcast (agents with lifecycle hooks emit one when they
 // reach their interactive prompt), or the timeout as a fallback for agents
@@ -155,6 +181,61 @@ function waitForReady(sessionsApi, id, timeoutMs) {
       resolve(msg.source === 'hook' ? 'hook' : 'status');
     });
   });
+}
+
+// A new agent can emit an idle lifecycle event while still showing a startup
+// trust/onboarding screen. Submit the prompt again only when no working signal
+// acknowledges it, and keep the retry count deliberately small.
+function submitWithWorkingRetry(sessionsApi, targetId, message, opts = {}) {
+  const retryMs = Number(opts.retryMs) > 0 ? Number(opts.retryMs) : DEFAULT_PROMPT_ACK_RETRY_MS;
+  const maxAttempts = Math.max(1, Math.min(Number(opts.maxAttempts) || DEFAULT_PROMPT_ATTEMPTS, DEFAULT_PROMPT_ATTEMPTS));
+  const submitCancels = [];
+  let attempts = 0;
+  let acknowledged = false;
+  let retryTimer = null;
+  let removeListener = null;
+
+  const stopRetrying = () => {
+    if (retryTimer) clearTimeout(retryTimer);
+    retryTimer = null;
+    if (removeListener) removeListener();
+    removeListener = null;
+  };
+  const submit = () => {
+    attempts++;
+    submitCancels.push(submitSpawnInput(sessionsApi, targetId, message));
+    if (attempts > 1) console.log(`[spawn] prompt retry ${attempts}/${maxAttempts} for ${targetId.slice(0, 8)}`);
+  };
+  const scheduleRetry = () => {
+    retryTimer = setTimeout(() => {
+      if (acknowledged || sessionsApi.getSessions().get(targetId)?.working) {
+        stopRetrying();
+        return;
+      }
+      if (attempts >= maxAttempts) {
+        stopRetrying();
+        return;
+      }
+      submit();
+      scheduleRetry();
+    }, retryMs);
+  };
+
+  removeListener = sessionsApi.addBroadcastListener((msg) => {
+    if (msg.id !== targetId || msg.type !== 'session.status' || !msg.working) return;
+    acknowledged = true;
+    stopRetrying();
+  });
+  submit();
+  scheduleRetry();
+
+  return {
+    cancel() {
+      stopRetrying();
+      for (const cancel of submitCancels) cancel();
+    },
+    attempts: () => attempts,
+  };
 }
 
 function resolveCommand(payload, caller, cfg) {
@@ -181,6 +262,20 @@ async function spawnForCaller(payload, sessionsApi, cfg) {
   const callerId = String(payload.callerSessionId || '').trim();
   const caller = sessions.get(callerId);
   if (!caller) throw jsonError('Caller session is not active', 404);
+  if (caller.spawnedBySessionId) {
+    throw jsonError('Spawned workers cannot spawn more workers. Return the result to the parent session.', 409);
+  }
+
+  const limit = activeSpawnLimit();
+  const active = activeSpawnedCount(sessions);
+  if (active >= limit) {
+    throw jsonError(`Active spawned worker limit reached (${active}/${limit}). Wait for a worker to finish or close one before spawning another.`, 429);
+  }
+
+  const prompt = String(payload.prompt || '').trim();
+  if (payload.waitForResult && !prompt) {
+    throw jsonError('--wait requires an initial prompt', 400);
+  }
 
   const projects = Array.isArray(cfg.projects) ? cfg.projects : [];
   let projectId;
@@ -209,11 +304,23 @@ async function spawnForCaller(payload, sessionsApi, cfg) {
     worktree = await setupWorktree(baseCwd, name, payload.branch);
   }
 
+  // Worktree creation yields to the event loop, so re-check immediately before
+  // creating the session to keep concurrent spawn requests inside the cap.
+  const activeBeforeCreate = activeSpawnedCount(sessions);
+  if (activeBeforeCreate >= limit) {
+    await removeWorktree(worktree);
+    throw jsonError(`Active spawned worker limit reached (${activeBeforeCreate}/${limit}). Wait for a worker to finish or close one before spawning another.`, 429);
+  }
+
   const created = sessionsApi.createProgrammatic({
     commandId: cmd.id,
     cwd: worktree ? worktree.path : baseCwd,
     name,
     projectId,
+    ephemeral: true,
+    spawnedBySessionId: callerId,
+    spawnRootSessionId: caller.spawnRootSessionId || callerId,
+    spawnDepth: (Number(caller.spawnDepth) || 0) + 1,
   }, cfg);
   if (created.error) {
     await removeWorktree(worktree);
@@ -224,12 +331,38 @@ async function spawnForCaller(payload, sessionsApi, cfg) {
   console.log(`[spawn] ${caller.name || callerId.slice(0, 8)} -> "${name}"${worktree ? ` worktree ${worktree.path}` : ''}`);
 
   let promptDelivered = null;
-  const prompt = String(payload.prompt || '').trim();
+  let response = null;
+  let closed = false;
   if (prompt) {
     const readiness = await waitForReady(sessionsApi, created.id, normalizeReadyTimeout(payload.readyTimeoutMs));
     const injected = `[CliDeck spawn from ${sessionAddress(caller, callerId, projects)}]\n\n${prompt}`;
-    submitSpawnInput(sessionsApi, created.id, injected);
+    const sinceTs = Date.now();
+    const resultPromise = payload.waitForResult
+      ? waitForAnswer({
+        sessionsApi,
+        targetId: created.id,
+        sinceTs,
+        timeoutMs: normalizeResultTimeout(payload.resultTimeoutMs),
+      })
+      : null;
+    const submission = payload.waitForResult
+      ? submitWithWorkingRetry(sessionsApi, created.id, injected)
+      : { cancel: submitSpawnInput(sessionsApi, created.id, injected) };
     promptDelivered = readiness;
+    if (resultPromise) {
+      try {
+        response = await resultPromise;
+      } catch (e) {
+        e.message = `${e.message}; spawned worker "${name}" was left running for inspection`;
+        throw e;
+      } finally {
+        submission.cancel();
+      }
+      if (!payload.keepOpen) {
+        sessionsApi.close({ id: created.id }, cfg);
+        closed = true;
+      }
+    }
   }
 
   return {
@@ -242,6 +375,8 @@ async function spawnForCaller(payload, sessionsApi, cfg) {
     worktreePath: worktree?.path || null,
     branch: worktree?.branch || null,
     promptDelivered,
+    response,
+    closed,
   };
 }
 
@@ -256,4 +391,7 @@ async function handleHttp(req, res, sessionsApi, getConfig = () => ({})) {
   }
 }
 
-module.exports = { handleHttp, spawnForCaller, randomSessionName, slugify, setupWorktree, waitForReady };
+module.exports = {
+  handleHttp, spawnForCaller, randomSessionName, slugify, setupWorktree, waitForReady,
+  normalizeResultTimeout, activeSpawnLimit, activeSpawnedCount, submitWithWorkingRetry,
+};
