@@ -1,6 +1,6 @@
 {
   "name": "clideck",
-  "version": "1.32.1",
+  "version": "1.33.1",
   "description": "One screen for all your AI coding agents — run, monitor, and manage multiple CLI agents from a single browser tab",
   "main": "server.js",
   "bin": {
@@ -45,7 +45,7 @@
     "@xterm/addon-fit": "0.12.0-beta.292",
     "@xterm/addon-webgl": "0.20.0-beta.291",
     "@xterm/xterm": "6.1.0-beta.292",
-    "node-pty": "^1.1.0",
+    "node-pty": "1.2.0-beta.15",
     "smol-toml": "^1.7.1",
     "ws": "^8.21.1"
   },
@@ -57,6 +57,6 @@
     "node": ">=18"
   },
   "allowScripts": {
-    "node-pty@1.1.0": true
+    "node-pty@1.2.0-beta.15": true
   }
 }

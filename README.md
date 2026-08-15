@@ -37,15 +37,19 @@ clideck
 
 Open [localhost:4000](http://localhost:4000). Click **+**, pick an agent, start working.
 
-Or just run it once with `npx clideck`. Works on macOS and Windows. Node 18+.
+Or just run it once with `npx clideck`. Node 18+. Works on macOS, Linux, and Windows 10 1809+.
 
-On Linux, node-pty ships no prebuilt binary, so it has to compile on install:
+Linux ships prebuilt binaries for glibc x64 and arm64, so nothing compiles. Other Linux setups need to build node-pty from source:
 
 ```bash
+# Debian/Ubuntu on an architecture with no prebuilt binary
 sudo apt-get install -y build-essential python3 && npm install -g clideck --allow-scripts=node-pty
+
+# Alpine/musl - a glibc prebuild does exist, so the source build has to be forced
+apk add python3 make g++ && npm_config_build_from_source=true npm install -g clideck --allow-scripts=node-pty
 ```
 
-Linux is otherwise untested - if you try it, [open an issue](https://github.com/rustykuntz/clideck/issues).
+Hit a problem on Linux? [open an issue](https://github.com/rustykuntz/clideck/issues).
 
 If port `4000` is already in use:
 
