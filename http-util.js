@@ -41,18 +41,16 @@ function resolveProject(projects, nameOrId) {
   throw jsonError(`No project named "${text}"`, 404);
 }
 
-// CliDeck may bind only to a VM/VPN interface, so a child process on this host
-// can reach it with the same source and destination address rather than 127/8.
+// A local child connecting to a specific interface bind has matching source
+// and destination addresses rather than a loopback source.
 function isSameHost(req) {
-  const remote = req.socket?.remoteAddress || '';
-  const local = req.socket?.localAddress || '';
-  const normalize = (addr) => addr.startsWith('::ffff:') ? addr.slice(7) : addr;
-  const remoteAddr = normalize(remote);
-  const localAddr = normalize(local);
-  return remoteAddr === '::1'
-    || remoteAddr === '127.0.0.1'
-    || remoteAddr.startsWith('127.')
-    || (!!remoteAddr && !!localAddr && remoteAddr === localAddr);
+  const normalize = addr => addr.startsWith('::ffff:') ? addr.slice(7) : addr;
+  const remote = normalize(req.socket?.remoteAddress || '');
+  const local = normalize(req.socket?.localAddress || '');
+  return remote === '::1'
+    || remote === '127.0.0.1'
+    || remote.startsWith('127.')
+    || (!!remote && !!local && remote === local);
 }
 
 function sameProject(a, b) {
