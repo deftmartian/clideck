@@ -248,13 +248,13 @@ test('service worker updates never take over or reload an active terminal automa
 });
 
 test('server serves the web manifest with its PWA MIME type', () => {
-  const server = read('server.js');
+  const serverStatic = read('server-static.js');
   assert.match(
-    server,
+    serverStatic,
     /['"]\.webmanifest['"]\s*:\s*['"]application\/manifest\+json(?:;[^'"]*)?['"]/,
   );
-  assert.match(server, /['"]Cache-Control['"]:\s*['"]no-cache['"]/);
-  assert.match(server, /req\.headers\[['"]if-none-match['"]\]/);
+  assert.match(serverStatic, /['"]Cache-Control['"]:\s*['"]no-cache['"]/);
+  assert.match(serverStatic, /req\.headers\[['"]if-none-match['"]\]/);
 });
 
 test('worker cache is limited to an inert offline fallback', () => {
@@ -278,6 +278,7 @@ test('protocol compatibility gates queued mutations until server config arrives'
   } = require('../protocol');
   const protocol = read('protocol.js');
   const server = read('server.js');
+  const protocolGate = read('server-protocol-gate.js');
   const handlers = read('handlers.js');
   const state = read('public/js/state.js');
   const app = read('public/js/app.js');
@@ -298,9 +299,10 @@ test('protocol compatibility gates queued mutations until server config arrives'
   assert.equal(isClientProtocolCompatible(2, 2), true);
   assert.equal(isClientProtocolCompatible(3, 2), false);
   assert.match(app, /searchParams\.set\(CLIENT_PROTOCOL_PARAM,\s*String\(CLIENT_PROTOCOL_VERSION\)\)/);
-  assert.match(server, /!isClientProtocolCompatible\(receivedProtocolVersion\)/);
-  assert.match(server, /type:\s*['"]protocol\.incompatible['"]/);
-  assert.match(server, /ws\.close\(1008,/);
+  assert.match(server, /acceptClient\(ws,\s*req,/);
+  assert.match(protocolGate, /isClientProtocolCompatible\(receivedProtocolVersion\)/);
+  assert.match(protocolGate, /type:\s*['"]protocol\.incompatible['"]/);
+  assert.match(protocolGate, /ws\.close\(1008,/);
   assert.match(handlers, /buildId:\s*CLIENT_BUILD_ID/);
   assert.match(handlers, /protocolVersion:\s*CLIENT_PROTOCOL_VERSION/);
   assert.match(state, /state\.protocolReady\s*&&\s*state\.ws/);
@@ -346,12 +348,12 @@ test('terminal input is never queued while reconnecting', async () => {
 });
 
 test('connection diagnostics distinguish offline, server, and authentication failures', () => {
-  const server = read('server.js');
+  const localHttp = read('server-http-local.js');
   const pwa = read('public/js/pwa.js');
   const app = read('public/js/app.js');
 
-  assert.match(server, /req\.url\s*===\s*['"]\/api\/health['"]/);
-  assert.match(server, /['"]Cache-Control['"]:\s*['"]no-store['"]/);
+  assert.match(localHttp, /req\.url\s*===\s*['"]\/api\/health['"]/);
+  assert.match(localHttp, /['"]Cache-Control['"]:\s*['"]no-store['"]/);
   assert.match(pwa, /response\.type\s*===\s*['"]opaqueredirect['"]/);
   for (const state of ['offline', 'unavailable', 'auth', 'incompatible']) {
     assert.match(pwa, new RegExp(`\\b${state}:`));

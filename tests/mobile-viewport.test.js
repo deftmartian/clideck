@@ -53,7 +53,7 @@ test('one viewport controller owns mobile geometry changes', () => {
 test('terminal loads the installed xterm beta line with accelerated rendering and a safe fallback', () => {
   const pkg = JSON.parse(read('package.json'));
   const index = read('public/index.html');
-  const server = read('server.js');
+  const serverStatic = read('server-static.js');
   const terminals = read('public/js/terminals.js');
   const vendoredWebgl = read('public/addon-webgl.js');
   const installedWebgl = read('node_modules/@xterm/addon-webgl/lib/addon-webgl.js');
@@ -61,9 +61,9 @@ test('terminal loads the installed xterm beta line with accelerated rendering an
   for (const dependency of ['@xterm/xterm', '@xterm/addon-fit', '@xterm/addon-webgl']) {
     assert.match(pkg.dependencies[dependency], /-beta\.\d+$/);
   }
-  assert.match(server, /'\/xterm\.css':\s+require\.resolve\('@xterm\/xterm\/css\/xterm\.css'\)/);
-  assert.match(server, /'\/xterm\.js':\s+require\.resolve\('@xterm\/xterm\/lib\/xterm\.js'\)/);
-  assert.match(server, /'\/addon-fit\.js':\s+require\.resolve\('@xterm\/addon-fit\/lib\/addon-fit\.js'\)/);
+  assert.match(serverStatic, /'\/xterm\.css':\s+require\.resolve\('@xterm\/xterm\/css\/xterm\.css'\)/);
+  assert.match(serverStatic, /'\/xterm\.js':\s+require\.resolve\('@xterm\/xterm\/lib\/xterm\.js'\)/);
+  assert.match(serverStatic, /'\/addon-fit\.js':\s+require\.resolve\('@xterm\/addon-fit\/lib\/addon-fit\.js'\)/);
   assert.match(index, /<script src="\/addon-webgl\.js"><\/script>/);
   assert.equal(vendoredWebgl, installedWebgl);
   assert.match(terminals, /smoothScrollDuration:\s*180/);
