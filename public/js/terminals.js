@@ -4,10 +4,7 @@ import { resolveTheme, resolveAccent, applyTheme } from './profiles.js';
 import { attachToTerminal, registerHotkey } from './hotkeys.js';
 import { closeDropdown } from './prompts.js';
 import { showToast } from './toast.js';
-import { syncViewport } from './viewport.js';
-import { createMobileComposer, loadStoredDraft } from './mobile-composer.js';
-import { createMobileSelection } from './mobile-selection.js';
-import { createMobileTouchScroll } from './mobile-touch-scroll.js';
+import { createTerminalLocalIntegration } from './terminal-local.js';
 
 function isLightBg(themeId) {
   const bg = resolveTheme(themeId)?.background;
@@ -92,68 +89,9 @@ const LIGHT_BALLS = ['#0891b2', '#059669', '#7c3aed'];
 
 const URL_RE = /\bhttps?:\/\/[^\s<>"'`]+/g;
 const JUMP_LATEST_THRESHOLD_ROWS = 3;
-const JUMP_LATEST_VISIBLE_CLASS = 'is-visible';
 const terminalInputActions = new Map();
 let terminalInputActionSeq = 0;
 let terminalInputActionsEl = null;
-const mobileComposer = createMobileComposer({
-  getActiveId: () => state.active,
-  getEntry: id => state.terms.get(id),
-  getEntries: () => state.terms.values(),
-  sendInput: (id, data) => send({ type: 'input', id, data }),
-  onControlInput: trackTerminalInputData,
-  onDraftChange: refreshTerminalInputActions,
-  onCommitted: () => {
-    closeDropdown();
-    refreshTerminalInputActions();
-  },
-  onSendFailure: () => showToast('The terminal is not connected. Your draft was kept.', {
-    title: 'Mobile input', type: 'error', duration: 3500,
-  }),
-});
-const mobileTouchScroll = createMobileTouchScroll({
-  isSelectionActive: () => mobileSelection.isActive(),
-  sendInput: (id, data) => send({ type: 'input', id, data }),
-  onDragClaim: () => mobileComposer.blurInput(),
-  onTap: (_id, term, screen, touch) => activateTerminalLinkAtPoint(term, screen, touch),
-  // Holding a still finger on the terminal arms Select mode without a trip
-  // through the drawer.
-  onLongPress: () => mobileSelection.activate(),
-  onAppScroll: reportAppWheelScroll,
-});
-const mobileSelection = createMobileSelection({
-  getActiveId: () => state.active,
-  getEntry: id => state.terms.get(id),
-  available: () => mobileComposer.available(),
-  writeText: writeClipboardText,
-  onActivate: () => {
-    mobileComposer.closeTools();
-    mobileComposer.blurInput();
-  },
-  onModeChange: refreshTerminalInputActions,
-  onCopied: length => showToast(`${length} character${length === 1 ? '' : 's'} copied.`, {
-    title: 'Terminal selection', duration: 1800,
-  }),
-  onCopyError: () => showToast('Could not copy the terminal selection.', {
-    title: 'Copy failed', type: 'error', duration: 3000,
-  }),
-});
-
-function recoverActiveTerminalSurface() {
-  syncViewport();
-  requestAnimationFrame(() => {
-    const entry = state.active ? state.terms.get(state.active) : null;
-    if (!entry?.term) return;
-    try { entry.term.clearTextureAtlas?.(); } catch {}
-    try { entry.term.refresh(0, Math.max(0, entry.term.rows - 1)); } catch {}
-    entry.requestFit?.();
-  });
-}
-
-window.addEventListener('pageshow', recoverActiveTerminalSurface, { passive: true });
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') recoverActiveTerminalSurface();
-});
 
 function ensureTerminalInputActionsEl() {
   if (terminalInputActionsEl?.isConnected) return terminalInputActionsEl;
@@ -177,8 +115,7 @@ function refreshTerminalInputActions() {
     action.button.classList.toggle('is-busy', !!action.busy);
     if (visible) visibleCount++;
   }
-  el.classList.toggle('is-hidden', !entry || visibleCount === 0 || !!entry.inputHasText
-    || !!entry.composerDraft || !!entry.scrolledUp || mobileSelection.isActive());
+  el.classList.toggle('is-hidden', terminalLocal.inputActionsHidden(entry, visibleCount));
 }
 
 function setTerminalInputAction(action, patch) {
@@ -260,6 +197,12 @@ export function trackTerminalInputData(id, data) {
   }
 }
 
+const terminalLocal = createTerminalLocalIntegration({
+  refreshInputActions: refreshTerminalInputActions,
+  trackInput: trackTerminalInputData,
+  writeClipboardText,
+});
+
 function cleanUrlMatch(text, index) {
   let url = text;
   while (/[),.;:!?\\\]}]+$/.test(url)) url = url.slice(0, -1);
@@ -276,25 +219,6 @@ function cleanUrlMatch(text, index) {
 function openTerminalLink(url) {
   const win = window.open(url, '_blank', 'noopener,noreferrer');
   if (win) win.opener = null;
-}
-
-function activateTerminalLinkAtPoint(term, screen, touch) {
-  // xterm's linkifier discovers both OSC 8 and registered plain-text links on
-  // mousemove, then activates the discovered link across mousedown/mouseup.
-  // Touch browsers do not reliably synthesize that sequence, so replay the tap
-  // through xterm instead of maintaining a second URL parser here.
-  const common = {
-    bubbles: true,
-    cancelable: true,
-    clientX: touch.clientX,
-    clientY: touch.clientY,
-    button: 0,
-  };
-  screen.dispatchEvent(new MouseEvent('mousemove', { ...common, buttons: 0 }));
-  if (!screen.classList.contains('xterm-cursor-pointer')) return false;
-  screen.dispatchEvent(new MouseEvent('mousedown', { ...common, buttons: 1 }));
-  screen.dispatchEvent(new MouseEvent('mouseup', { ...common, buttons: 0 }));
-  return true;
 }
 
 function addLinkProvider(term) {
@@ -325,134 +249,6 @@ function shouldShowJumpLatest(term) {
   const buf = term.buffer.active;
   const maxViewportY = Math.max(buf.baseY || 0, (buf.length || 0) - term.rows);
   return (maxViewportY - buf.viewportY) > JUMP_LATEST_THRESHOLD_ROWS;
-}
-
-// Mouse-tracking TUIs own their scrollback: touch drags become wheel reports
-// and xterm's viewport never moves, so shouldShowJumpLatest is blind there.
-// Keep a conservative scroll debt instead. Mouse reports do not expose the
-// application's real scroll position and applications may move several rows
-// per report, so a 1:1 counter can hide the button before the app reaches the
-// bottom. Upward reports accrue safety-weighted debt; downward reports repay it
-// one at a time. The button (or an explicit overscroll) is therefore the
-// authoritative way to clear uncertain app-owned scrollback.
-const APP_SCROLL_DEBT_CAP = 2000;
-const APP_SCROLL_UP_DEBT_MULTIPLIER = 4;
-const APP_SCROLL_JUMP_MIN_VIEWPORTS = 2;
-function reportAppWheelScroll(id, steps) {
-  const entry = state.terms.get(id);
-  if (!entry) return;
-  const current = entry.appScrollDebt || 0;
-  const delta = steps < 0
-    ? -steps * APP_SCROLL_UP_DEBT_MULTIPLIER
-    : -steps;
-  const debt = Math.min(APP_SCROLL_DEBT_CAP, Math.max(0, current + delta));
-  if (debt === current) return;
-  entry.appScrollDebt = debt;
-  entry.refreshJumpLatest?.();
-}
-
-function resetAppWheelScroll(entry) {
-  if (!entry?.appScrollDebt) return;
-  entry.appScrollDebt = 0;
-  entry.refreshJumpLatest?.();
-}
-
-// Desktop wheel over a mouse-tracking session: xterm reroutes the wheel to
-// the app as SGR reports through term.onData instead of moving its viewport,
-// so count them exactly like the touch layer's drag reports. 64 scrolls
-// toward earlier content (accumulates), 65 toward latest (unwinds).
-const WHEEL_REPORT_RE = /\x1b\[<6([45]);\d+;\d+M/g;
-function countWheelReports(id, data) {
-  if (!data || !data.includes('\x1b[<6')) return;
-  let up = 0;
-  let down = 0;
-  for (const match of data.matchAll(WHEEL_REPORT_RE)) {
-    if (match[1] === '4') up += 1;
-    else down += 1;
-  }
-  if (up || down) reportAppWheelScroll(id, down - up);
-}
-
-function createJumpLatestButton(id, term) {
-  const btn = document.createElement('button');
-  btn.type = 'button';
-  btn.className = 'tmx-jump-latest';
-  btn.title = 'Jump to latest';
-  btn.setAttribute('aria-label', 'Jump to latest output');
-  btn.innerHTML = `
-    <span class="tmx-jump-latest-glow"></span>
-    <span class="tmx-jump-latest-icon">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M12 5v14"/>
-        <path d="m6.5 13.5 5.5 5.5 5.5-5.5"/>
-      </svg>
-    </span>`;
-  btn.addEventListener('click', (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    btn.classList.add('settling');
-    mobileTouchScroll.interrupt(id);
-    mobileComposer.blurInput();
-    const entry = state.terms.get(id);
-    const appDebt = entry?.appScrollDebt || 0;
-    if (appDebt > 0 && term.modes.mouseTrackingMode !== 'none') {
-      // Unwind the app's own scrollback with the same wheel reports the drag
-      // sent. Conservative debt covers apps that move multiple rows per upward
-      // report, while the viewport floor handles shallow or uncertain state.
-      // The hard cap keeps a broken application from causing an unbounded send.
-      const col = Math.max(1, Math.ceil(term.cols / 2));
-      const row = Math.max(1, Math.ceil(term.rows / 2));
-      const reports = Math.min(
-        APP_SCROLL_DEBT_CAP,
-        Math.max(appDebt, term.rows * APP_SCROLL_JUMP_MIN_VIEWPORTS),
-      ) + JUMP_LATEST_THRESHOLD_ROWS;
-      send({ type: 'input', id, data: `\u001b[<65;${col};${row}M`.repeat(reports) });
-    }
-    resetAppWheelScroll(entry);
-    term.scrollToBottom();
-    if (!mobileComposer.ownsInput(entry)) term.focus();
-    setTimeout(() => btn.classList.remove('settling'), 260);
-  });
-  return btn;
-}
-
-function enableAcceleratedRenderer(term, el) {
-  el.dataset.renderer = 'dom';
-  const WebglAddonCtor = globalThis.WebglAddon?.WebglAddon;
-  if (!WebglAddonCtor) {
-    el.dataset.rendererFallback = 'addon-unavailable';
-    return;
-  }
-
-  let addon;
-  try {
-    addon = new WebglAddonCtor();
-    addon.onContextLoss(() => {
-      addon.dispose();
-      el.dataset.renderer = 'dom';
-    });
-    term.loadAddon(addon);
-    el.dataset.renderer = 'webgl';
-    delete el.dataset.rendererFallback;
-  } catch {
-    try { addon?.dispose(); } catch {}
-    el.dataset.rendererFallback = 'webgl-unavailable';
-  }
-}
-
-function updateJumpLatestButton(id, term, btn) {
-  const entry = state.terms.get(id);
-  // Leaving mouse tracking is authoritative: the application no longer owns
-  // wheel scrollback, so any remaining conservative debt is obsolete.
-  if (entry?.appScrollDebt && term.modes.mouseTrackingMode === 'none') {
-    entry.appScrollDebt = 0;
-  }
-  const scrolledUp = shouldShowJumpLatest(term)
-    || (entry?.appScrollDebt || 0) > 0;
-  btn.classList.toggle(JUMP_LATEST_VISIBLE_CLASS, scrolledUp);
-  if (!entry || entry.scrolledUp === scrolledUp) return;
-  entry.scrolledUp = scrolledUp;
-  if (id === state.active) refreshTerminalInputActions();
 }
 
 function startBounce(container) {
@@ -807,20 +603,12 @@ export function addTerminal(id, name, themeId, commandId, projectId, muted, last
     cursorBlink: true,
     scrollback: 10000,
     smoothScrollDuration: 180,
-    linkHandler: {
-      activate: (_event, url) => openTerminalLink(url),
-    },
+    linkHandler: terminalLocal.linkHandler,
   });
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
   addLinkProvider(term);
-  term.onData(data => {
-    const entry = state.terms.get(id);
-    if (mobileComposer.ownsInput(entry)) return;
-    trackTerminalInputData(id, data);
-    countWheelReports(id, data);
-    send({ type: 'input', id, data });
-  });
+  term.onData(data => terminalLocal.handleTerminalData(id, data));
 
   // [TRANSCRIPT-CAPTURE] initial settled capture, plus one delayed idle save;
   // agents with no push status (finalizeOnCapture) also save on each settled render
@@ -904,24 +692,14 @@ export function addTerminal(id, name, themeId, commandId, projectId, muted, last
   }, 0);
 
   term.open(el);
-  mobileComposer.syncTerminalInput({ term, mobileDirect: false });
-  mobileSelection.attach(id, term, el);
-  mobileTouchScroll.attach(id, term, el);
-  enableAcceleratedRenderer(term, el);
-  const jumpLatestBtn = createJumpLatestButton(id, term);
-  el.appendChild(jumpLatestBtn);
-  const refreshJumpLatest = () => updateJumpLatestButton(id, term, jumpLatestBtn);
-  term.onScroll(refreshJumpLatest);
-  term.onWriteParsed(refreshJumpLatest);
-  // Replayed writes are bracketed so parser-driven side effects (OSC 52
-  // clipboard copies) can tell replayed scrollback from live output.
-  const replayState = { count: 0 };
-  const writeChunk = (data, replay) => {
+  const refreshJumpLatest = terminalLocal.attachTerminal(id, term, el, shouldShowJumpLatest);
+  let replayWrites = 0;
+  const writeChunk = (data, replay = false) => {
     if (!replay) { term.write(data); return; }
-    replayState.count += 1;
-    term.write(data, () => { replayState.count -= 1; });
+    replayWrites += 1;
+    term.write(data, () => { replayWrites -= 1; });
   };
-  attachToTerminal(term, presetId, () => replayState.count > 0);
+  attachToTerminal(term, presetId, () => replayWrites > 0);
   const onContextMenu = (e) => {
     if (e.shiftKey) return;
     e.preventDefault();
@@ -933,26 +711,8 @@ export function addTerminal(id, name, themeId, commandId, projectId, muted, last
   let fitted = false, pending = [];
   // [FIT-GUARD] only call fit() when proposed dimensions actually change — prevents
   // unnecessary buffer reflows that cause scrollbar jumpiness on sub-pixel layout shifts
-  let fitRaf = 0;
-  function doFit() {
-    const dims = fit.proposeDimensions();
-    if (!dims || (dims.cols === term.cols && dims.rows === term.rows)) return;
-    const oldBuffer = term.buffer.active;
-    const distanceFromBottom = Math.max(0, oldBuffer.baseY - oldBuffer.viewportY);
-    fit.fit();
-    // A visual viewport resize (usually the Android keyboard) changes row
-    // count. Preserve the user's scrollback distance instead of letting xterm
-    // occasionally reset the viewport to the start of the buffer.
-    if (distanceFromBottom > 0) {
-      const newBuffer = term.buffer.active;
-      term.scrollToLine(Math.max(0, newBuffer.baseY - distanceFromBottom));
-    }
-    send({ type: 'resize', id, cols: term.cols, rows: term.rows });
-  }
-  function requestFit() {
-    if (fitRaf) return;
-    fitRaf = requestAnimationFrame(() => { fitRaf = 0; doFit(); });
-  }
+  const fitController = terminalLocal.createFitController(id, term, fit);
+  const requestFit = () => fitController.request();
   const ro = new ResizeObserver(() => {
     if (!el.offsetWidth) return;
     if (!fitted) {
@@ -987,8 +747,7 @@ export function addTerminal(id, name, themeId, commandId, projectId, muted, last
       refreshJumpLatest();
     }
   }, 500);
-  const cancelFitRaf = () => { if (fitRaf) { cancelAnimationFrame(fitRaf); fitRaf = 0; } };
-  state.terms.set(id, { term, fit, el, ro, requestFit, cancelFitRaf, onContextMenu, inputLength: 0, inputHasText: false, composerDraft: loadStoredDraft(id), mobileDirect: false, scrolledUp: false, appScrollDebt: 0, refreshJumpLatest, themeId, commandId, presetId: presetId || null, projectId: projectId || null, muted: !!muted, working: false, workStartedAt: null, stopBounce, queue: (data, replay = false) => { if (!fitted) { pending.push({ data, replay }); return true; } return false; }, writeChunk, lastActivityAt: Date.now(), unread: false, lastPreviewText: lastPreview || '', searchText: '' });
+  state.terms.set(id, { term, fit, el, ro, requestFit, cancelFitRaf: () => fitController.cancel(), onContextMenu, inputLength: 0, inputHasText: false, scrolledUp: false, ...terminalLocal.entryState(id, refreshJumpLatest, requestFit), themeId, commandId, presetId: presetId || null, projectId: projectId || null, muted: !!muted, working: false, workStartedAt: null, stopBounce, queue: (data, replay = false) => { if (!fitted) { pending.push({ data, replay }); return true; } return false; }, writeChunk, lastActivityAt: Date.now(), unread: false, lastPreviewText: lastPreview || '', searchText: '' });
   if (working) setStatus(id, true);
   else renderSessionStatus(state.terms.get(id), statusEl, false); // idle sessions get the zᶻZ icon now, not a blank slot until their first transition
   refreshTerminalInputActions();
@@ -1006,8 +765,7 @@ export function removeTerminal(id) {
   entry.cancelFitRaf?.();
   entry.ro?.disconnect();
   entry.el.removeEventListener?.('contextmenu', entry.onContextMenu);
-  mobileSelection.detach(id);
-  mobileTouchScroll.detach(id);
+  terminalLocal.detach(id);
   entry.term.dispose();
   entry.el.remove();
   state.terms.delete(id);
@@ -1018,8 +776,7 @@ export function removeTerminal(id) {
     if (next) select(next);
     else {
       state.active = null;
-      mobileComposer.refresh();
-      mobileSelection.refresh();
+      terminalLocal.refresh();
       refreshTerminalInputActions();
       document.getElementById('empty').style.display = 'flex';
       document.getElementById('terminals').style.pointerEvents = 'none';
@@ -1058,11 +815,10 @@ export function select(id) {
     }
     entry.term.scrollToBottom();
     if (!document.querySelector('[contenteditable="true"]')
-      && !mobileComposer.ownsInput(entry)) entry.term.focus();
+      && !terminalLocal.ownsInput(entry)) entry.term.focus();
   }
   state.active = id;
-  mobileComposer.refresh();
-  mobileSelection.refresh();
+  terminalLocal.refresh();
   refreshTerminalInputActions();
   localStorage.setItem('clideck.activeSessionId', id);
 }

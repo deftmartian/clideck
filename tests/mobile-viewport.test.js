@@ -31,6 +31,7 @@ test('one viewport controller owns mobile geometry changes', () => {
   const index = read('public/index.html');
   const viewport = read('public/js/viewport.js');
   const terminals = read('public/js/terminals.js');
+  const terminalLocal = read('public/js/terminal-local.js');
   const prompts = read('public/js/prompts.js');
   const viewportOwners = fs.readdirSync(path.join(root, 'public/js'))
     .filter(file => file.endsWith('.js'))
@@ -45,7 +46,8 @@ test('one viewport controller owns mobile geometry changes', () => {
   assert.match(viewport, /isPinchZoomed\s*\?\s*layoutHeight/);
   assert.doesNotMatch(terminals, /visualViewport/);
   assert.doesNotMatch(prompts, /visualViewport/);
-  assert.match(terminals, /syncViewport\(\)/);
+  assert.match(terminals, /createTerminalLocalIntegration/);
+  assert.match(terminalLocal, /syncViewport\(\)/);
   assert.match(prompts, /getViewportRect\(\)/);
   assert.match(prompts, /onViewportChange\(scheduleDropdownPosition\)/);
 });
@@ -55,6 +57,7 @@ test('terminal loads the installed xterm beta line with accelerated rendering an
   const index = read('public/index.html');
   const serverStatic = read('server-static.js');
   const terminals = read('public/js/terminals.js');
+  const terminalLocal = read('public/js/terminal-local.js');
   const vendoredWebgl = read('public/addon-webgl.js');
   const installedWebgl = read('node_modules/@xterm/addon-webgl/lib/addon-webgl.js');
 
@@ -67,9 +70,9 @@ test('terminal loads the installed xterm beta line with accelerated rendering an
   assert.match(index, /<script src="\/addon-webgl\.js"><\/script>/);
   assert.equal(vendoredWebgl, installedWebgl);
   assert.match(terminals, /smoothScrollDuration:\s*180/);
-  assert.match(terminals, /globalThis\.WebglAddon\?\.WebglAddon/);
-  assert.match(terminals, /onContextLoss\(\(\) => \{[\s\S]{0,100}addon\.dispose\(\)/);
-  assert.match(terminals, /catch \{[\s\S]{0,60}addon\?\.dispose\(\)/);
+  assert.match(terminalLocal, /globalThis\.WebglAddon\?\.WebglAddon/);
+  assert.match(terminalLocal, /onContextLoss\(\(\) => \{[\s\S]{0,100}addon\.dispose\(\)/);
+  assert.match(terminalLocal, /catch \{[\s\S]{0,60}addon\?\.dispose\(\)/);
 });
 
 test('mobile composer owns predictive text until an explicit coherent send', () => {
@@ -77,6 +80,7 @@ test('mobile composer owns predictive text until an explicit coherent send', () 
   const sourceCss = read('src/input.css');
   const builtCss = read('public/tailwind.css');
   const terminals = read('public/js/terminals.js');
+  const terminalLocal = read('public/js/terminal-local.js');
   const composer = read('public/js/mobile-composer.js');
   const touchUi = read('public/js/touch-ui.js');
   const selection = read('public/js/mobile-selection.js');
@@ -97,8 +101,9 @@ test('mobile composer owns predictive text until an explicit coherent send', () 
   assert.match(sourceCss, /body\.mobile-composer-expanded \.terminal-input-actions/);
   assert.match(sourceCss, /#mobile-composer\.tools-open \.mobile-composer-accessories/);
   assert.match(builtCss, /body\.mobile-composer-enabled \.term-wrap\{[^}]*--mobile-composer-height/);
-  assert.match(terminals, /createMobileComposer\(\{/);
-  assert.match(terminals, /term\.onData\(data => \{[\s\S]{0,120}mobileComposer\.ownsInput\(entry\)\) return/);
+  assert.match(terminalLocal, /createMobileComposer\(\{/);
+  assert.match(terminals, /term\.onData\(data => terminalLocal\.handleTerminalData\(id, data\)\)/);
+  assert.match(terminalLocal, /if \(mobileComposer\.ownsInput\(entry\)\) return/);
   assert.match(composer, /terminalTextarea\.disabled = composerOwnsInput/);
   assert.match(composer, /terminalTextarea\.readOnly = composerOwnsInput \|\| !!entry\.term\.options\.disableStdin/);
   assert.match(composer, /prepareComposerData\(draft, !!entry\.term\.modes\?\.bracketedPasteMode\)/);
@@ -116,7 +121,7 @@ test('mobile composer owns predictive text until an explicit coherent send', () 
   assert.match(touchUi, /if \(mode === 'desktop'\) return false/);
   assert.match(touchUi, /if \(mode === 'touch'\) return true/);
   assert.match(app, /compactLayoutQuery = window\.matchMedia\(`\(max-width: 960px\), \$\{TOUCH_FIRST_MEDIA\}`\)/);
-  assert.match(terminals, /distanceFromBottom[\s\S]{0,320}scrollToLine/);
+  assert.match(terminalLocal, /distanceFromBottom[\s\S]{0,320}scrollToLine/);
   assert.doesNotMatch(terminals, /onMobileTerminalClick/);
   assert.doesNotMatch(terminals, /function commitMobileComposer/);
   assert.doesNotMatch(app, /getElementById\('mobile-composer-paste'\)/);
@@ -142,6 +147,7 @@ test('mobile Select mode owns drag only while armed and uses xterm public select
   const index = read('public/index.html');
   const sourceCss = read('src/input.css');
   const terminals = read('public/js/terminals.js');
+  const terminalLocal = read('public/js/terminal-local.js');
   const selection = read('public/js/mobile-selection.js');
   const clipboard = read('public/js/terminal-clipboard.js');
   const touchScroll = read('public/js/mobile-touch-scroll.js');
@@ -162,12 +168,13 @@ test('mobile Select mode owns drag only while armed and uses xterm public select
   assert.match(selection, /copyTrimmedTerminalSelection\(text, writeText\)/);
   assert.match(trimClip, /copyTrimmedTerminalSelection/);
   assert.match(touchScroll, /onTap\?\.\(id, term, screen, touch\)/);
-  assert.match(terminals, /onTap:[\s\S]{0,160}activateTerminalLinkAtPoint/);
-  assert.match(terminals, /new MouseEvent\('mousemove'/);
-  assert.match(terminals, /screen\.classList\.contains\('xterm-cursor-pointer'\)/);
-  assert.match(terminals, /linkHandler:\s*\{[\s\S]{0,100}openTerminalLink/);
-  assert.match(terminals, /mobileSelection\.attach\(id, term, el\)/);
-  assert.match(terminals, /mobileSelection\.detach\(id\)/);
+  assert.match(terminalLocal, /onTap:[\s\S]{0,160}activateTerminalLinkAtPoint/);
+  assert.match(terminalLocal, /new MouseEvent\('mousemove'/);
+  assert.match(terminalLocal, /screen\.classList\.contains\('xterm-cursor-pointer'\)/);
+  assert.match(terminalLocal, /linkHandler:\s*\{[\s\S]{0,100}openTerminalLink/);
+  assert.match(terminalLocal, /mobileSelection\.attach\(id, term, element\)/);
+  assert.match(terminalLocal, /mobileSelection\.detach\(id\)/);
+  assert.match(terminals, /terminalLocal\.attachTerminal\(id, term, el, shouldShowJumpLatest\)/);
 });
 
 test('mobile shell exposes a safe-area-aware explicit refresh control', () => {

@@ -575,7 +575,7 @@ test('foreground reconnect uses server offsets and preserves scrollback', async 
 
 test('foreground recovery has a guarded focus fallback and repaints the terminal surface', () => {
   const app = read('public/js/app.js');
-  const terminals = read('public/js/terminals.js');
+  const terminalLocal = read('public/js/terminal-local.js');
 
   assert.match(app, /window\.addEventListener\(['"]blur['"]/);
   assert.match(app, /window\.addEventListener\(['"]focus['"]/);
@@ -583,11 +583,11 @@ test('foreground recovery has a guarded focus fallback and repaints the terminal
     app,
     /Date\.now\(\)\s*-\s*blurredAt\s*>=\s*1000[\s\S]{0,160}readyState\s*!==\s*WebSocket\.OPEN[\s\S]{0,120}reconnectForegroundSocket\(\)/,
   );
-  assert.match(terminals, /function recoverActiveTerminalSurface\(\)/);
-  assert.match(terminals, /clearTextureAtlas/);
-  assert.match(terminals, /\.refresh\(0,\s*Math\.max\(0,\s*entry\.term\.rows\s*-\s*1\)\)/);
+  assert.match(terminalLocal, /function recoverActiveTerminalSurface\(\)/);
+  assert.match(terminalLocal, /clearTextureAtlas/);
+  assert.match(terminalLocal, /\.refresh\(0,\s*Math\.max\(0,\s*entry\.term\.rows\s*-\s*1\)\)/);
   assert.match(
-    terminals,
+    terminalLocal,
     /visibilitychange[\s\S]{0,160}recoverActiveTerminalSurface\(\)/,
   );
 });
