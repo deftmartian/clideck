@@ -1,12 +1,67 @@
 const { execFile } = require('child_process');
 const { mkdirSync, existsSync } = require('fs');
 const { join, basename } = require('path');
-const { sendJson, jsonError, readJson, resolveProject, isSameHost, projectName, sessionAddress } = require('./http-util');
-const { submitAskInput } = require('./session-ask');
+const { sendJson, isSameHost, projectName, sessionAddress } = require('./http-util');
 const { DATA_DIR } = require('./paths');
 
+const MAX_BODY = 2 * 1024 * 1024;
 const DEFAULT_PROMPT_READY_MS = 15 * 1000;
 const MAX_PROMPT_READY_MS = 2 * 60 * 1000;
+const BRACKETED_PASTE_START = '\x1b[200~';
+const BRACKETED_PASTE_END = '\x1b[201~';
+
+function jsonError(message, status = 400) {
+  const error = new Error(message);
+  error.status = status;
+  return error;
+}
+
+function readJson(req) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', chunk => {
+      body += chunk;
+      if (body.length > MAX_BODY) {
+        req.destroy();
+        reject(new Error('Request too large'));
+      }
+    });
+    req.on('end', () => {
+      try { resolve(body ? JSON.parse(body) : {}); }
+      catch { reject(new Error('Invalid JSON')); }
+    });
+    req.on('error', reject);
+  });
+}
+
+function resolveProject(projects, nameOrId) {
+  const text = String(nameOrId || '').trim();
+  const byId = projects.filter(project => project.id === text);
+  if (byId.length === 1) return byId[0];
+  const exact = projects.filter(project => project.name === text);
+  if (exact.length === 1) return exact[0];
+  if (exact.length > 1) throw jsonError(`Multiple projects named "${text}". Use the project id.`, 409);
+  const lower = text.toLowerCase();
+  const insensitive = projects.filter(project => String(project.name || '').toLowerCase() === lower);
+  if (insensitive.length === 1) return insensitive[0];
+  if (insensitive.length > 1) throw jsonError(`Multiple projects named "${text}". Use the project id.`, 409);
+  throw jsonError(`No project named "${text}"`, 404);
+}
+
+function submitSpawnInput(sessionsApi, targetId, message) {
+  const sessions = sessionsApi.getSessions();
+  const payload = `\n\n${message}`;
+  sessionsApi.input({
+    id: targetId,
+    data: `${BRACKETED_PASTE_START}${payload}${BRACKETED_PASTE_END}`,
+  });
+  const delay = Math.min(2500, Math.max(500, 300 + Math.ceil(message.length / 80) * 100));
+  setTimeout(() => sessionsApi.input({ id: targetId, data: '\r' }), delay);
+  setTimeout(() => {
+    const target = sessions.get(targetId);
+    if (target && !target.working) sessionsApi.input({ id: targetId, data: '\r' });
+  }, delay + 1500);
+}
 
 // Same pool the browser creator uses; spawned workers get the same kind of
 // names the user sees when creating sessions by hand.
@@ -173,7 +228,7 @@ async function spawnForCaller(payload, sessionsApi, cfg) {
   if (prompt) {
     const readiness = await waitForReady(sessionsApi, created.id, normalizeReadyTimeout(payload.readyTimeoutMs));
     const injected = `[CliDeck spawn from ${sessionAddress(caller, callerId, projects)}]\n\n${prompt}`;
-    submitAskInput(sessionsApi, created.id, injected);
+    submitSpawnInput(sessionsApi, created.id, injected);
     promptDelivered = readiness;
   }
 

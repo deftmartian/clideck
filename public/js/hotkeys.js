@@ -103,8 +103,7 @@ function decodeOsc52(data) {
 function attachClipboardOscHandler(term, isReplaying) {
   if (!term.parser?.registerOscHandler) return;
   term.parser.registerOscHandler(52, (data) => {
-    // Replayed scrollback re-parses old OSC 52 sequences on reconnects and
-    // cold loads; only live output may touch the clipboard.
+    // Replayed terminal history must not repeat clipboard side effects.
     if (isReplaying?.()) return true;
     const text = decodeOsc52(data);
     if (!text || !navigator.clipboard?.writeText) return false;

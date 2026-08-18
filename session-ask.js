@@ -1,10 +1,35 @@
 const transcript = require('./transcript');
-const { sendJson, jsonError, readJson, resolveProject, isSameHost, sameProject, projectName, sessionAddress } = require('./http-util');
+const { sendJson, isSameHost, sameProject, projectName, sessionAddress } = require('./http-util');
 
+const MAX_BODY = 2 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 const MAX_TIMEOUT_MS = 60 * 60 * 1000;
 const BRACKETED_PASTE_START = '\x1b[200~';
 const BRACKETED_PASTE_END = '\x1b[201~';
+
+function readJson(req) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', chunk => {
+      body += chunk;
+      if (body.length > MAX_BODY) {
+        req.destroy();
+        reject(new Error('Request too large'));
+      }
+    });
+    req.on('end', () => {
+      try { resolve(body ? JSON.parse(body) : {}); }
+      catch { reject(new Error('Invalid JSON')); }
+    });
+    req.on('error', reject);
+  });
+}
+
+function jsonError(message, status = 400) {
+  const err = new Error(message);
+  err.status = status;
+  return err;
+}
 
 function normalizeTimeout(ms) {
   const n = Number(ms || DEFAULT_TIMEOUT_MS);
@@ -20,6 +45,20 @@ function parseScopedTarget(target) {
     throw jsonError('Cross-project target must use @project/session');
   }
   return { project: text.slice(1, slash).trim(), session: text.slice(slash + 1).trim() };
+}
+
+function resolveProject(projects, nameOrId) {
+  const text = String(nameOrId || '').trim();
+  const byId = projects.filter(p => p.id === text);
+  if (byId.length === 1) return byId[0];
+  const exact = projects.filter(p => p.name === text);
+  if (exact.length === 1) return exact[0];
+  if (exact.length > 1) throw jsonError(`Multiple projects named "${text}". Use the project id.`, 409);
+  const lower = text.toLowerCase();
+  const insensitive = projects.filter(p => String(p.name || '').toLowerCase() === lower);
+  if (insensitive.length === 1) return insensitive[0];
+  if (insensitive.length > 1) throw jsonError(`Multiple projects named "${text}". Use the project id.`, 409);
+  throw jsonError(`No project named "${text}"`, 404);
 }
 
 function findInProject(candidates, target, projectLabel) {
@@ -200,4 +239,4 @@ async function handleHttp(req, res, sessionsApi, getConfig = () => ({})) {
   }
 }
 
-module.exports = { handleHttp, askSession, askSubmitDelay, submitAskInput };
+module.exports = { handleHttp, askSession, askSubmitDelay };
