@@ -5,6 +5,7 @@ const os = require('os');
 const { DATA_DIR } = require('./paths');
 const { defaultShell } = require('./utils');
 const { presetForCommand } = require('./preset-utils');
+const localConfig = require('./config-local');
 
 const CONFIG_PATH = join(DATA_DIR, 'config.json');
 
@@ -59,12 +60,7 @@ function deepCopy(obj) { return JSON.parse(JSON.stringify(obj)); }
 
 const PRESETS = JSON.parse(readFileSync(join(__dirname, 'agent-presets.json'), 'utf8'));
 for (const p of PRESETS) if (p.presetId === 'shell') p.command = defaultShell;
-function isPresetEnabled(preset) {
-  if (!preset?.enabledIfEnv) return true;
-  const value = String(process.env[preset.enabledIfEnv] || '').trim().toLowerCase();
-  return value === '1' || value === 'true' || value === 'yes';
-}
-const EXPOSED_PRESETS = PRESETS.filter(isPresetEnabled);
+const EXPOSED_PRESETS = PRESETS.filter(localConfig.isPresetEnabled);
 
 function matchPreset(cmd) { return presetForCommand(cmd, PRESETS, { usePresetId: false }); }
 
@@ -85,57 +81,6 @@ function isShellCommand(cmd, preset) {
     || (!cmd.isAgent && !cmd.presetId && String(cmd.label || '').toLowerCase() === 'shell');
 }
 
-// Promote second-class shell wrappers that actually launch Grok Build into the
-// first-class grok preset (hooks, resume, status, creator tile).
-function isGrokLauncherCommand(command) {
-  const s = String(command || '').trim();
-  // Only promote commands that actually launch Grok. A shell command that
-  // merely prints or passes the word "grok" must stay a shell command because
-  // migration runs automatically against persisted user configuration.
-  const executable = /^(?:"[^"]*[\\/]grok(?:\.exe)?"|'[^']*[\\/]grok(?:\.exe)?'|(?:[a-z]:)?[\\/]?(?:[^\s"'\\/]+[\\/])*grok(?:\.exe)?)(?:\s|$)/i;
-  const execWrapper = /\bexec\s+(?:"[^"]*[\\/]grok(?:\.exe)?"|'[^']*[\\/]grok(?:\.exe)?'|(?:[a-z]:)?[\\/]?(?:[^\s"'\\/]+[\\/])*grok(?:\.exe)?)(?:\s|$)/i;
-  return executable.test(s) || execWrapper.test(s);
-}
-
-function promoteShellGrokCommand(cmd) {
-  if (!cmd || cmd.presetId === 'grok') return false;
-  if (!isGrokLauncherCommand(cmd.command)) return false;
-  // Only rewrite when it was filed as shell/custom, not when another agent
-  // binary happens to appear in a grok rule string.
-  if (cmd.presetId && cmd.presetId !== 'shell' && cmd.presetId !== 'custom') return false;
-
-  const raw = String(cmd.command || '');
-  const yolo = /--permission-mode\s+bypassPermissions|--always-approve|bypassPermissions/i.test(raw);
-  const sandboxOff = /--sandbox\s+off|\bsandbox\s+off\b/i.test(raw);
-  const minimal = /(?:^|\s)--minimal(?:\s|$)/.test(raw);
-  // Fragile wrappers forced CliDeck's UUID onto Grok via bash; drop that and
-  // let SessionStart hooks capture the real Grok session ID.
-  const isWrapper = /bash|sh\b/.test(raw) && /exec\s+grok|\bgrok\b/.test(raw);
-
-  cmd.presetId = 'grok';
-  cmd.isAgent = true;
-  cmd.canResume = true;
-  if (isWrapper || !raw.trim().startsWith('grok')) {
-    const parts = ['grok'];
-    if (minimal) parts.push('--minimal');
-    if (yolo) parts.push('--permission-mode', 'bypassPermissions');
-    if (sandboxOff) parts.push('--sandbox', 'off');
-    cmd.command = parts.join(' ');
-  }
-  // Keep custom flags on resume when we rewrote, or when resume still points
-  // at the old bash wrapper / missing template.
-  const resume = String(cmd.resumeCommand || '');
-  if (!resume.includes('{{sessionId}}') || /bash|sh\b/.test(resume) || isWrapper) {
-    const base = String(cmd.command || 'grok').trim();
-    cmd.resumeCommand = `${base} --resume {{sessionId}}`;
-  }
-  cmd.sessionIdPattern = null;
-  if (!cmd.label || /^shell$/i.test(cmd.label) || /terminal/i.test(cmd.icon || '')) {
-    cmd.label = cmd.label && !/^shell$/i.test(cmd.label) ? cmd.label : 'Grok Build';
-  }
-  return true;
-}
-
 function migrate(cfg) {
   if (!Array.isArray(cfg.commands)) cfg.commands = [];
   // Migrate profiles → defaultTheme
@@ -148,7 +93,7 @@ function migrate(cfg) {
   if (!cfg.defaultTheme || cfg.defaultTheme === 'solarized-dark') cfg.defaultTheme = 'catppuccin-mocha';
   // Backfill and sync fields from presets
   for (const cmd of cfg.commands) {
-    promoteShellGrokCommand(cmd);
+    localConfig.migrateCommandBeforePreset(cmd);
     let preset = cmd.presetId ? PRESETS.find(p => p.presetId === cmd.presetId) : matchPreset(cmd);
     if (isShellCommand(cmd, preset)) {
       preset = PRESETS.find(p => p.presetId === 'shell') || preset;
@@ -184,18 +129,7 @@ function migrate(cfg) {
         cmd.resumeCommand = preset.resumeCommand;
       }
     }
-    // Grok: keep the plain shipped launcher aligned with the preset; leave
-    // YOLO / sandbox / minimal customizations intact.
-    if (preset?.presetId === 'grok') {
-      if (cmd.command === 'grok' || cmd.command === 'grok --minimal') cmd.command = preset.command;
-      if (cmd.resumeCommand === 'grok --resume {{sessionId}}'
-          || cmd.resumeCommand === 'grok --minimal --resume {{sessionId}}') {
-        cmd.resumeCommand = preset.resumeCommand;
-      }
-      if (cmd.sessionIdPattern === undefined || cmd.sessionIdPattern === 'Session ID:\\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})') {
-        cmd.sessionIdPattern = preset.sessionIdPattern;
-      }
-    }
+    localConfig.migrateCommandWithPreset(cmd, preset);
   }
   // Auto-add any shipped presets not yet in the commands list
   for (const preset of EXPOSED_PRESETS) {
@@ -215,35 +149,12 @@ function migrate(cfg) {
   return cfg;
 }
 
-function presetForShippedCommand(cmd) {
-  if (cmd?.presetId) {
-    const byId = EXPOSED_PRESETS.find(p => p.presetId === cmd.presetId);
-    if (byId) return byId;
-  }
-  const matched = matchPreset(cmd);
-  return matched && EXPOSED_PRESETS.some(p => p.presetId === matched.presetId) ? matched : null;
-}
-
-// The browser only receives commands that are usable on this host. Reconcile
-// its filtered view without treating an omitted shipped preset as a deletion:
-// a reconnect can otherwise save an empty/stale command list over Codex/Shell.
 function mergeClientUpdate(current, update, visibleIds = new Set()) {
-  const nextUpdate = { ...update };
-  if (Array.isArray(update.commands)) {
-    const incoming = [...update.commands];
-    const incomingIds = new Set(incoming.map(c => c.id));
-    const incomingPresetIds = new Set(
-      incoming.map(presetForShippedCommand).filter(Boolean).map(p => p.presetId),
-    );
-    const preserved = (current.commands || []).filter(cmd => {
-      if (incomingIds.has(cmd.id)) return false;
-      const preset = presetForShippedCommand(cmd);
-      if (preset) return !incomingPresetIds.has(preset.presetId);
-      return !visibleIds.has(cmd.id);
-    });
-    nextUpdate.commands = [...incoming, ...preserved];
-  }
-  return migrate({ ...current, ...nextUpdate });
+  return localConfig.mergeClientUpdate(current, update, visibleIds, {
+    exposedPresets: EXPOSED_PRESETS,
+    matchPreset,
+    migrate,
+  });
 }
 
 function load() {
