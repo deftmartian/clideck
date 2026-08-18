@@ -12,6 +12,7 @@ const { PORT, localUrl } = require('./runtime');
 const { saveClipboardImage, bracketedPaste } = require('./clipboard-images');
 const { CLIENT_PROTOCOL_VERSION } = require('./protocol');
 const { CLIENT_BUILD_ID } = require('./client-build');
+const grokHooks = require('./grok-hooks');
 for (const p of presets) if (p.presetId === 'shell') p.command = defaultShell;
 function isPresetEnabled(preset) {
   if (!preset?.enabledIfEnv) return true;
@@ -103,24 +104,6 @@ function configRootFor(preset, cmd) {
   if (preset?.presetId === 'pi') return expandHomePath(env.PI_CODING_AGENT_DIR) || join(os.homedir(), '.pi', 'agent');
   if (preset?.presetId === 'grok') return expandHomePath(env.GROK_HOME) || join(os.homedir(), '.grok');
   return os.homedir();
-}
-
-function grokHooksPath(preset, cmd) {
-  return join(configRootFor(preset, cmd), 'hooks', 'clideck.json');
-}
-
-function grokHooksHealthy(preset, cmd) {
-  try {
-    const s = JSON.parse(readFileSync(grokHooksPath(preset, cmd), 'utf8'));
-    const hooks = s.hooks || {};
-    return hasExistingHook(hooks.UserPromptSubmit, 'grok-hook.js', 'start')
-      && hasExistingHook(hooks.Stop, 'grok-hook.js', 'stop')
-      && hasExistingHook(hooks.SessionStart, 'grok-hook.js', 'session-start')
-      && hasExistingHook(hooks.SessionEnd, 'grok-hook.js', 'session-end')
-      && hasExistingHook(hooks.PreToolUse, 'grok-hook.js', 'menu');
-  } catch {
-    return false;
-  }
 }
 
 function checkRemoteUpdate(ws, force = false) {
@@ -297,13 +280,9 @@ function detectTelemetryConfig(c) {
           if (!detected) reason = 'Needs re-patch';
         } catch {}
       } else if (preset.presetId === 'grok') {
-        try {
-          repairAllowed = repairAllowed || hasAnyExistingHook(
-            JSON.parse(readFileSync(grokHooksPath(preset, cmd), 'utf8')).hooks || {},
-            'grok-hook.js',
-          );
-        } catch {}
-        detected = grokHooksHealthy(preset, cmd);
+        const grokRoot = configRootFor(preset, cmd);
+        repairAllowed = repairAllowed || grokHooks.hasAny(grokRoot);
+        detected = grokHooks.healthy(grokRoot, port);
         if (!detected) reason = 'Needs re-patch';
       } else if (preset.presetId === 'opencode') {
         detected = opencodeBridgeLooksHealthy();
@@ -950,42 +929,7 @@ function applyTelemetryConfig(preset, cmd = null) {
     }
 
     if (preset.presetId === 'grok') {
-      const configPath = grokHooksPath(preset, cmd);
-      let settings = {};
-      if (existsSync(configPath)) {
-        try { settings = JSON.parse(readFileSync(configPath, 'utf8')); } catch {}
-      }
-      const hooks = settings.hooks || {};
-      const helperPath = join(__dirname, 'bin', 'grok-hook.js').replace(/\\/g, '/');
-      const nodePath = process.execPath.replace(/\\/g, '/');
-      const hookCmd = (route) => `"${nodePath}" "${helperPath}" ${port} ${route}`;
-      const clideckHook = (route) => ({
-        hooks: [{ type: 'command', command: hookCmd(route), timeout: 5 }],
-      });
-      const has = (arr, route) => arr?.some(h => h.hooks?.some(x => x.command === hookCmd(route)));
-      if (has(hooks.UserPromptSubmit, 'start')
-          && has(hooks.Stop, 'stop')
-          && has(hooks.SessionStart, 'session-start')
-          && has(hooks.SessionEnd, 'session-end')
-          && has(hooks.PreToolUse, 'menu')) {
-        return { success: true, message: 'Already configured' };
-      }
-      const stripOld = (arr) => (arr || []).filter(h => !h.hooks?.some(x =>
-        x.command?.includes('grok-hook.js') || x.url?.includes('/hook/grok/')));
-      hooks.UserPromptSubmit = stripOld(hooks.UserPromptSubmit);
-      hooks.Stop = stripOld(hooks.Stop);
-      hooks.SessionStart = stripOld(hooks.SessionStart);
-      hooks.SessionEnd = stripOld(hooks.SessionEnd);
-      hooks.PreToolUse = stripOld(hooks.PreToolUse);
-      if (!has(hooks.UserPromptSubmit, 'start')) hooks.UserPromptSubmit = [...(hooks.UserPromptSubmit || []), clideckHook('start')];
-      if (!has(hooks.Stop, 'stop')) hooks.Stop = [...(hooks.Stop || []), clideckHook('stop')];
-      if (!has(hooks.SessionStart, 'session-start')) hooks.SessionStart = [...(hooks.SessionStart || []), clideckHook('session-start')];
-      if (!has(hooks.SessionEnd, 'session-end')) hooks.SessionEnd = [...(hooks.SessionEnd || []), clideckHook('session-end')];
-      if (!has(hooks.PreToolUse, 'menu')) hooks.PreToolUse = [...(hooks.PreToolUse || []), clideckHook('menu')];
-      settings.hooks = hooks;
-      mkdirSync(dirname(configPath), { recursive: true });
-      writeFileSync(configPath, JSON.stringify(settings, null, 2) + '\n');
-      return { success: true, message: `Added CliDeck hooks to ${configPath}` };
+      return grokHooks.install(configRootFor(preset, cmd), port);
     }
 
     return { success: false, message: `No auto-setup for ${preset.presetId}` };
@@ -1064,26 +1008,7 @@ function removeTelemetryConfig(preset, cmd = null) {
     }
 
     if (preset.presetId === 'grok') {
-      const configPath = grokHooksPath(preset, cmd);
-      if (!existsSync(configPath)) return { success: true, message: 'No config file to clean' };
-      let settings = {};
-      try { settings = JSON.parse(readFileSync(configPath, 'utf8')); } catch {}
-      if (!settings.hooks) return { success: true, message: 'No hooks to remove' };
-      for (const event of ['UserPromptSubmit', 'Stop', 'SessionStart', 'SessionEnd', 'PreToolUse']) {
-        const arr = settings.hooks[event];
-        if (!arr) continue;
-        settings.hooks[event] = arr.filter(h => !h.hooks?.some(x =>
-          x.command?.includes('grok-hook.js') || x.url?.includes('/hook/grok/')));
-        if (!settings.hooks[event].length) delete settings.hooks[event];
-      }
-      if (!Object.keys(settings.hooks).length) {
-        try { unlinkSync(configPath); } catch {
-          writeFileSync(configPath, '{}\n');
-        }
-      } else {
-        writeFileSync(configPath, JSON.stringify(settings, null, 2) + '\n');
-      }
-      return { success: true, message: `Removed CliDeck hooks from ${configPath}` };
+      return grokHooks.remove(configRootFor(preset, cmd));
     }
 
     return { success: false, message: `No removal logic for ${preset.presetId}` };
