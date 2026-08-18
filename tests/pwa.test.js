@@ -282,11 +282,12 @@ test('protocol compatibility gates queued mutations until server config arrives'
   const handlers = read('handlers.js');
   const state = read('public/js/state.js');
   const app = read('public/js/app.js');
+  const connectionClient = read('public/js/connection-client.js');
 
   assert.match(CLIENT_BUILD_ID, /^[a-f0-9]{16}$/);
   assert.equal(calculateClientBuildId(), CLIENT_BUILD_ID);
   const serverProtocol = Number(protocol.match(/CLIENT_PROTOCOL_VERSION\s*=\s*(\d+)/)?.[1]);
-  const clientProtocol = Number(app.match(/CLIENT_PROTOCOL_VERSION\s*=\s*(\d+)/)?.[1]);
+  const clientProtocol = Number(connectionClient.match(/CLIENT_PROTOCOL_VERSION\s*=\s*(\d+)/)?.[1]);
   assert.equal(clientProtocol, serverProtocol, 'client and server protocol constants must move together');
   assert.equal(serverProtocol, CLIENT_PROTOCOL_VERSION);
   assert.equal(serverProtocol, 2, 'sequence-aware replay requires protocol v2');
@@ -298,7 +299,7 @@ test('protocol compatibility gates queued mutations until server config arrives'
   assert.equal(isClientProtocolCompatible(1, 2), false);
   assert.equal(isClientProtocolCompatible(2, 2), true);
   assert.equal(isClientProtocolCompatible(3, 2), false);
-  assert.match(app, /searchParams\.set\(CLIENT_PROTOCOL_PARAM,\s*String\(CLIENT_PROTOCOL_VERSION\)\)/);
+  assert.match(connectionClient, /searchParams\.set\(CLIENT_PROTOCOL_PARAM,\s*String\(CLIENT_PROTOCOL_VERSION\)\)/);
   assert.match(server, /acceptClient\(ws,\s*req,/);
   assert.match(protocolGate, /isClientProtocolCompatible\(receivedProtocolVersion\)/);
   assert.match(protocolGate, /type:\s*['"]protocol\.incompatible['"]/);
@@ -306,12 +307,12 @@ test('protocol compatibility gates queued mutations until server config arrives'
   assert.match(handlers, /buildId:\s*CLIENT_BUILD_ID/);
   assert.match(handlers, /protocolVersion:\s*CLIENT_PROTOCOL_VERSION/);
   assert.match(state, /state\.protocolReady\s*&&\s*state\.ws/);
-  assert.match(app, /serverProtocol\s*!==\s*CLIENT_PROTOCOL_VERSION/);
+  assert.match(connectionClient, /serverProtocol\s*!==\s*CLIENT_PROTOCOL_VERSION/);
   assert.match(app, /case\s+['"]protocol\.incompatible['"]/);
   assert.match(state, /if\s*\(state\.protocolBlocked\)\s*return false/);
-  assert.match(app, /discardQueuedSends\(\)/);
+  assert.match(connectionClient, /discardQueuedSends\(\)/);
   assert.match(
-    app,
+    connectionClient,
     /serverProtocol\s*!==[\s\S]{0,900}state\.protocolReady\s*=\s*true[\s\S]{0,900}flushQueuedSends\(\)/,
     'queued mutations flush only after compatibility succeeds',
   );
@@ -351,6 +352,7 @@ test('connection diagnostics distinguish offline, server, and authentication fai
   const localHttp = read('server-http-local.js');
   const pwa = read('public/js/pwa.js');
   const app = read('public/js/app.js');
+  const connectionClient = read('public/js/connection-client.js');
 
   assert.match(localHttp, /req\.url\s*===\s*['"]\/api\/health['"]/);
   assert.match(localHttp, /['"]Cache-Control['"]:\s*['"]no-store['"]/);
@@ -358,30 +360,34 @@ test('connection diagnostics distinguish offline, server, and authentication fai
   for (const state of ['offline', 'unavailable', 'auth', 'incompatible']) {
     assert.match(pwa, new RegExp(`\\b${state}:`));
   }
-  assert.match(app, /diagnoseConnectionFailure\(\)/);
-  assert.match(app, /Terminal input is not queued/);
+  assert.match(connectionClient, /diagnoseConnectionFailure\(\)/);
+  assert.match(connectionClient, /Terminal input is not queued/);
+  assert.match(app, /createConnectionClient\(/);
 });
 
 test('unrecoverable terminal gaps require an explicit page reload', () => {
   const app = read('public/js/app.js');
   const pwa = read('public/js/pwa.js');
+  const connectionClient = read('public/js/connection-client.js');
+  const recoveryClient = read('public/js/terminal-recovery-client.js');
 
   assert.match(pwa, /export function requirePageReload\(message\)/);
   assert.match(pwa, /showReloadReady\(message,\s*\{\s*required:\s*true\s*\}\)/);
   assert.match(pwa, /dataset\.reloadRequired\s*===\s*['"]true['"]/);
   assert.match(pwa, /if\s*\(required\)\s*document\.body\.dataset\.reloadRequired\s*=\s*['"]true['"]/);
   assert.match(pwa, /if\s*\(!worker\s*\|\|\s*isReloadMandatory\(\)\)\s*return/);
-  assert.match(app, /requireTerminalRecoveryReload\(\s*ws,/);
-  assert.match(app, /state\.protocolBlocked\s*=\s*true/);
-  assert.match(app, /if\s*\(connectionBlocked\s*\|\|\s*state\.protocolBlocked\)\s*return/);
-  assert.doesNotMatch(app, /state\.protocolBlocked\s*=\s*false/);
+  assert.match(app, /createTerminalRecoveryClient\(\{/);
+  assert.match(recoveryClient, /requireReload\(ws, message\)/);
+  assert.match(connectionClient, /state\.protocolBlocked\s*=\s*true/);
+  assert.match(connectionClient, /if\s*\(connectionBlocked\s*\|\|\s*state\.protocolBlocked\)\s*return null/);
+  assert.doesNotMatch(connectionClient, /state\.protocolBlocked\s*=\s*false/);
   assert.match(
-    app,
-    /recovery\.status === ['"]gap['"][\s\S]{0,420}requireTerminalRecoveryReload\(/,
+    recoveryClient,
+    /recovery\.status !== ['"]gap['"][\s\S]{0,420}requireReload\(ws, message\)/,
   );
   assert.match(
-    app,
-    /recovery\.status === ['"]legacy-gap['"][\s\S]{0,420}requireTerminalRecoveryReload\(/,
+    recoveryClient,
+    /recovery\.status !== ['"]legacy-gap['"][\s\S]{0,420}requireReload\(ws, message\)/,
   );
 });
 
@@ -562,9 +568,12 @@ test('foreground reconnect uses server offsets and preserves scrollback', async 
   );
 
   const app = read('public/js/app.js');
-  assert.match(app, /planTerminalReplay\(entry,\s*output,\s*msg\)/);
-  assert.match(app, /planTerminalHistory\(entry,\s*historyText,\s*msg\)/);
-  assert.match(app, /noteTerminalLiveOutput\(entry,\s*msg\.data,\s*msg\)/);
+  const recoveryClient = read('public/js/terminal-recovery-client.js');
+  assert.match(recoveryClient, /planTerminalReplay\(entry,\s*output,\s*message\)/);
+  assert.match(recoveryClient, /planTerminalHistory\(entry,\s*historyText,\s*message\)/);
+  assert.match(recoveryClient, /noteTerminalLiveOutput\(entry,\s*message\.data,\s*message\)/);
+  assert.match(app, /terminalRecovery\.handleOutput\(ws, entry, msg\)/);
+  assert.match(app, /terminalRecovery\.handleHistory\(ws, entry, msg, historyText\)/);
   assert.match(app, /if\s*\(output\)\s*markUnread\(msg\.id\)/);
   assert.doesNotMatch(
     app,
@@ -574,14 +583,14 @@ test('foreground reconnect uses server offsets and preserves scrollback', async 
 });
 
 test('foreground recovery has a guarded focus fallback and repaints the terminal surface', () => {
-  const app = read('public/js/app.js');
+  const compactNavigation = read('public/js/compact-navigation.js');
   const terminalLocal = read('public/js/terminal-local.js');
 
-  assert.match(app, /window\.addEventListener\(['"]blur['"]/);
-  assert.match(app, /window\.addEventListener\(['"]focus['"]/);
+  assert.match(compactNavigation, /window\.addEventListener\(['"]blur['"]/);
+  assert.match(compactNavigation, /window\.addEventListener\(['"]focus['"]/);
   assert.match(
-    app,
-    /Date\.now\(\)\s*-\s*blurredAt\s*>=\s*1000[\s\S]{0,160}readyState\s*!==\s*WebSocket\.OPEN[\s\S]{0,120}reconnectForegroundSocket\(\)/,
+    compactNavigation,
+    /Date\.now\(\)\s*-\s*blurredAt\s*>=\s*1000[\s\S]{0,160}readyState\s*!==\s*WebSocket\.OPEN[\s\S]{0,120}reconnect\(\)/,
   );
   assert.match(terminalLocal, /function recoverActiveTerminalSurface\(\)/);
   assert.match(terminalLocal, /clearTextureAtlas/);

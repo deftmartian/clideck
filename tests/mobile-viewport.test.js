@@ -85,6 +85,7 @@ test('mobile composer owns predictive text until an explicit coherent send', () 
   const touchUi = read('public/js/touch-ui.js');
   const selection = read('public/js/mobile-selection.js');
   const app = read('public/js/app.js');
+  const compactNavigation = read('public/js/compact-navigation.js');
 
   assert.match(index, /id="mobile-composer"[^>]*aria-hidden="true"/);
   assert.match(index, /id="mobile-composer-tools"[^>]*aria-expanded="false"/);
@@ -120,7 +121,8 @@ test('mobile composer owns predictive text until an explicit coherent send', () 
   assert.match(touchUi, /VALID_MODES = new Set\(\['auto', 'desktop', 'touch'\]\)/);
   assert.match(touchUi, /if \(mode === 'desktop'\) return false/);
   assert.match(touchUi, /if \(mode === 'touch'\) return true/);
-  assert.match(app, /compactLayoutQuery = window\.matchMedia\(`\(max-width: 960px\), \$\{TOUCH_FIRST_MEDIA\}`\)/);
+  assert.match(compactNavigation, /compactLayoutQuery = window\.matchMedia\(`\(max-width: 960px\), \$\{TOUCH_FIRST_MEDIA\}`\)/);
+  assert.match(app, /initCompactNavigation\(\{/);
   assert.match(terminalLocal, /distanceFromBottom[\s\S]{0,320}scrollToLine/);
   assert.doesNotMatch(terminals, /onMobileTerminalClick/);
   assert.doesNotMatch(terminals, /function commitMobileComposer/);
