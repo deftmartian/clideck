@@ -8,10 +8,10 @@
   },
   "scripts": {
     "start": "node server.js",
-    "build:css": "tailwindcss -i src/input.css -o public/tailwind.css --minify",
+    "build:css": "node tools/build-client.js --css-only",
     "build:client": "node tools/build-client.js",
     "check:client": "node tools/build-client.js --check",
-    "prepublishOnly": "npm run build:css && npm run build:client",
+    "prepublishOnly": "npm run build:client",
     "test": "node --test tests/*.test.js",
     "test:browser": "node tests/browser-recovery.js",
     "smoke:providers": "node tests/providers/run.js",
@@ -22,6 +22,16 @@
     "smoke:codex-hooks": "node tests/providers/codex-hooks.test.js",
     "smoke:http-util": "node --test tests/http-util.test.js"
   },
+  "files": [
+    "*.js",
+    "!tailwind.config.js",
+    "agent-presets.json",
+    "bin/",
+    "dist/public/",
+    "opencode-plugin/",
+    "pi-extension/",
+    "plugins/"
+  ],
   "keywords": [
     "terminal",
     "cli",

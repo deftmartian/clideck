@@ -5,11 +5,17 @@ const path = require('node:path');
 
 const root = path.join(__dirname, '..');
 const read = file => fs.readFileSync(path.join(root, file), 'utf8');
+function readBuiltCss() {
+  const index = read('dist/public/index.html');
+  const href = index.match(/<link rel="stylesheet" href="([^"]+)">/)?.[1];
+  assert.ok(href, 'staged HTML must reference built CSS');
+  return read(`dist/public/${href.replace(/^\//, '')}`);
+}
 
 test('mobile shell uses the dynamic viewport and protects bottom controls', () => {
   const index = read('public/index.html');
   const sourceCss = read('src/input.css');
-  const builtCss = read('public/tailwind.css');
+  const builtCss = readBuiltCss();
 
   assert.match(index, /height:\s*var\(--clideck-viewport-height,\s*100dvh\)/);
   assert.doesNotMatch(index, /<body[^>]*\bh-screen\b/);
@@ -54,7 +60,7 @@ test('one viewport controller owns mobile geometry changes', () => {
 
 test('terminal loads the installed xterm beta line with accelerated rendering and a safe fallback', () => {
   const pkg = JSON.parse(read('package.json'));
-  const index = read('public/index.html');
+  const index = read('dist/public/index.html');
   const buildTool = read('tools/build-client.js');
   const terminals = read('public/js/terminals.js');
   const terminalLocal = read('public/js/terminal-local.js');
@@ -76,7 +82,7 @@ test('terminal loads the installed xterm beta line with accelerated rendering an
 test('mobile composer owns predictive text until an explicit coherent send', () => {
   const index = read('public/index.html');
   const sourceCss = read('src/input.css');
-  const builtCss = read('public/tailwind.css');
+  const builtCss = readBuiltCss();
   const terminals = read('public/js/terminals.js');
   const terminalLocal = read('public/js/terminal-local.js');
   const composer = read('public/js/mobile-composer.js');

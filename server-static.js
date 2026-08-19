@@ -12,7 +12,7 @@ const MIME = {
   '.svg': 'image/svg+xml',
   '.mp3': 'audio/mpeg',
 };
-const PUBLIC_ROOT = join(__dirname, 'public');
+const PUBLIC_ROOT = join(__dirname, 'dist', 'public');
 const BUILD_ROOT = join(PUBLIC_ROOT, 'build');
 
 function etag(data, encoding) {
