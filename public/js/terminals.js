@@ -1,14 +1,12 @@
 import { state, send } from './state.js';
-import { Terminal } from '@xterm/xterm';
-import { FitAddon } from '@xterm/addon-fit';
 import { esc, miniMarkdown, resolveIconPath } from './utils.js';
 import { resolveTheme, resolveAccent, applyTheme } from './profiles.js';
-import { attachToTerminal, registerHotkey } from './hotkeys.js';
+import { registerHotkey } from './hotkeys.js';
 import { closeDropdown } from './prompts.js';
 import { showToast } from './toast.js';
 import { createTerminalLocalIntegration } from './terminal-local.js';
-import { countPerf, notePerf } from './perf.js';
-import { isTouchUiEnabled, onTouchUiChange } from './touch-ui.js';
+import { createTerminalRendererLifecycle } from './terminal-renderer.js';
+import { isTouchUiEnabled } from './touch-ui.js';
 
 function isLightBg(themeId) {
   const bg = resolveTheme(themeId)?.background;
@@ -86,10 +84,6 @@ export function sessionNameTakenInProject(name, projectId, exceptId = null) {
 
 const TERMINAL_SVG = `<svg class="w-3.5 h-3.5 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>`;
 const COPY_NAME_SVG = `<svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
-const MIN_CONTRAST_RATIO = 4.5;
-const MAX_DESKTOP_RENDERERS = 4;
-let rendererUseCounter = 0;
-
 const DARK_BALLS = ['#00e5ff', '#5df0d6', '#9b8cff'];
 const LIGHT_BALLS = ['#0891b2', '#059669', '#7c3aed'];
 
@@ -256,6 +250,20 @@ function shouldShowJumpLatest(term) {
   const maxViewportY = Math.max(buf.baseY || 0, (buf.length || 0) - term.rows);
   return (maxViewportY - buf.viewportY) > JUMP_LATEST_THRESHOLD_ROWS;
 }
+
+const rendererLifecycle = createTerminalRendererLifecycle({
+  terminalLocal,
+  addLinkProvider,
+  shouldShowJumpLatest,
+  onSelect: id => select(id),
+  onOpenMenu: (id, anchor) => openMenu(id, anchor),
+});
+const {
+  disposeRenderer,
+  markRendererUsed,
+  mountRenderer,
+  subscribeRenderer,
+} = rendererLifecycle;
 
 function startBounce(container) {
   const isDark = !document.documentElement.classList.contains('light');
@@ -641,154 +649,6 @@ export function addTerminal(id, name, themeId, commandId, projectId, muted, last
   regroupSessions();
 }
 
-function subscribeRenderer(id, { snapshot = false } = {}) {
-  const entry = state.terms.get(id);
-  if (!entry?.term || document.visibilityState === 'hidden') return false;
-  const hasCursor = !snapshot && entry.outputGeneration && Number.isSafeInteger(entry.lastOutputSeq);
-  return send({
-    type: 'session.subscribe',
-    id,
-    replay: hasCursor ? 'resume' : 'snapshot',
-    ...(hasCursor ? { cursor: { generation: entry.outputGeneration, seq: entry.lastOutputSeq } } : {}),
-    claimResize: true,
-    cols: entry.term.cols,
-    rows: entry.term.rows,
-  });
-}
-
-function mountRenderer(id) {
-  const entry = state.terms.get(id);
-  if (!entry || entry.term) return entry;
-
-  if (!isTouchUiEnabled()) {
-    const retained = [...state.terms.entries()]
-      .filter(([otherId, other]) => otherId !== id && otherId !== state.active && other.term)
-      .sort((a, b) => (a[1].rendererLastUsed || 0) - (b[1].rendererLastUsed || 0));
-    let rendererCount = [...state.terms.values()].filter(other => other.term).length;
-    while (rendererCount >= MAX_DESKTOP_RENDERERS && retained.length) {
-      disposeRenderer(retained.shift()[0], { evicted: true });
-      rendererCount -= 1;
-    }
-  }
-  const rehydrating = !!entry.rendererEvicted;
-  entry.rendererEvicted = false;
-  entry.rendererLastUsed = ++rendererUseCounter;
-  if (rehydrating) {
-    countPerf('snapshotRehydrations');
-    notePerf('snapshotRehydration', { id });
-  }
-
-  const el = document.createElement('div');
-  el.className = 'term-wrap';
-  if (state.active === id) el.classList.add('active');
-  el.style.backgroundColor = resolveTheme(entry.themeId).background;
-  document.getElementById('terminals').appendChild(el);
-
-  const term = new Terminal({
-    fontSize: 13,
-    fontFamily: 'Menlo, Monaco, "Courier New", monospace',
-    theme: resolveTheme(entry.themeId),
-    // Keep ANSI/truecolor output readable across dark and light terminal themes.
-    minimumContrastRatio: MIN_CONTRAST_RATIO,
-    cursorBlink: true,
-    scrollback: 10000,
-    smoothScrollDuration: 180,
-    linkHandler: terminalLocal.linkHandler,
-  });
-  countPerf('renderersCreated');
-  notePerf('rendererCreated', { id });
-  const fit = new FitAddon();
-  term.loadAddon(fit);
-  addLinkProvider(term);
-  term.onData(data => terminalLocal.handleTerminalData(id, data));
-  term.onWriteParsed(() => {
-    const current = state.terms.get(id);
-    if (current) current.lastRenderAt = Date.now();
-  });
-
-  term.open(el);
-  const refreshJumpLatest = terminalLocal.attachTerminal(id, term, el, shouldShowJumpLatest);
-  let replayWrites = 0;
-  const writeChunk = (data, replay = false) => {
-    if (!replay) { term.write(data); return; }
-    replayWrites += 1;
-    term.write(data, () => { replayWrites -= 1; });
-  };
-  attachToTerminal(term, entry.presetId, () => replayWrites > 0);
-  const onContextMenu = (e) => {
-    if (e.shiftKey) return;
-    e.preventDefault();
-    e.stopPropagation();
-    select(id);
-    openMenu(id, { x: e.clientX, y: e.clientY });
-  };
-  el.addEventListener('contextmenu', onContextMenu);
-  let fitted = false;
-  let pending = [];
-  // [FIT-GUARD] only call fit() when proposed dimensions actually change — prevents
-  // unnecessary buffer reflows that cause scrollbar jumpiness on sub-pixel layout shifts
-  const fitController = terminalLocal.createFitController(id, term, fit);
-  const requestFit = () => fitController.request();
-  Object.assign(entry, {
-    term, fit, el, requestFit,
-    cancelFitRaf: () => fitController.cancel(),
-    onContextMenu,
-    queue(data, replay = false) {
-      if (!fitted) { pending.push({ data, replay }); return true; }
-      return false;
-    },
-    writeChunk,
-    ...terminalLocal.entryState(id, refreshJumpLatest, requestFit),
-  });
-  const ro = new ResizeObserver(() => {
-    if (!el.offsetWidth) return;
-    if (!fitted) {
-      fitted = true;
-      fit.fit();
-      countPerf('terminalFits');
-      entry.fitted = true;
-      for (const chunk of pending) writeChunk(chunk.data, chunk.replay);
-      pending = null;
-      refreshJumpLatest();
-      subscribeRenderer(id, { snapshot: true });
-      return;
-    }
-    requestFit();
-  });
-  entry.ro = ro;
-  ro.observe(el);
-  return entry;
-}
-
-function disposeRenderer(id, { evicted = false } = {}) {
-  const entry = state.terms.get(id);
-  if (!entry?.term) return;
-  entry.cancelFitRaf?.();
-  entry.ro?.disconnect();
-  entry.el?.removeEventListener?.('contextmenu', entry.onContextMenu);
-  terminalLocal.detach(id);
-  entry.term.dispose();
-  countPerf('renderersDisposed');
-  entry.el?.remove();
-  if (evicted) {
-    entry.rendererEvicted = true;
-    countPerf('rendererEvictions');
-    notePerf('rendererEvicted', { id });
-  }
-  Object.assign(entry, {
-    term: null, fit: null, el: null, ro: null, fitted: false,
-    requestFit: null, cancelFitRaf: null, onContextMenu: null,
-    queue: null, writeChunk: null,
-  });
-}
-
-onTouchUiChange(enabled => {
-  if (!enabled) return;
-  for (const [id, entry] of state.terms) {
-    if (id !== state.active && entry.term) disposeRenderer(id, { evicted: true });
-  }
-});
-
 export function removeTerminal(id) {
   const entry = state.terms.get(id);
   if (!entry) return;
@@ -835,7 +695,7 @@ export function select(id) {
   }
   const entry = mountRenderer(id);
   if (entry) {
-    entry.rendererLastUsed = ++rendererUseCounter;
+    markRendererUsed(entry);
     entry.el.classList.add('active');
     entry.requestFit?.();
     if (entry.fitted) subscribeRenderer(id);

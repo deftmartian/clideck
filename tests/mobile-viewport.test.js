@@ -62,18 +62,18 @@ test('terminal loads the installed xterm beta line with accelerated rendering an
   const pkg = JSON.parse(read('package.json'));
   const index = read('dist/public/index.html');
   const buildTool = read('tools/build-client.js');
-  const terminals = read('public/js/terminals.js');
+  const renderer = read('public/js/terminal-renderer.js');
   const terminalLocal = read('public/js/terminal-local.js');
 
   for (const dependency of ['@xterm/xterm', '@xterm/addon-fit', '@xterm/addon-webgl']) {
     assert.match(pkg.dependencies[dependency], /-beta\.\d+$/);
   }
-  assert.match(terminals, /import \{ Terminal \} from '@xterm\/xterm'/);
-  assert.match(terminals, /import \{ FitAddon \} from '@xterm\/addon-fit'/);
+  assert.match(renderer, /import \{ Terminal \} from '@xterm\/xterm'/);
+  assert.match(renderer, /import \{ FitAddon \} from '@xterm\/addon-fit'/);
   assert.match(index, /<script type="module" src="\/build\/app-[A-Z0-9]+\.js"><\/script>/);
   assert.match(buildTool, /splitting:\s*true/);
   assert.match(buildTool, /target:\s*'es2020'/);
-  assert.match(terminals, /smoothScrollDuration:\s*180/);
+  assert.match(renderer, /smoothScrollDuration:\s*180/);
   assert.match(terminalLocal, /import\('@xterm\/addon-webgl'\)/);
   assert.match(terminalLocal, /onContextLoss\(\(\) => \{[\s\S]{0,100}addon\.dispose\(\)/);
   assert.match(terminalLocal, /catch \{[\s\S]{0,60}addon\?\.dispose\(\)/);
@@ -84,6 +84,7 @@ test('mobile composer owns predictive text until an explicit coherent send', () 
   const sourceCss = read('src/input.css');
   const builtCss = readBuiltCss();
   const terminals = read('public/js/terminals.js');
+  const renderer = read('public/js/terminal-renderer.js');
   const terminalLocal = read('public/js/terminal-local.js');
   const composer = read('public/js/mobile-composer.js');
   const touchUi = read('public/js/touch-ui.js');
@@ -107,7 +108,7 @@ test('mobile composer owns predictive text until an explicit coherent send', () 
   assert.match(sourceCss, /#mobile-composer\.tools-open \.mobile-composer-accessories/);
   assert.match(builtCss, /body\.mobile-composer-enabled \.term-wrap\{[^}]*--mobile-composer-height/);
   assert.match(terminalLocal, /createMobileComposer\(\{/);
-  assert.match(terminals, /term\.onData\(data => terminalLocal\.handleTerminalData\(id, data\)\)/);
+  assert.match(renderer, /term\.onData\(data => terminalLocal\.handleTerminalData\(id, data\)\)/);
   assert.match(terminalLocal, /if \(mobileComposer\.ownsInput\(entry\)\) return/);
   assert.match(composer, /terminalTextarea\.disabled = composerOwnsInput/);
   assert.match(composer, /terminalTextarea\.readOnly = composerOwnsInput \|\| !!entry\.term\.options\.disableStdin/);
@@ -151,17 +152,19 @@ test('touch UI override is browser-local and exposed in Appearance settings', ()
 
 test('desktop renderer retention is capped while touch keeps one renderer', () => {
   const terminals = read('public/js/terminals.js');
-  assert.match(terminals, /MAX_DESKTOP_RENDERERS = 4/);
-  assert.match(terminals, /rendererLastUsed/);
-  assert.match(terminals, /disposeRenderer\(retained\.shift\(\)\[0\], \{ evicted: true \}\)/);
+  const renderer = read('public/js/terminal-renderer.js');
+  assert.match(renderer, /MAX_DESKTOP_RENDERERS = 4/);
+  assert.match(renderer, /rendererLastUsed/);
+  assert.match(renderer, /disposeRenderer\(retained\.shift\(\)\[0\], \{ evicted: true \}\)/);
   assert.match(terminals, /if \(isTouchUiEnabled\(\)[\s\S]{0,160}disposeRenderer\(previousId, \{ evicted: true \}\)/);
-  assert.match(terminals, /snapshotRehydrations/);
+  assert.match(renderer, /snapshotRehydrations/);
 });
 
 test('mobile Select mode owns drag only while armed and uses xterm public selection APIs', () => {
   const index = read('public/index.html');
   const sourceCss = read('src/input.css');
   const terminals = read('public/js/terminals.js');
+  const renderer = read('public/js/terminal-renderer.js');
   const terminalLocal = read('public/js/terminal-local.js');
   const selection = read('public/js/mobile-selection.js');
   const clipboard = read('public/js/terminal-clipboard.js');
@@ -190,7 +193,7 @@ test('mobile Select mode owns drag only while armed and uses xterm public select
   assert.match(terminalLocal, /linkHandler:\s*\{[\s\S]{0,100}openTerminalLink/);
   assert.match(terminalLocal, /mobileSelection\.attach\(id, term, element\)/);
   assert.match(terminalLocal, /mobileSelection\.detach\(id\)/);
-  assert.match(terminals, /terminalLocal\.attachTerminal\(id, term, el, shouldShowJumpLatest\)/);
+  assert.match(renderer, /terminalLocal\.attachTerminal\(id, term, el, shouldShowJumpLatest\)/);
 });
 
 test('mobile shell exposes a safe-area-aware explicit refresh control', () => {
