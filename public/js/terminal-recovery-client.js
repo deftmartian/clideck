@@ -46,12 +46,41 @@ export function createTerminalRecoveryClient({ requestResync }) {
 
   function handleSnapshot(entry, message) {
     if (!entry?.term) return;
+    let snapshot = message;
+    if (Number.isSafeInteger(message.parts) && message.parts > 1) {
+      if (message.part === 0) {
+        entry.pendingSnapshot = {
+          generation: message.generation,
+          atSeq: message.atSeq,
+          cols: message.cols,
+          rows: message.rows,
+          parts: message.parts,
+          data: [],
+        };
+      }
+      const pending = entry.pendingSnapshot;
+      if (!pending
+        || pending.generation !== message.generation
+        || pending.atSeq !== message.atSeq
+        || pending.parts !== message.parts
+        || message.part !== pending.data.length) {
+        entry.pendingSnapshot = null;
+        requestResync(message.id, 'snapshot-part-gap');
+        return;
+      }
+      pending.data.push(String(message.data || ''));
+      if (pending.data.length < pending.parts) return;
+      snapshot = { ...pending, data: pending.data.join('') };
+      entry.pendingSnapshot = null;
+    } else {
+      entry.pendingSnapshot = null;
+    }
     warnedSessions.delete(message.id);
     try { entry.term.reset(); } catch {}
     entry.replayInitialized = true;
-    entry.outputGeneration = message.generation;
-    entry.lastOutputSeq = message.atSeq;
-    const data = String(message.data || '');
+    entry.outputGeneration = snapshot.generation;
+    entry.lastOutputSeq = snapshot.atSeq;
+    const data = String(snapshot.data || '');
     if (data && !entry.queue(data, true)) entry.writeChunk(data, true);
   }
 

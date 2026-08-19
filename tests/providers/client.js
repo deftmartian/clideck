@@ -85,8 +85,20 @@ class Client {
     }
     else if (msg.type === 'sessions.resumable') this.resumable = msg.list || [];
     else if (msg.type === 'session.snapshot') {
-      this.output.set(msg.id, msg.data || '');
-      this.cursors.set(msg.id, { generation: msg.generation, seq: msg.atSeq });
+      if (Number.isSafeInteger(msg.parts) && msg.parts > 1) {
+        if (msg.part === 0) this._snapshot = { id: msg.id, generation: msg.generation, atSeq: msg.atSeq, parts: [] };
+        if (this._snapshot?.id === msg.id && msg.part === this._snapshot.parts.length) {
+          this._snapshot.parts.push(msg.data || '');
+          if (this._snapshot.parts.length === msg.parts) {
+            this.output.set(msg.id, this._snapshot.parts.join(''));
+            this.cursors.set(msg.id, { generation: msg.generation, seq: msg.atSeq });
+            this._snapshot = null;
+          }
+        }
+      } else {
+        this.output.set(msg.id, msg.data || '');
+        this.cursors.set(msg.id, { generation: msg.generation, seq: msg.atSeq });
+      }
     } else if (msg.type === 'output' || msg.type === 'session.history') {
       const text = msg.data != null ? msg.data : (msg.text || '');
       this.output.set(msg.id, (this.output.get(msg.id) || '') + text);

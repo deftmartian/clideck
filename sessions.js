@@ -17,6 +17,7 @@ const { initialResumeReady, hasUsableResumeToken } = require('./resume-readiness
 const { ServerCapture } = require('./server-capture');
 const { createSessionStream } = require('./session-stream');
 const { normalizeTerminalSize } = require('./terminal-size');
+const { ReplayRing } = require('./replay-ring');
 
 const THEMES = require('./themes');
 const MAX_BUFFER = 2 * 1024 * 1024;
@@ -245,8 +246,7 @@ function spawnSession(id, cmd, parts, cwd, name, themeId, commandId, savedToken,
     commandId,
     cwd,
     pty: term,
-    chunks: [],
-    chunksSize: 0,
+    replayRing: new ReplayRing(MAX_BUFFER),
     outputGeneration: crypto.randomUUID(),
     outputSeq: 0,
     sessionToken: savedToken || null,
@@ -273,20 +273,11 @@ function spawnSession(id, cmd, parts, cwd, name, themeId, commandId, savedToken,
   term.onData((data) => {
     const startSeq = session.outputSeq;
     session.outputSeq += data.length;
-    session.chunks.push(data);
-    session.chunksSize += data.length;
-    while (session.chunksSize > MAX_BUFFER && session.chunks.length > 1) {
-      session.chunksSize -= session.chunks.shift().length;
-    }
-    if (session.chunksSize > MAX_BUFFER) {
-      const overflow = session.chunksSize - MAX_BUFFER;
-      session.chunks[0] = session.chunks[0].slice(overflow);
-      session.chunksSize = MAX_BUFFER;
-    }
+    session.replayRing.append(data, startSeq);
     // Capture session ID from output
     if (sessionIdRe && !session.sessionToken) {
-      const joined = session.chunks.join('');
-      const match = joined.match(sessionIdRe) || stripAnsi(joined).match(sessionIdRe);
+      const recentOutput = session.replayRing.suffix(64 * 1024);
+      const match = recentOutput.match(sessionIdRe) || stripAnsi(recentOutput).match(sessionIdRe);
       if (match) {
         session.sessionToken = match[1];
         console.log(`Session ${id.slice(0, 8)}: captured token via output regex: ${match[1].slice(0, 12)}…`);
@@ -643,7 +634,7 @@ function list() {
     working: !!s.working,
     outputGeneration: s.outputGeneration,
     outputSeq: s.outputSeq,
-    bufferStartSeq: s.outputSeq - s.chunksSize,
+    bufferStartSeq: s.replayRing.startSeq,
     // Last preview text for sidebar display on reconnect
     lastPreview: s.lastPreview || '', lastActivityAt: s.lastActivityAt || null,
     menu: s._menuKey ? JSON.parse(s._menuKey) : undefined,

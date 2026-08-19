@@ -3,8 +3,10 @@ const assert = require('node:assert/strict');
 const { EventEmitter } = require('events');
 const {
   BACKLOG_HIGH_WATER,
+  BATCH_MAX_BYTES,
   createSessionStream,
 } = require('../session-stream');
+const { ReplayRing } = require('../replay-ring');
 
 class FakeSocket extends EventEmitter {
   constructor() {
@@ -12,8 +14,19 @@ class FakeSocket extends EventEmitter {
     this.readyState = 1;
     this.bufferedAmount = 0;
     this.messages = [];
+    this.rawFrames = [];
+    this.closeCode = null;
+    this.failNextSend = false;
   }
-  send(raw) { this.messages.push(JSON.parse(raw)); }
+  send(raw) {
+    if (this.failNextSend) {
+      this.failNextSend = false;
+      throw new Error('send refused');
+    }
+    this.rawFrames.push(raw);
+    this.messages.push(JSON.parse(raw));
+  }
+  close(code) { this.closeCode = code; this.readyState = 3; }
   ping() {}
   terminate() { this.readyState = 3; }
 }
@@ -27,9 +40,9 @@ function fixture() {
     const session = {
       outputGeneration: generation,
       outputSeq: data.length,
-      chunks: data ? [data] : [],
-      chunksSize: data.length,
+      replayRing: new ReplayRing(2 * 1024 * 1024),
     };
+    if (data) session.replayRing.append(data, 0);
     sessions.set(id, session);
     captures.set(id, async () => ({ data: `snapshot:${id}`, atSeq: session.outputSeq, cols: 80, rows: 24 }));
     return session;
@@ -60,9 +73,9 @@ test('different subscriptions receive no cross-session output and same-session s
   await f.stream.subscribe(three, { id: 'a', replay: 'snapshot' });
   one.messages.length = two.messages.length = three.messages.length = 0;
 
-  a.chunks.push('A'); a.chunksSize += 1; a.outputSeq += 1;
+  a.replayRing.append('A', a.outputSeq); a.outputSeq += 1;
   f.stream.queueOutput('a', 'A', 0, 1);
-  b.chunks.push('B'); b.chunksSize += 1; b.outputSeq += 1;
+  b.replayRing.append('B', b.outputSeq); b.outputSeq += 1;
   f.stream.queueOutput('b', 'B', 0, 1);
   f.stream._flush('a');
   f.stream._flush('b');
@@ -128,7 +141,8 @@ test('resume current, delta, generation changes, and buffer gaps use one recover
   assert.equal(messages(ws, 'session.snapshot').length, 1);
   assert.equal(messages(ws, 'session.subscribed')[0].mode, 'snapshot');
 
-  session.chunks = ['def']; session.chunksSize = 3;
+  session.replayRing = new ReplayRing(3);
+  session.replayRing.append('abcdef', 0);
   ws.messages.length = 0;
   await f.stream.subscribe(ws, { id: 'a', replay: 'resume', cursor: { generation: 'g1', seq: 1 } });
   assert.equal(messages(ws, 'session.snapshot').length, 1);
@@ -161,11 +175,56 @@ test('backpressured clients stop terminal delivery and request resynchronization
   await f.stream.subscribe(ws, { id: 'a', replay: 'snapshot' });
   ws.messages.length = 0;
   ws.bufferedAmount = BACKLOG_HIGH_WATER + 1;
-  session.chunks.push('x'); session.chunksSize += 1; session.outputSeq += 1;
+  session.replayRing.append('x', session.outputSeq); session.outputSeq += 1;
   f.stream.queueOutput('a', 'x', 0, 1);
   f.stream._flush('a');
   assert.equal(messages(ws, 'output').length, 0);
   ws.bufferedAmount = 0;
   await new Promise(resolve => setTimeout(resolve, 130));
   assert.equal(messages(ws, 'session.resyncRequired').at(-1).reason, 'backpressure');
+  assert.equal(f.stream._stateFor(ws).phase, 'awaiting-resubscribe');
+});
+
+test('failed terminal sends do not advance the client cursor', async t => {
+  const f = fixture();
+  t.after(() => f.stream.stop());
+  const session = f.add('a');
+  const ws = new FakeSocket();
+  f.stream.register(ws);
+  await f.stream.subscribe(ws, { id: 'a', replay: 'snapshot' });
+  ws.failNextSend = true;
+  session.replayRing.append('x', session.outputSeq); session.outputSeq += 1;
+  f.stream.queueOutput('a', 'x', 0, 1);
+  f.stream._flush('a');
+  assert.equal(f.stream._stateFor(ws).nextSeq, 0);
+});
+
+test('large terminal output is emitted as UTF-8-safe bounded batches', async t => {
+  const f = fixture();
+  t.after(() => f.stream.stop());
+  const session = f.add('a');
+  const ws = new FakeSocket();
+  f.stream.register(ws);
+  await f.stream.subscribe(ws, { id: 'a', replay: 'snapshot' });
+  ws.messages.length = 0; ws.rawFrames.length = 0;
+  const data = `${'🙂'.repeat(9000)}${'x'.repeat(40000)}`;
+  session.replayRing.append(data, session.outputSeq);
+  session.outputSeq += data.length;
+  f.stream.queueOutput('a', data, 0, data.length);
+  f.stream._flush('a');
+  const output = messages(ws, 'output');
+  assert.ok(output.length >= 3);
+  assert.equal(output.map(item => item.data).join(''), data);
+  assert.ok(output.every(item => Buffer.byteLength(item.data) <= BATCH_MAX_BYTES));
+  assert.ok(output.every(item => !item.data.startsWith('\ude00') && !item.data.endsWith('\ud83d')));
+});
+
+test('a control frame crossing high water closes with 1013', async t => {
+  const f = fixture();
+  t.after(() => f.stream.stop());
+  const ws = new FakeSocket();
+  f.stream.register(ws);
+  ws.bufferedAmount = BACKLOG_HIGH_WATER - 2;
+  assert.equal(f.stream.sendControl(ws, { type: 'control', value: 'large enough' }), false);
+  assert.equal(ws.closeCode, 1013);
 });

@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
+const { splitUtf8Chunks } = require('./replay-ring');
 const { normalizeTerminalSize } = require('./terminal-size');
 
 const BATCH_DELAY_MS = 16;
@@ -10,16 +11,11 @@ const BACKLOG_RECOVERY = 256 * 1024;
 const HEARTBEAT_MS = 25 * 1000;
 
 function bufferStart(session) {
-  return session.outputSeq - session.chunksSize;
+  return session.replayRing.startSeq;
 }
 
 function bufferedSlice(session, startSeq, endSeq = session.outputSeq) {
-  const start = bufferStart(session);
-  if (!Number.isSafeInteger(startSeq) || startSeq < start || startSeq > endSeq || endSeq > session.outputSeq) {
-    return null;
-  }
-  const data = session.chunks.join('');
-  return data.slice(startSeq - start, endSeq - start);
+  return session.replayRing.slice(startSeq, endSeq);
 }
 
 function createSessionStream({ clients, getSession, snapshot, applyResize }) {
@@ -33,10 +29,9 @@ function createSessionStream({ clients, getSession, snapshot, applyResize }) {
         sessionId: null,
         generation: null,
         nextSeq: null,
-        recovering: false,
-        paused: false,
-        resyncPending: false,
+        phase: 'idle',
         token: null,
+        resizeOwner: false,
         maximumBacklog: 0,
         missedPongs: 0,
       };
@@ -48,43 +43,56 @@ function createSessionStream({ clients, getSession, snapshot, applyResize }) {
     return ws?.readyState === 1;
   }
 
-  function noteBacklog(ws, state) {
-    state.maximumBacklog = Math.max(state.maximumBacklog, Number(ws.bufferedAmount || 0));
+  function projectedBacklog(ws, raw) {
+    return Number(ws.bufferedAmount || 0) + Buffer.byteLength(raw);
   }
 
-  function sendControl(ws, message) {
-    if (!ready(ws)) return false;
+  function noteBacklog(ws, state, projected = Number(ws.bufferedAmount || 0)) {
+    state.maximumBacklog = Math.max(
+      state.maximumBacklog,
+      Number(ws.bufferedAmount || 0),
+      projected,
+    );
+  }
+
+  function terminateOverloaded(ws, state) {
+    state.phase = 'awaiting-resubscribe';
     try {
-      ws.send(JSON.stringify(message));
-      noteBacklog(ws, stateFor(ws));
+      if (typeof ws.close === 'function') ws.close(1013, 'control backlog');
+      else ws.terminate?.();
+    } catch {
+      try { ws.terminate?.(); } catch {}
+    }
+  }
+
+  function sendSerialized(ws, message, terminalFrame) {
+    if (!ready(ws)) return false;
+    const state = stateFor(ws);
+    const raw = JSON.stringify(message);
+    const projected = projectedBacklog(ws, raw);
+    noteBacklog(ws, state, projected);
+    if (projected > BACKLOG_HIGH_WATER) {
+      if (terminalFrame) state.phase = 'backpressured';
+      else terminateOverloaded(ws, state);
+      return false;
+    }
+    try {
+      ws.send(raw);
+      noteBacklog(ws, state);
       return true;
     } catch {
       return false;
     }
   }
 
-  function pauseForBackpressure(ws, state) {
-    state.paused = true;
-    state.resyncPending = true;
-    state.recovering = true;
+  function sendControl(ws, message) {
+    return sendSerialized(ws, message, false);
   }
 
   function sendTerminal(ws, message) {
-    if (!ready(ws)) return false;
     const state = stateFor(ws);
-    noteBacklog(ws, state);
-    if (state.paused || ws.bufferedAmount > BACKLOG_HIGH_WATER) {
-      pauseForBackpressure(ws, state);
-      return false;
-    }
-    try {
-      ws.send(JSON.stringify(message));
-      noteBacklog(ws, state);
-      if (ws.bufferedAmount > BACKLOG_HIGH_WATER) pauseForBackpressure(ws, state);
-      return !state.paused;
-    } catch {
-      return false;
-    }
+    if (state.phase === 'backpressured' || state.phase === 'awaiting-resubscribe') return false;
+    return sendSerialized(ws, message, true);
   }
 
   function releaseResize(ws, id = stateFor(ws).sessionId) {
@@ -99,9 +107,7 @@ function createSessionStream({ clients, getSession, snapshot, applyResize }) {
     state.sessionId = null;
     state.generation = null;
     state.nextSeq = null;
-    state.recovering = false;
-    state.paused = false;
-    state.resyncPending = false;
+    state.phase = 'idle';
     state.token = null;
     return true;
   }
@@ -129,21 +135,82 @@ function createSessionStream({ clients, getSession, snapshot, applyResize }) {
     return state.token === token && state.sessionId === id && ready(token.ws);
   }
 
+  function commitSubscription(ws, id, { claim, cols, rows }) {
+    const state = stateFor(ws);
+    releaseResize(ws, state.sessionId);
+    state.sessionId = id;
+    state.generation = null;
+    state.nextSeq = null;
+    state.phase = 'snapshotting';
+    const token = { ws, value: crypto.randomUUID() };
+    state.token = token;
+    if (claim) {
+      claimResize(ws, id);
+      applyResize(id, cols, rows);
+    }
+    return { state, token };
+  }
+
+  function sendRingRange(ws, state, session, id, startSeq, endSeq, replay) {
+    if (!session.replayRing.contains(startSeq, endSeq)) return false;
+    for (const segment of session.replayRing.segments(startSeq, endSeq, BATCH_MAX_BYTES)) {
+      const accepted = sendTerminal(ws, {
+        type: 'output', id, data: segment.data, replay,
+        generation: session.outputGeneration,
+        startSeq: segment.startSeq,
+        endSeq: segment.endSeq,
+      });
+      if (!accepted) return false;
+      state.nextSeq = segment.endSeq;
+    }
+    return true;
+  }
+
+  function waitForDrain(ws, stillCurrent, timeoutMs = 5000) {
+    const deadline = Date.now() + timeoutMs;
+    return new Promise(resolve => {
+      const poll = () => {
+        if (!stillCurrent() || !ready(ws)) return resolve(false);
+        if (Number(ws.bufferedAmount || 0) <= BACKLOG_RECOVERY) return resolve(true);
+        if (Date.now() >= deadline) return resolve(false);
+        setTimeout(poll, 10);
+      };
+      poll();
+    });
+  }
+
+  async function sendSnapshotFrames(ws, message, stillCurrent) {
+    const chunks = splitUtf8Chunks(message.data, BATCH_MAX_BYTES);
+    if (chunks.length <= 1) return sendTerminal(ws, message);
+    for (let part = 0; part < chunks.length; part += 1) {
+      if (!sendTerminal(ws, {
+        ...message,
+        data: chunks[part].data,
+        part,
+        parts: chunks.length,
+      })) return false;
+      if (Number(ws.bufferedAmount || 0) > BACKLOG_RECOVERY
+        && !await waitForDrain(ws, stillCurrent)) return false;
+    }
+    return true;
+  }
+
   async function sendSnapshot(ws, state, token, id, reason) {
     const session = getSession(id);
     if (!session) return false;
     let captured;
     try {
-      captured = await snapshot(id);
+      captured = await snapshot(id, session.outputSeq);
     } catch (error) {
       if (isCurrent(state, token, id)) {
+        state.phase = 'awaiting-resubscribe';
         sendControl(ws, { type: 'session.resyncRequired', id, reason: error.message || 'snapshot-failed' });
       }
       return false;
     }
     if (!isCurrent(state, token, id)) return false;
     session.outputGeneration = session.outputGeneration || crypto.randomUUID();
-    sendTerminal(ws, {
+    if (!await sendSnapshotFrames(ws, {
       type: 'session.snapshot',
       id,
       generation: session.outputGeneration,
@@ -151,37 +218,26 @@ function createSessionStream({ clients, getSession, snapshot, applyResize }) {
       data: captured.data,
       cols: captured.cols,
       rows: captured.rows,
-    });
-    if (state.paused) return false;
+    }, () => isCurrent(state, token, id))) return false;
     state.generation = session.outputGeneration;
     state.nextSeq = captured.atSeq;
     const current = session.outputSeq;
-    const catchup = bufferedSlice(session, state.nextSeq, current);
-    if (catchup === null) {
+    if (!session.replayRing.contains(state.nextSeq, current)) {
+      state.phase = 'awaiting-resubscribe';
       sendControl(ws, { type: 'session.resyncRequired', id, reason: 'snapshot-catchup-gap' });
-      state.recovering = true;
       return false;
     }
-    if (catchup) {
-      sendTerminal(ws, {
-        type: 'output', id, data: catchup, replay: true,
-        generation: session.outputGeneration, startSeq: state.nextSeq, endSeq: current,
-      });
-      if (state.paused) return false;
-      state.nextSeq = current;
-    }
-    state.recovering = false;
-    sendControl(ws, {
+    if (!sendRingRange(ws, state, session, id, state.nextSeq, current, true)) return false;
+    state.phase = 'streaming';
+    return sendControl(ws, {
       type: 'session.subscribed', id, generation: session.outputGeneration,
       atSeq: state.nextSeq, mode: 'snapshot', ...(reason ? { reason } : {}),
     });
-    return true;
   }
 
   async function subscribe(ws, message) {
     const id = String(message.id || '');
     const session = getSession(id);
-    const state = stateFor(ws);
     const size = normalizeTerminalSize(message.cols, message.rows);
     if (!size.ok) {
       sendControl(ws, { type: 'session.resyncRequired', id, reason: 'invalid-size' });
@@ -191,19 +247,12 @@ function createSessionStream({ clients, getSession, snapshot, applyResize }) {
       sendControl(ws, { type: 'session.resyncRequired', id, reason: 'session-missing' });
       return false;
     }
-    unsubscribe(ws);
-    state.sessionId = id;
-    state.recovering = true;
-    state.paused = false;
-    state.resyncPending = false;
-    const token = { ws, value: crypto.randomUUID() };
-    state.token = token;
 
-    if (message.claimResize) {
-      claimResize(ws, id);
-      applyResize(id, size.cols, size.rows);
-    }
-
+    const { state, token } = commitSubscription(ws, id, {
+      claim: !!message.claimResize,
+      cols: size.cols,
+      rows: size.rows,
+    });
     const replay = message.replay === 'resume' ? 'resume' : 'snapshot';
     const cursor = message.cursor;
     if (replay !== 'resume'
@@ -214,47 +263,42 @@ function createSessionStream({ clients, getSession, snapshot, applyResize }) {
     }
 
     const endSeq = session.outputSeq;
-    const delta = bufferedSlice(session, cursor.seq, endSeq);
-    if (delta === null) return sendSnapshot(ws, state, token, id, 'buffer-gap');
+    if (!session.replayRing.contains(cursor.seq, endSeq)) {
+      return sendSnapshot(ws, state, token, id, 'buffer-gap');
+    }
     if (!isCurrent(state, token, id)) return false;
     state.generation = session.outputGeneration;
     state.nextSeq = cursor.seq;
-    if (delta) {
-      sendTerminal(ws, {
-        type: 'output', id, data: delta, replay: true,
-        generation: session.outputGeneration, startSeq: cursor.seq, endSeq,
-      });
-      if (state.paused) return false;
-      state.nextSeq = endSeq;
-    }
-    state.recovering = false;
-    sendControl(ws, {
+    state.phase = 'streaming';
+    if (!sendRingRange(ws, state, session, id, cursor.seq, endSeq, true)) return false;
+    return sendControl(ws, {
       type: 'session.subscribed', id, generation: session.outputGeneration,
-      atSeq: state.nextSeq, mode: delta ? 'delta' : 'current',
+      atSeq: state.nextSeq, mode: cursor.seq === endSeq ? 'current' : 'delta',
     });
-    return true;
+  }
+
+  function requestResubscribe(ws, state, id, reason) {
+    state.phase = 'awaiting-resubscribe';
+    sendControl(ws, { type: 'session.resyncRequired', id, reason });
   }
 
   function deliverOutput(id, message) {
     for (const ws of clients) {
       const state = stateFor(ws);
-      if (state.sessionId !== id || state.recovering || state.paused) continue;
+      if (state.sessionId !== id || state.phase !== 'streaming') continue;
       if (state.generation !== message.generation || !Number.isSafeInteger(state.nextSeq)) {
-        state.recovering = true;
-        sendControl(ws, { type: 'session.resyncRequired', id, reason: 'generation-changed' });
+        requestResubscribe(ws, state, id, 'generation-changed');
         continue;
       }
       if (state.nextSeq >= message.endSeq) continue;
       if (state.nextSeq < message.startSeq) {
-        state.recovering = true;
-        sendControl(ws, { type: 'session.resyncRequired', id, reason: 'buffer-gap' });
+        requestResubscribe(ws, state, id, 'buffer-gap');
         continue;
       }
       const data = message.data.slice(state.nextSeq - message.startSeq);
-      const startSeq = state.nextSeq;
       if (!data) continue;
-      sendTerminal(ws, { ...message, data, startSeq });
-      if (!state.paused) state.nextSeq = message.endSeq;
+      const startSeq = state.nextSeq;
+      if (sendTerminal(ws, { ...message, data, startSeq })) state.nextSeq = message.endSeq;
     }
   }
 
@@ -270,19 +314,32 @@ function createSessionStream({ clients, getSession, snapshot, applyResize }) {
     });
   }
 
+  function queueSegment(session, id, segment, startSeq, endSeq) {
+    let batch = session._networkBatch;
+    if (!batch || batch.endSeq !== startSeq || batch.bytes + segment.bytes > BATCH_MAX_BYTES) {
+      if (batch) flush(session, id);
+      batch = session._networkBatch = {
+        data: '', bytes: 0, startSeq, endSeq: startSeq, timer: null,
+      };
+      batch.timer = setTimeout(() => flush(session, id), BATCH_DELAY_MS);
+      batch.timer.unref?.();
+    }
+    batch.data += segment.data;
+    batch.bytes += segment.bytes;
+    batch.endSeq = endSeq;
+    if (batch.bytes >= BATCH_MAX_BYTES) flush(session, id);
+  }
+
   function queueOutput(id, data, startSeq, endSeq) {
     const session = getSession(id);
     if (!session) return;
-    let batch = session._networkBatch;
-    if (!batch || batch.endSeq !== startSeq) {
-      if (batch) flush(session, id);
-      batch = session._networkBatch = { data: '', bytes: 0, startSeq, endSeq: startSeq, timer: null };
-      batch.timer = setTimeout(() => flush(session, id), BATCH_DELAY_MS);
+    let segmentStart = startSeq;
+    for (const segment of splitUtf8Chunks(data, BATCH_MAX_BYTES)) {
+      const segmentEnd = segmentStart + segment.data.length;
+      queueSegment(session, id, segment, segmentStart, segmentEnd);
+      segmentStart = segmentEnd;
     }
-    batch.data += data;
-    batch.bytes += Buffer.byteLength(data);
-    batch.endSeq = endSeq;
-    if (batch.bytes >= BATCH_MAX_BYTES) flush(session, id);
+    if (segmentStart !== endSeq) throw new RangeError('output sequence does not match data');
   }
 
   function clearSession(id) {
@@ -312,10 +369,9 @@ function createSessionStream({ clients, getSession, snapshot, applyResize }) {
       recoveryTimer = setInterval(() => {
         for (const ws of clients) {
           const state = stateFor(ws);
-          if (!state.resyncPending || !ready(ws) || ws.bufferedAmount > BACKLOG_RECOVERY) continue;
-          state.paused = false;
-          state.resyncPending = false;
-          state.recovering = true;
+          if (state.phase !== 'backpressured' || !ready(ws)
+            || Number(ws.bufferedAmount || 0) > BACKLOG_RECOVERY) continue;
+          state.phase = 'awaiting-resubscribe';
           sendControl(ws, { type: 'session.resyncRequired', id: state.sessionId, reason: 'backpressure' });
         }
       }, 100);
@@ -354,11 +410,7 @@ function createSessionStream({ clients, getSession, snapshot, applyResize }) {
     sendControl,
     stats: ws => {
       const state = stateFor(ws);
-      return {
-        maximumBacklog: state.maximumBacklog,
-        paused: state.paused,
-        resyncPending: state.resyncPending,
-      };
+      return { maximumBacklog: state.maximumBacklog, phase: state.phase };
     },
     start,
     stop,
