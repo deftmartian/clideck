@@ -1,6 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
+  CAPTURE_HIGH_WATER,
+  MENU_LINES,
   MAX_SNAPSHOT_BYTES,
   ServerCapture,
 } = require('../server-capture');
@@ -63,5 +65,53 @@ test('terminal query replies are surfaced once through the adapter', async () =>
   await capture.write('\x1b[6n\x1b[c', 7);
   assert.equal(replies.filter(reply => /R$/.test(reply)).length, 1, 'DSR produces one cursor response');
   assert.equal(replies.filter(reply => /c$/.test(reply)).length, 1, 'DA produces one device response');
+  capture.dispose();
+});
+
+test('capture writes coalesce and sequence barriers wait for committed output', async () => {
+  const capture = new ServerCapture({ cols: 80, rows: 24 });
+  const writes = [];
+  let seq = 0;
+  for (let index = 0; index < 200; index += 1) {
+    const data = `row-${index}\r\n`;
+    seq += data.length;
+    writes.push(capture.write(data, seq));
+  }
+  await capture.barrier(seq);
+  assert.ok(capture.stats().writePasses < writes.length / 4, capture.stats());
+  assert.equal(capture.stats().processedSeq, seq);
+  assert.ok((await capture.lines({ atSeq: seq })).some(line => line.includes('row-199')));
+  await Promise.all(writes);
+  capture.dispose();
+});
+
+test('capture lag pauses and resumes its PTY source without dropping input', async () => {
+  let pauses = 0;
+  let resumes = 0;
+  const capture = new ServerCapture({
+    cols: 500,
+    rows: 300,
+    onPause: () => { pauses += 1; },
+    onResume: () => { resumes += 1; },
+  });
+  const data = `${'x'.repeat(CAPTURE_HIGH_WATER + 4096)}\r\nCAPTURE_TAIL`;
+  const pending = capture.write(data, data.length);
+  assert.equal(capture.stats().paused, true);
+  await pending;
+  assert.equal(capture.stats().queuedBytes, 0);
+  assert.equal(pauses, 1);
+  assert.equal(resumes, 1);
+  assert.ok((await capture.lines({ limit: MENU_LINES })).some(line => line.includes('CAPTURE_TAIL')));
+  capture.dispose();
+});
+
+test('menu capture can inspect only the latest 80 lines', async () => {
+  const capture = new ServerCapture({ cols: 80, rows: 24 });
+  const text = Array.from({ length: 160 }, (_, index) => `line-${index}`).join('\r\n');
+  await capture.write(text, text.length);
+  const lines = await capture.lines({ limit: MENU_LINES });
+  assert.equal(lines.length, MENU_LINES);
+  assert.equal(lines.some(line => line.includes('line-0')), false);
+  assert.ok(lines.some(line => line.includes('line-159')));
   capture.dispose();
 });

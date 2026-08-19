@@ -144,28 +144,38 @@ function submitAskInput(sessionsApi, targetId, message) {
   return () => timers.forEach(clearTimeout);
 }
 
-function waitForAnswer({ sessionsApi, targetId, sinceTs, timeoutMs }) {
+function waitForAnswer({ sessionsApi, targetId, sinceTs, timeoutMs, quietMs = 2500 }) {
   const sessions = sessionsApi.getSessions();
   const target = sessions.get(targetId);
   let sawWorking = !!target?.working;
   let settled = false;
   let quietTimer = null;
   let removeListener = null;
+  let removeOutputListener = null;
   let timeout = null;
+  let finishing = false;
 
   return new Promise((resolve, reject) => {
     const cleanup = () => {
       if (timeout) clearTimeout(timeout);
       if (quietTimer) clearTimeout(quietTimer);
       if (removeListener) removeListener();
+      if (removeOutputListener) removeOutputListener();
     };
-    const finish = () => {
-      if (settled) return;
-      const response = latestAnswerTextSince(sessions, targetId, sinceTs);
-      if (!response) return;
-      settled = true;
-      cleanup();
-      resolve(response);
+    const finish = async () => {
+      if (settled || finishing) return;
+      finishing = true;
+      try {
+        await sessionsApi.capture?.(targetId, { settled: true });
+        if (settled) return;
+        const response = latestAnswerTextSince(sessions, targetId, sinceTs);
+        if (!response) return;
+        settled = true;
+        cleanup();
+        resolve(response);
+      } finally {
+        finishing = false;
+      }
     };
     timeout = setTimeout(() => {
       if (settled) return;
@@ -182,18 +192,16 @@ function waitForAnswer({ sessionsApi, targetId, sinceTs, timeoutMs }) {
           return;
         }
         if (sawWorking) {
-          sessionsApi.capture?.(targetId);
-          setTimeout(finish, 700);
+          finish();
         }
-      } else if (msg.type === 'output') {
-        if (quietTimer) clearTimeout(quietTimer);
-        quietTimer = setTimeout(() => {
-          if (!sessions.get(targetId)?.working) {
-            sessionsApi.capture?.(targetId);
-            setTimeout(finish, 700);
-          }
-        }, 2500);
       }
+    });
+    removeOutputListener = sessionsApi.addOutputListener?.((msg) => {
+      if (msg.id !== targetId || msg.type !== 'session.output') return;
+      if (quietTimer) clearTimeout(quietTimer);
+      quietTimer = setTimeout(() => {
+        if (!sessions.get(targetId)?.working) finish();
+      }, quietMs);
     });
   });
 }

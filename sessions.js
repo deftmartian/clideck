@@ -14,7 +14,7 @@ const { lineageOf } = require('./lineage');
 const { stripAnsi } = require('./ansi-utils');
 const { withCliDeckGuide } = require('./agent-session-guide');
 const { initialResumeReady, hasUsableResumeToken } = require('./resume-readiness');
-const { ServerCapture } = require('./server-capture');
+const { MENU_LINES, SCROLLBACK_LINES, ServerCapture } = require('./server-capture');
 const { createSessionStream } = require('./session-stream');
 const { normalizeTerminalSize } = require('./terminal-size');
 const { ReplayRing } = require('./replay-ring');
@@ -52,10 +52,10 @@ function resizeSession(id, cols, rows) {
 const stream = createSessionStream({
   clients,
   getSession: id => sessions.get(id),
-  snapshot: id => {
+  snapshot: (id, atSeq) => {
     const session = sessions.get(id);
     if (!session) throw new Error('session is not available');
-    return session.capture.snapshot();
+    return session.capture.snapshot(undefined, atSeq);
   },
   applyResize: resizeSession,
 });
@@ -65,6 +65,7 @@ stream.start();
 let resumable = [];
 
 const broadcastListeners = [];
+const outputListeners = [];
 
 function addBroadcastListener(fn) {
   broadcastListeners.push(fn);
@@ -72,6 +73,18 @@ function addBroadcastListener(fn) {
     const idx = broadcastListeners.indexOf(fn);
     if (idx >= 0) broadcastListeners.splice(idx, 1);
   };
+}
+
+function addOutputListener(fn) {
+  outputListeners.push(fn);
+  return () => {
+    const idx = outputListeners.indexOf(fn);
+    if (idx >= 0) outputListeners.splice(idx, 1);
+  };
+}
+
+function emitSessionOutput(message) {
+  for (const fn of outputListeners) try { fn(message); } catch {}
 }
 
 function broadcast(msg) {
@@ -90,7 +103,7 @@ function broadcast(msg) {
       // reply; keep idle finalization enabled there so the completed post-menu
       // answer is not lost. Other agents still suppress transcript finalization on menu.
       s._finalizeOnIdle = !msg.working && msg.source !== 'esc' && (msg.source !== 'menu' || s.presetId === 'codex');
-      if (!msg.working && msg.source !== 'menu') scheduleCapture(msg.id, 300);
+      if (!msg.working && msg.source !== 'menu') scheduleCapture(msg.id, 300, { settled: true });
       // if (s.presetId === 'claude-code') {
       //   console.log(`[claude] broadcast status session=${msg.id.slice(0,8)} working=${!!msg.working} source=${msg.source} finalizeOnIdle=${!!s._finalizeOnIdle}`);
       // }
@@ -131,14 +144,26 @@ function scheduleCapture(id, delay = 0, options = {}) {
   session._captureTimer = setTimeout(() => capture(id, options), delay);
 }
 
-async function capture(id, { menuVersion, settled = false } = {}) {
+function mergeCaptureOptions(current, incoming) {
+  if (!current) return { ...incoming };
+  return {
+    menuVersion: Math.max(Number(current.menuVersion) || 0, Number(incoming.menuVersion) || 0) || undefined,
+    settled: !!current.settled || !!incoming.settled,
+    atSeq: Math.max(Number(current.atSeq) || 0, Number(incoming.atSeq) || 0),
+  };
+}
+
+async function capturePass(id, { menuVersion, settled, atSeq }) {
   const session = sessions.get(id);
   if (!session) return false;
   const captureRef = session.capture;
-  const lines = await captureRef.lines();
+  const lines = await captureRef.lines({
+    atSeq,
+    limit: settled ? SCROLLBACK_LINES : MENU_LINES,
+  });
   if (sessions.get(id) !== session || session.capture !== captureRef) return false;
 
-  const rawChoices = transcript.detectMenu(lines, session.presetId);
+  const rawChoices = transcript.detectMenu(lines.slice(-MENU_LINES), session.presetId);
   let choices = rawChoices;
   if (choices && session.presetId === 'codex') {
     const last = telemetry.getLastEvent(id);
@@ -186,6 +211,38 @@ async function capture(id, { menuVersion, settled = false } = {}) {
     broadcast({ type: 'session.preview', id, text: preview });
   }
   return true;
+}
+
+function capture(id, options = {}) {
+  const session = sessions.get(id);
+  if (!session) return Promise.resolve(false);
+  const request = {
+    ...options,
+    settled: options.settled ?? !options.menuVersion,
+    atSeq: Number.isSafeInteger(options.atSeq) ? options.atSeq : session.outputSeq,
+  };
+  const existing = session._captureFlight;
+  if (existing) {
+    if (existing.acceptingFollowup) {
+      existing.followup = mergeCaptureOptions(existing.followup, request);
+      return existing.promise;
+    }
+    return existing.promise.then(() => capture(id, request));
+  }
+
+  const flight = { acceptingFollowup: true, followup: null, promise: null };
+  flight.promise = (async () => {
+    let result = await capturePass(id, request);
+    const followup = flight.followup;
+    flight.followup = null;
+    flight.acceptingFollowup = false;
+    if (followup) result = await capturePass(id, followup);
+    return result;
+  })().finally(() => {
+    if (session._captureFlight === flight) session._captureFlight = null;
+  });
+  session._captureFlight = flight;
+  return flight.promise;
 }
 
 // --- Spawn a PTY and wire up a session ---
@@ -260,6 +317,8 @@ function spawnSession(id, cmd, parts, cwd, name, themeId, commandId, savedToken,
     cols,
     rows,
     onReply: data => term.write(data),
+    onPause: () => term.pause?.(),
+    onResume: () => term.resume?.(),
   });
   sessions.set(id, session);
   transcript.setFinalizeOnIdle(id, ['claude-code', 'codex', 'gemini-cli', 'opencode', 'pi', 'clideck-agent', 'grok'].includes(lineageOf(session.presetId)) ? session.presetId : null);
@@ -286,6 +345,13 @@ function spawnSession(id, cmd, parts, cwd, name, themeId, commandId, savedToken,
     activity.trackOut(id, data);
     transcript.trackOutput(id, data);
     session.capture.write(data, session.outputSeq);
+    emitSessionOutput({
+      type: 'session.output', id,
+      generation: session.outputGeneration,
+      startSeq,
+      endSeq: session.outputSeq,
+      timestamp: new Date().toISOString(),
+    });
     emitSessionActivity(id, session);
     scheduleCapture(id, 2000, { settled: true });
     plugins.notifyOutput(id, data);
@@ -760,7 +826,7 @@ function shutdown(cfg) {
 }
 
 module.exports = {
-  clients, broadcast, addBroadcastListener, getSessions: () => sessions,
+  clients, broadcast, addBroadcastListener, addOutputListener, getSessions: () => sessions,
   create, createProgrammatic, resume, restart, input, resize, rename, setTheme, setMute, setProject, setPreview, close,
   list, getResumable, capture,
   registerClient: stream.register,
