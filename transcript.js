@@ -185,6 +185,10 @@ function clearAgentCandidate(id) {
   candidate.clear(id);
 }
 
+function getAgentCandidate(id) {
+  return candidate.get(id) || '';
+}
+
 function getUsers(id) {
   if (userTexts[id]?.length) return userTexts[id];
   return (entriesById[id] || []).filter(e => e.role === 'user').map(e => e.text);
@@ -330,4 +334,4 @@ function stripMenu(lines, presetId) {
   return lines.filter((_, i) => i < block.startIdx || i > block.endIdx);
 }
 
-module.exports = { init, trackInput, recordInjectedInput, trackOutput, updateAgentCandidate, commitAgentCandidate, clearAgentCandidate, parseTurnsFromLines, getTurns, getEntriesSince, getCache, getReplayText, clear, setPrefix, setFinalizeOnIdle, detectMenu, stripMenu };
+module.exports = { init, trackInput, recordInjectedInput, trackOutput, updateAgentCandidate, commitAgentCandidate, clearAgentCandidate, getAgentCandidate, parseTurnsFromLines, getTurns, getEntriesSince, getCache, getReplayText, clear, setPrefix, setFinalizeOnIdle, detectMenu, stripMenu };
