@@ -2,15 +2,18 @@
 
 ## Base and objective
 
-`refactor/upstream-isolation` is merged through upstream `af11255` (CliDeck
-1.33.1 plus the `http-util` smoke wiring) as of 2026-08-18. Its objective is to
-keep the fork's behavior while minimizing edits to upstream-owned files.
+`feature/mobile-transport-foundation` is the public-fork candidate. It includes
+the earlier `refactor/upstream-isolation` work and is merged through upstream
+`da845b0` (CliDeck 1.33.1 plus the short-reply fix) as of 2026-08-19. Its
+objective is to keep the fork's behavior while making each divergence either a
+narrow upstream fix, a bounded feature series, configurable provider policy,
+or explicitly fork-only documentation.
 
-The integration baseline was `241b07f1`. Compared with the same upstream
-commit, it changed 71 paths (7,526 insertions and 223 deletions). This branch
-changes 79 paths (7,945 insertions and 260 deletions), but moves policy out of
-upstream files: modified upstream paths fell from 33 to 29. The added paths are
-deliberate modules, tests, and assets rather than additional merge hotspots.
+Against that upstream commit, the branch changes 112 paths: 38 modified
+upstream paths, 73 added paths, and one deleted generated asset. New modules,
+tests, and build assets account for most of the growth. The merge-sensitive
+core files remain adapter entry points rather than owners of transport,
+renderer, capture, static-delivery, or local-policy implementations.
 
 ## Isolation boundaries
 
@@ -18,10 +21,10 @@ deliberate modules, tests, and assets rather than additional merge hotspots.
 | --- | --- | --- |
 | `config.js` | `config-local.js` | gated presets, Grok launcher migration, and stale-client merge policy |
 | `server.js` | `server-http-local.js`, `server-protocol-gate.js`, `server-static.js` | local HTTP routes, WebSocket compatibility, and PWA/static response policy |
-| `public/js/terminals.js` | `public/js/terminal-local.js` | WebGL fallback, clipboard behavior, recovery sequencing, and mobile terminal controls |
+| `public/js/terminals.js` | `public/js/terminal-local.js`, `public/js/terminal-renderer.js` | WebGL fallback, clipboard behavior, recovery sequencing, mobile controls, renderer retention, and subscription lifecycle |
 | `public/js/app.js` | `public/js/clipboard-client.js`, `public/js/compact-navigation.js`, `public/js/connection-client.js`, `public/js/terminal-recovery-client.js` | clipboard upload, compact navigation, connection/PWA lifecycle, and terminal replay |
 | `handlers.js` | `grok-hooks.js`, `clipboard-images.js`, `protocol.js`, `client-build.js` | Grok configuration, image persistence, and compatibility metadata |
-| `sessions.js` | `server-capture.js`, `session-stream.js` | bounded headless terminal state, active-session subscriptions, cursor recovery, resize ownership, batching, backpressure, and heartbeat policy |
+| `sessions.js` | `server-capture.js`, `session-capture.js`, `session-stream.js` | bounded headless terminal state, capture/menu coordination, active-session subscriptions, cursor recovery, resize ownership, batching, backpressure, and heartbeat policy |
 | `server-static.js` | `tools/build-client.js`, `public/build/` | deterministic ESM bundling, lazy WebGL, compressed representations, immutable hashes, and build identity |
 | upstream spawn/ask helpers | `session-ask.js`, `session-spawn.js`, `clideck-spawn-cli.js` | existing-session protection, bounded worker creation, prompt validation, and worktree setup |
 
@@ -29,9 +32,9 @@ The upstream copies of `http-util.js` and `public/js/hotkeys.js` are now
 byte-for-byte unchanged. `session-ask.js` retains a narrow local policy that
 prevents agents from interrupting user-owned sessions and exposes the shared
 answer-wait helper used by bounded spawned workers. The current upstream merge
-initially conflicted in `http-util.js`, `session-ask.js`, and
-`tests/http-util.test.js`; only the intentional session safety policy remains a
-fork divergence.
+to `da845b0` applied cleanly. An earlier isolation merge conflicted in
+`http-util.js`, `session-ask.js`, and `tests/http-util.test.js`; only the
+intentional session safety policy remains a fork divergence.
 
 ## Mobile transport foundation (2026-08-19)
 
@@ -47,9 +50,11 @@ Protocol v2 and queryless tabs fail closed; mixed v2/v3 operation is
 unsupported.
 
 Each live PTY owns an in-memory `@xterm/headless` twin behind
-`server-capture.js`. It keeps 5,000 scrollback lines, serializes snapshots at
-at most 1,000 lines and 1 MiB, inspects only the latest 80 lines for menus, and
-supplies transcript/preview/ask/Autopilot capture without browser uploads.
+`server-capture.js`; `session-capture.js` owns the asynchronous capture, menu,
+preview, and activity coordination around it. The twin keeps 5,000 scrollback
+lines, serializes snapshots at no more than 1,000 lines and 1 MiB, inspects only
+the latest 80 lines for menus, and supplies transcript/preview/ask/Autopilot
+capture without browser uploads.
 Capture writes coalesce; 1 MiB of capture lag pauses the PTY and draining below
 256 KiB resumes it without dropping input. Snapshots and `clideck ask` wait on
 sequence barriers, and capture requests are single-flight with one merged
@@ -68,8 +73,10 @@ Selection or input claims ownership, resize traffic alone cannot, and only
 20-500 columns by 5-300 rows are accepted. Create, restart, resume, subscribe,
 resize, and server capture share the same size authority. Touch clients keep
 one renderer; desktop retains the four most recently used renderers and
-rehydrates evicted sessions from a snapshot. Only the visible renderer is fit,
-and PTY resize follows 120 ms of stable dimensions.
+rehydrates evicted sessions from a snapshot. `public/js/terminal-renderer.js`
+owns renderer creation, eviction, fit, and subscription behavior, while
+`public/js/terminals.js` keeps navigation and session orchestration. Only the
+visible renderer is fit, and PTY resize follows 120 ms of stable dimensions.
 
 The release client is generated by `npm run build:client`. It bundles the app,
 xterm core, Fit addon, and CSS as ES2020 ESM under the untracked
@@ -111,14 +118,32 @@ WebSocket recovery is below 500 ms. Browser checks also cover rapid switching,
 offline and transcript-cache recovery, inactive unread activity, repeated
 restart with one fresh snapshot, cursor gaps, OSC 52 replay suppression, ten
 touch-session switches with one renderer, and desktop LRU eviction and
-rehydration at four renderers. The closeout passed 100 unit/integration tests
-and the full Chromium and Firefox browser runs. These isolated measurements do
-not replace the real Android acceptance pass described below.
+rehydration at four renderers. The archived `cebff72` closeout passed 100
+unit/integration tests and the full Chromium and Firefox browser runs. These
+isolated measurements do not replace the real Android acceptance pass
+described below.
 
-## Conflict-surface result
+### Current candidate validation
 
-Changed lines are additions plus deletions against `upstream/main`. A hunk is a
-separate `git diff --unified=0` edit region.
+After the upstream merge and maintenance-seam extraction on 2026-08-19, a
+clean install, deterministic build/check, and all 105 unit/integration tests
+passed. Chromium and Firefox passed the full recovery suites. Menu, capture,
+menu-status, Codex config/hooks, HTTP utility, and upstream short-reply smokes
+passed; the provider lifecycle passed for Codex, skipped unauthenticated Claude,
+and skipped Gemini, OpenCode, and Pi because their executables were unavailable.
+The production audit reported zero vulnerabilities. Live phone testing of the
+deployed archived build was good so far; the refactored candidate remains
+subject to the exact post-upgrade phone checklist after a future deployment.
+
+## Conflict surface
+
+Changed lines are additions plus deletions against the stated upstream commit.
+A hunk is a separate `git diff --unified=0` edit region.
+
+### Historical pre-transport isolation result
+
+At `f6cbf19`, before the mobile transport work, extraction reduced the five
+original merge hotspots from 1,053 changed lines to 325:
 
 | Hotspot | Integration baseline | Isolated branch | Changed-line reduction |
 | --- | ---: | ---: | ---: |
@@ -129,38 +154,67 @@ separate `git diff --unified=0` edit region.
 | `handlers.js` | 132 | 57 | 56.8% |
 | **Total** | **1,053** | **325** | **69.1%** |
 
-Across the four requested primary hotspots, changed lines fell from 921 to 268
-(70.9%) and hunks fell from 72 to 52 (27.8%). Including `handlers.js`, hunks
-fell from 82 to 61 (25.6%). Total fork lines grew slightly because extracted
-modules and their regression tests remain explicit; the merge-sensitive edits
-are the maintenance metric.
+Across the four primary hotspots, changed lines fell from 921 to 268 (70.9%)
+and hunks from 72 to 52 (27.8%). Including `handlers.js`, hunks fell from 82 to
+61 (25.6%). This table is retained as historical evidence, not a description
+of the current transport branch.
 
-## Pre-transport divergence classification
+### Current post-transport surface
 
-The classification below is the exhaustive isolation baseline at `f6cbf19`,
-before the mobile transport foundation. Each of its 79 divergent paths appears
-exactly once. The new adapters and generated assets are owned by the mobile
-transport section above; regenerate this inventory during the next upstream
-rebase. A mixed file is assigned by its dominant remaining responsibility.
+Against upstream `da845b0`, the current feature branch has this core-file
+surface after extracting renderer and capture coordination:
 
-- **Upstreamable** means a narrow generic bug fix or lifecycle invariant that
-  fits upstream core.
-- **Configurable** means provider or site policy that should be enabled through
-  data/environment and kept behind a narrow adapter.
-- **Plugin/module candidate** means a substantial optional capability that is
-  now internally modular and should move to an upstream extension seam or a
-  separately reviewable feature series.
-- **Necessarily local** means fork-only maintenance or release documentation,
-  not runtime behavior.
+| Upstream-owned hotspot | Changed lines | Hunks | Extracted owner |
+| --- | ---: | ---: | --- |
+| `public/js/app.js` | 209 | 29 | connection, recovery, clipboard, and compact-navigation clients |
+| `public/js/terminals.js` | 384 | 32 | terminal-local and terminal-renderer modules |
+| `server.js` | 63 | 14 | HTTP, static-delivery, and protocol-gate modules |
+| `config.js` | 21 | 7 | config-local provider policy |
+| `handlers.js` | 153 | 14 | protocol, build, clipboard, and Grok adapters |
+| `sessions.js` | 257 | 46 | server-capture, session-capture, and session-stream modules |
+| **Total** | **1,087** | **142** | |
+
+The larger total is expected because protocol v3 is a substantial cross-stack
+feature, not because the earlier isolation regressed. The implementation-heavy
+owners are new fork files: `public/js/terminal-local.js` (297 lines),
+`public/js/terminal-renderer.js` (185), `server-capture.js` (257),
+`session-capture.js` (151), and `session-stream.js` (437). Treat the transport
+stack as an upstream design/feature series, never as one opportunistic bug-fix
+PR.
+
+## Current divergence classification
+
+This is the exhaustive inventory against upstream `da845b0`. Each of the 112
+divergent paths appears exactly once; mixed files are assigned by their dominant
+remaining responsibility. Regenerate the inventory and metrics after every
+upstream merge.
+
+- **Narrow upstreamable fix** is generic and independently reviewable.
+- **Configurable provider policy** should remain data/environment gated unless
+  upstream adopts that provider or policy.
+- **Upstream feature series** needs design agreement and multiple cohesive PRs.
+- **Plugin/module candidate** is optional behavior suited to an extension seam.
+- **Fork-only** is maintenance, release, or measurement documentation.
 
 <!-- divergence-inventory:start -->
 | Primary disposition | Divergent paths | Rationale / next move |
 | --- | --- | --- |
-| Upstreamable | `bin/codex-hook.js`<br>`bin/notify-helper.js`<br>`claude-session.js`<br>`public/js/creator.js`<br>`resume-readiness.js`<br>`single-instance.js`<br>`telemetry-receiver.js`<br>`tests/claude-session.test.js`<br>`tests/config-update.test.js`<br>`tests/resume-readiness.test.js` | Split into narrow PRs: lifecycle hooks honoring the advertised server URL; hook-authoritative Claude IDs; stale launcher preservation; reboot-safe locks; and durable Codex IDs after the current CLI timing is captured. The hook URL work should converge with the existing upstream PR rather than be duplicated here. |
-| Configurable | `agent-presets.json`<br>`agent-session-guide.js`<br>`bin/grok-hook.js`<br>`config-local.js`<br>`config.js`<br>`grok-hooks.js`<br>`public/img/grok.svg`<br>`tests/agent-session-guide.test.js`<br>`tests/config-grok-migrate.test.js`<br>`tests/grok-hooks.test.js` | Grok remains gated by preset/environment data. Shared config owns only calls into config-local.js; shared handlers call the standalone hook adapter. Promote upstream only if Grok becomes a supported core provider. |
-| Plugin/module candidate | `bin/clideck.js`<br>`clideck-spawn-cli.js`<br>`client-build.js`<br>`clipboard-images.js`<br>`handlers.js`<br>`package-lock.json`<br>`package.json`<br>`plugins/trim-clip/clideck-plugin.json`<br>`plugins/trim-clip/client.js`<br>`protocol.js`<br>`public/addon-webgl.js`<br>`public/icons/clideck-192.png`<br>`public/icons/clideck-512.png`<br>`public/icons/clideck-apple-180.png`<br>`public/icons/clideck-maskable-512.png`<br>`public/index.html`<br>`public/js/app.js`<br>`public/js/clipboard-client.js`<br>`public/js/compact-navigation.js`<br>`public/js/connection-client.js`<br>`public/js/mobile-composer.js`<br>`public/js/mobile-selection.js`<br>`public/js/mobile-touch-scroll.js`<br>`public/js/prompts.js`<br>`public/js/pwa.js`<br>`public/js/settings.js`<br>`public/js/state.js`<br>`public/js/terminal-clipboard.js`<br>`public/js/terminal-local.js`<br>`public/js/terminal-recovery-client.js`<br>`public/js/terminal-recovery.js`<br>`public/js/terminals.js`<br>`public/js/touch-ui.js`<br>`public/js/viewport.js`<br>`public/manifest.webmanifest`<br>`public/offline.html`<br>`public/sw.js`<br>`public/tailwind.css`<br>`server-http-local.js`<br>`server-protocol-gate.js`<br>`server-static.js`<br>`server.js`<br>`session-ask.js`<br>`session-spawn.js`<br>`sessions.js`<br>`src/input.css`<br>`tests/browser-recovery.js`<br>`tests/clipboard-images.test.js`<br>`tests/mobile-viewport.test.js`<br>`tests/output-sequence.test.js`<br>`tests/protocol-gate.test.js`<br>`tests/providers/client.js`<br>`tests/providers/sandbox.js`<br>`tests/pwa.test.js`<br>`tests/server-http-contract.test.js`<br>`tests/session-ask.test.js`<br>`tests/session-spawn.test.js`<br>`tools/generate-pwa-icons.js` | Four bounded feature families: mobile/viewport UI; protocol-aware PWA recovery; clipboard/OSC 52/WebGL terminal integration; and bounded clideck spawn/ask. Keep the adapters internal until upstream exposes suitable client/server plugin seams. Propose spawn in a Discussion and split it from the browser stack. |
-| Necessarily local | `.npmignore`<br>`LOCAL-MAINTENANCE.md`<br>`README.md` | The maintenance ledger and fork-facing feature/release documentation must describe the branch actually shipped. Runtime behavior has no item classified as necessarily local. |
+| Narrow upstreamable fix (12) | `bin/codex-hook.js`<br>`bin/notify-helper.js`<br>`claude-session.js`<br>`paths.js`<br>`public/js/creator.js`<br>`resume-readiness.js`<br>`single-instance.js`<br>`telemetry-receiver.js`<br>`tests/claude-session.test.js`<br>`tests/config-update.test.js`<br>`tests/paths.test.js`<br>`tests/resume-readiness.test.js` | Split by invariant: advertised hook URL, hook-authoritative Claude IDs, stale-launcher preservation, explicit isolated data roots, reboot-safe locks, and durable resume IDs. Reconcile with an existing upstream PR before opening a duplicate. |
+| Configurable provider policy (10) | `agent-presets.json`<br>`agent-session-guide.js`<br>`bin/grok-hook.js`<br>`config-local.js`<br>`config.js`<br>`grok-hooks.js`<br>`public/img/grok.svg`<br>`tests/agent-session-guide.test.js`<br>`tests/config-grok-migrate.test.js`<br>`tests/grok-hooks.test.js` | Grok and local agent-session guidance remain gated policy. Shared entry points call narrow adapters; promote only with upstream provider/policy agreement. |
+| Upstream feature series: mobile transport, renderer, PWA, and build (70) | `.gitignore`<br>`client-build.js`<br>`handlers.js`<br>`package-lock.json`<br>`package.json`<br>`pi-bridge.js`<br>`protocol.js`<br>`public/client.css`<br>`public/icons/clideck-192.png`<br>`public/icons/clideck-512.png`<br>`public/icons/clideck-64.png`<br>`public/icons/clideck-apple-180.png`<br>`public/icons/clideck-maskable-512.png`<br>`public/index.html`<br>`public/js/app.js`<br>`public/js/compact-navigation.js`<br>`public/js/connection-client.js`<br>`public/js/mobile-composer.js`<br>`public/js/mobile-selection.js`<br>`public/js/mobile-touch-scroll.js`<br>`public/js/nav.js`<br>`public/js/perf.js`<br>`public/js/prompts.js`<br>`public/js/pwa.js`<br>`public/js/settings.js`<br>`public/js/state.js`<br>`public/js/terminal-local.js`<br>`public/js/terminal-recovery-client.js`<br>`public/js/terminal-recovery.js`<br>`public/js/terminal-renderer.js`<br>`public/js/terminals.js`<br>`public/js/test-surface.js`<br>`public/js/touch-ui.js`<br>`public/js/viewport.js`<br>`public/manifest.webmanifest`<br>`public/offline.html`<br>`public/sw.js`<br>`public/tailwind.css`<br>`replay-ring.js`<br>`server-capture.js`<br>`server-http-local.js`<br>`server-protocol-gate.js`<br>`server-static.js`<br>`server.js`<br>`session-capture.js`<br>`session-stream.js`<br>`sessions.js`<br>`src/input.css`<br>`terminal-size.js`<br>`tests/browser-recovery.js`<br>`tests/client-build.test.js`<br>`tests/mobile-viewport.test.js`<br>`tests/output-sequence.test.js`<br>`tests/protocol-gate.test.js`<br>`tests/providers/antigravity-capture.test.js`<br>`tests/providers/client.js`<br>`tests/providers/sandbox.js`<br>`tests/pwa.test.js`<br>`tests/replay-ring.test.js`<br>`tests/server-capture.test.js`<br>`tests/server-http-contract.test.js`<br>`tests/session-capture.test.js`<br>`tests/session-stream.test.js`<br>`tests/subscriptions.test.js`<br>`tests/terminal-size.test.js`<br>`tests/transport-diagnostics.test.js`<br>`tools/build-client.js`<br>`tools/generate-pwa-icons.js`<br>`tools/measure-transport.js`<br>`transcript.js` | Start with protocol and ownership design. Proposed slices are headless capture/replay, subscription transport, renderer lifecycle, mobile input/viewport, PWA recovery, and deterministic packaging. Preserve protocol-v3 tests across every slice. |
+| Upstream feature series: bounded spawn and safe handoff (9) | `bin/clideck.js`<br>`clideck-agents-cli.js`<br>`clideck-ask-cli.js`<br>`clideck-spawn-cli.js`<br>`session-agents.js`<br>`session-ask.js`<br>`session-spawn.js`<br>`tests/session-ask.test.js`<br>`tests/session-spawn.test.js` | Propose the capability and user-session ownership rule before code. Keep bounded spawn separate from the browser/transport series. |
+| Plugin/module candidate (6) | `clipboard-images.js`<br>`plugins/trim-clip/clideck-plugin.json`<br>`plugins/trim-clip/client.js`<br>`public/js/clipboard-client.js`<br>`public/js/terminal-clipboard.js`<br>`tests/clipboard-images.test.js` | Keep optional clipboard behavior behind the existing plugin/module seams; upstream the smallest missing seam before the feature. |
+| Fork-only maintenance and evidence (5) | `.npmignore`<br>`LOCAL-MAINTENANCE.md`<br>`README.md`<br>`docs/mobile-transport-baseline.md`<br>`docs/mobile-transport-repair.md` | Describe the fork branch, its provenance, measured budgets, and release gates. These paths are not upstream PR candidates. |
 <!-- divergence-inventory:end -->
+
+## Public branch hygiene
+
+Fork-authored commits after `f6cbf19` use
+`deftmartian <165921376+deftmartian@users.noreply.github.com>`. Preserve the
+logical feature/fix sequence; do not squash the transport work into an opaque
+fork commit. Keep archived pre-cleanup history and deployment artifacts outside
+the public feature branch. Publishing, opening PRs, and advancing the public
+integration branch are separate release actions.
 
 ## Preserved behavior and regression owners
 
@@ -174,7 +228,8 @@ rebase. A mixed file is assigned by its dominant remaining responsibility.
   `tests/mobile-viewport.test.js`, and browser clipboard scenarios.
 - Session-agent lifecycle and recovery: provider smoke suites,
   `tests/claude-session.test.js`, `tests/resume-readiness.test.js`, and
-  `tests/session-spawn.test.js`.
+  `tests/session-spawn.test.js`; capture/menu coordination is isolated in
+  `session-capture.js` and covered by `tests/session-capture.test.js`.
 - HTTP/PWA response contracts: `tests/server-http-contract.test.js` was added
   before server routing was split.
 
@@ -196,6 +251,7 @@ npm run smoke:menu-status
 npm run smoke:codex-config
 npm run smoke:codex-hooks
 npm run smoke:http-util
+npm run smoke:transcript
 npm audit --omit=dev --audit-level=high
 npm pack --ignore-scripts --pack-destination /an/explicit/staging/directory
 ```

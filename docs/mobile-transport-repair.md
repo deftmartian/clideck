@@ -1,5 +1,11 @@
 # Mobile transport repair closeout
 
+> Historical report: this records the isolated acceptance state that became
+> archived commit `cebff72`. The public-fork candidate subsequently rewrote the
+> unpublished commit identities, merged newer upstream, extracted renderer and
+> capture coordination, and reran the release gates. Current ownership and
+> validation live in `LOCAL-MAINTENANCE.md`.
+
 Completed on 2026-08-19 on `feature/mobile-transport-foundation` as seven
 additive commits. Existing commits were not rewritten, protocol remains v3,
 and package version remains `1.33.1`. All server and browser checks used

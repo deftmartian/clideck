@@ -20,6 +20,13 @@
 
 clideck is a local app for running multiple AI coding agents without juggling terminals. Claude Code, Codex, Gemini CLI, Grok Build, OpenCode, and Pi all live in one browser window with a chat-style sidebar, live status, message previews, session resume, and projects to keep things organized. an autopilot routes work between agents automatically, and an E2E encrypted mobile relay gives full control over all agents from a phone.
 
+> **Fork branch:** This branch is maintained by DeftMartian on top of upstream
+> CliDeck 1.33.1. It adds protocol-v3 subscribed terminal transport, bounded
+> server-side capture, mobile renderer/input work, deterministic client
+> packaging, and safer bounded workers. Protocol v3 intentionally rejects old
+> v2/queryless tabs. See [LOCAL-MAINTENANCE.md](LOCAL-MAINTENANCE.md) for the
+> current upstream base, divergence ownership, test gates, and upstreaming plan.
+
 the main problem with using multiple agents is not starting them. it is managing them. terminals pile up, finished work gets missed, good sessions disappear after a restart. clideck does not sit in the middle rewriting prompts or output - it only watches lightweight status signals from each agent so it can tell which agent is working, which is idle, and which is waiting. everything runs locally, no data leaves your machine.
 
 ## Why this exists
