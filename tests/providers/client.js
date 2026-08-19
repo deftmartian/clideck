@@ -17,15 +17,20 @@ class Client {
     this.statusLog = [];          // { id, working, source } transitions
     this.config = null;           // last { type:'config' } payload
     this.resumable = [];          // last sessions.resumable list
+    this.autoSubscribe = true;
+    this.subscriptionId = null;
+    this.cursors = new Map();
     this.accounting = this._newAccounting();
   }
 
   _newAccounting() {
     return {
       initialControlBytes: 0,
+      controlBytesByType: Object.create(null),
       snapshotReplayBytes: 0,
       liveBytesBySession: Object.create(null),
       frameCount: 0,
+      maximumFrameBytes: 0,
       maximumBacklog: 0,
       totalBytes: 0,
     };
@@ -49,7 +54,7 @@ class Client {
     const bytes = Buffer.byteLength(raw);
     this.accounting.frameCount += 1;
     this.accounting.totalBytes += bytes;
-    this.accounting.maximumBacklog = Math.max(this.accounting.maximumBacklog, bytes);
+    this.accounting.maximumFrameBytes = Math.max(this.accounting.maximumFrameBytes, bytes);
     let msg;
     try { msg = JSON.parse(raw); } catch { return; }
     if ((msg.type === 'output' && msg.replay) || msg.type === 'session.history' || msg.type === 'session.snapshot') {
@@ -58,14 +63,41 @@ class Client {
       this.accounting.liveBytesBySession[msg.id] = (this.accounting.liveBytesBySession[msg.id] || 0) + bytes;
     } else {
       this.accounting.initialControlBytes += bytes;
+      this.accounting.controlBytesByType[msg.type || 'unknown'] =
+        (this.accounting.controlBytesByType[msg.type || 'unknown'] || 0) + bytes;
     }
     this.messages.push(msg);
 
     if (msg.type === 'config') this.config = msg.config;
+    else if (msg.type === 'transport.stats') {
+      this.accounting.maximumBacklog = Math.max(
+        this.accounting.maximumBacklog,
+        Number(msg.maximumBacklog || 0),
+      );
+    }
+    else if (msg.type === 'sessions') {
+      if (this.autoSubscribe && !this.subscriptionId && msg.list?.[0]?.id) {
+        this.subscribe(msg.list[0].id, { replay: 'snapshot' });
+      }
+    }
+    else if (msg.type === 'created') {
+      if (this.autoSubscribe) this.subscribe(msg.id, { replay: 'snapshot' });
+    }
     else if (msg.type === 'sessions.resumable') this.resumable = msg.list || [];
-    else if (msg.type === 'output' || msg.type === 'session.history') {
+    else if (msg.type === 'session.snapshot') {
+      this.output.set(msg.id, msg.data || '');
+      this.cursors.set(msg.id, { generation: msg.generation, seq: msg.atSeq });
+    } else if (msg.type === 'output' || msg.type === 'session.history') {
       const text = msg.data != null ? msg.data : (msg.text || '');
       this.output.set(msg.id, (this.output.get(msg.id) || '') + text);
+      if (msg.generation && Number.isSafeInteger(msg.endSeq)) {
+        this.cursors.set(msg.id, { generation: msg.generation, seq: msg.endSeq });
+      }
+    } else if (msg.type === 'session.subscribed') {
+      this.subscriptionId = msg.id;
+      this.cursors.set(msg.id, { generation: msg.generation, seq: msg.atSeq });
+    } else if (msg.type === 'session.resyncRequired' && this.autoSubscribe && msg.id) {
+      this.subscribe(msg.id, { replay: 'snapshot' });
     } else if (msg.type === 'session.status') {
       this.working.set(msg.id, !!msg.working);
       this.statusLog.push({ id: msg.id, working: !!msg.working, source: msg.source });
@@ -74,6 +106,22 @@ class Client {
   }
 
   send(obj) { this.ws.send(JSON.stringify(obj)); }
+
+  subscribe(id, { replay = 'resume', claimResize = false, cols = 80, rows = 24 } = {}) {
+    const cursor = this.cursors.get(id);
+    this.subscriptionId = id;
+    this.send({
+      type: 'session.subscribe', id, replay,
+      ...(replay === 'resume' && cursor ? { cursor } : {}),
+      claimResize, cols, rows,
+    });
+  }
+
+  unsubscribe(id = this.subscriptionId) {
+    if (!id) return;
+    this.send({ type: 'session.unsubscribe', id });
+    if (this.subscriptionId === id) this.subscriptionId = null;
+  }
 
   // Resolve with the first message (already-received or future) matching pred.
   // pred is a type string or a function(msg) -> bool.

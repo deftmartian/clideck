@@ -45,6 +45,10 @@ if (enabled) {
     configurable: true,
     value() {
       const resources = performance.getEntriesByType('resource');
+      const terminalUsableAt = events.find(item => item.name === 'terminalSubscribed')?.at;
+      const criticalResources = Number.isFinite(terminalUsableAt)
+        ? resources.filter(item => item.responseEnd <= terminalUsableAt)
+        : [];
       return {
         enabled: true,
         elapsedMs: performance.now() - startedAt,
@@ -55,6 +59,19 @@ if (enabled) {
           transferBytes: resources.reduce((total, item) => total + (item.transferSize || 0), 0),
           encodedBytes: resources.reduce((total, item) => total + (item.encodedBodySize || 0), 0),
           decodedBytes: resources.reduce((total, item) => total + (item.decodedBodySize || 0), 0),
+        },
+        criticalResources: {
+          count: criticalResources.length,
+          transferBytes: criticalResources.reduce((total, item) => total + (item.transferSize || 0), 0),
+          encodedBytes: criticalResources.reduce((total, item) => total + (item.encodedBodySize || 0), 0),
+          decodedBytes: criticalResources.reduce((total, item) => total + (item.decodedBodySize || 0), 0),
+          terminalUsableAt,
+          items: criticalResources.map(item => ({
+            name: item.name,
+            encodedBytes: item.encodedBodySize || 0,
+            transferBytes: item.transferSize || 0,
+            responseEnd: item.responseEnd,
+          })),
         },
         events: events.map(item => ({ ...item })),
       };

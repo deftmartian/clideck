@@ -8,7 +8,7 @@
 // agent turn is captured AND persisted, a repeated identical capture is
 // idempotent (no duplicate), and a later turn keeps saving without collapsing the
 // earlier one. It drives the exact transcript calls the WS handler makes on a
-// settled `terminal.buffer` (updateAgentCandidate → commitAgentCandidate) plus
+// settled server capture (updateAgentCandidate → commitAgentCandidate) plus
 // the PTY-driven user path (trackInput) — deliberately NOT a detectMenu() call.
 // The menu → status side of the flow is covered by menu-status.test.js.
 //

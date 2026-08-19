@@ -1,6 +1,6 @@
 import { state, send } from './state.js';
 import { esc, binName, resolveIconPath, randomUUID } from './utils.js';
-import { addTerminal, removeTerminal, select, startRename, startProjectRename, setSessionTheme, openMenu, closeMenu, setStatus, updateMuteIndicator, updatePreview, markUnread, applyFilter, setTab, renderResumable, regroupSessions, toggleProjectCollapse, setSessionProject, estimateSize, restartComplete, positionMenu, addPill, updatePill, removePill, appendPillLog, setPillLogs, closePillLog, addTerminalInputAction, removeTerminalInputActionsForPlugin, trackTerminalInputData, copySessionName } from './terminals.js';
+import { addTerminal, removeTerminal, select, startRename, startProjectRename, setSessionTheme, openMenu, closeMenu, setStatus, updateMuteIndicator, updatePreview, markUnread, applyFilter, setTab, renderResumable, regroupSessions, toggleProjectCollapse, setSessionProject, estimateSize, restartComplete, positionMenu, addPill, updatePill, removePill, appendPillLog, setPillLogs, closePillLog, addTerminalInputAction, removeTerminalInputActionsForPlugin, trackTerminalInputData, copySessionName, resumeActiveTerminal, suspendActiveTerminal } from './terminals.js';
 import { renderSettings, updateVersionFooter } from './settings.js';
 import { openCreator, closeCreator, refreshCreator } from './creator.js';
 import { handleDirsResponse, handleMkdirResponse, openFolderPicker } from './folder-picker.js';
@@ -18,12 +18,9 @@ import { initCompactNavigation } from './compact-navigation.js';
 import { createConnectionClient } from './connection-client.js';
 import { createTerminalRecoveryClient } from './terminal-recovery-client.js';
 import { countPerf, notePerf, timePerf } from './perf.js';
+import { installTestSurface } from './test-surface.js';
 
 const shownAgentHealthToasts = new Set();
-
-function normalizeTerminalHistoryText(text) {
-  return `${text || ''}\n`.replace(/\r?\n/g, '\r\n');
-}
 
 function presetForCommand(cmd) {
   if (cmd?.presetId) {
@@ -54,18 +51,32 @@ const connectionClient = createConnectionClient({ connect: () => connect() });
 const {
   flashSaveIndicator,
   reconnect: reconnectForegroundSocket,
-  requireRecoveryReload: requireTerminalRecoveryReload,
   setConnectionState: setServerConnectionState,
   suspend: suspendSocket,
 } = connectionClient;
+function requestTerminalSnapshot(id) {
+  const entry = state.terms.get(id);
+  if (state.active !== id || !entry?.term || document.visibilityState === 'hidden') return false;
+  return send({
+    type: 'session.subscribe', id, replay: 'snapshot', claimResize: true,
+    cols: entry.term.cols, rows: entry.term.rows,
+  });
+}
 const terminalRecovery = createTerminalRecoveryClient({
-  requireReload: requireTerminalRecoveryReload,
+  requestResync: requestTerminalSnapshot,
 });
 
 function connect() {
   const connectStartedAt = performance.now();
+  let socketOpenedAt = connectStartedAt;
+  let terminalTimingRecorded = false;
   const ws = connectionClient.openSocket();
   if (!ws) return;
+
+  ws.onopen = () => {
+    socketOpenedAt = performance.now();
+    notePerf('webSocketOpen');
+  };
 
   ws.onmessage = ({ data }) => {
     if (state.ws !== ws) return;
@@ -82,8 +93,9 @@ function connect() {
         renderSettings();
         renderPrompts();
         refreshCreator();
-        for (const [, entry] of state.terms) applyTheme(entry.term, entry.themeId);
+        for (const [, entry] of state.terms) if (entry.term) applyTheme(entry.term, entry.themeId);
         connectionClient.finishServerConfig(firstConfigForSocket);
+        if (firstConfigForSocket && state.active) resumeActiveTerminal();
         if (firstConfigForSocket) {
           timePerf('webSocketToConfigMs', connectStartedAt);
           notePerf('connectionReady');
@@ -144,6 +156,24 @@ function connect() {
         if (output) markUnread(msg.id);
         break;
       }
+      case 'session.snapshot': {
+        const entry = state.terms.get(msg.id);
+        terminalRecovery.handleSnapshot(entry, msg);
+        updatePreview(msg.id);
+        break;
+      }
+      case 'session.subscribed': {
+        terminalRecovery.handleSubscribed(state.terms.get(msg.id), msg);
+        notePerf('terminalSubscribed', { id: msg.id, mode: msg.mode });
+        if (!terminalTimingRecorded) {
+          terminalTimingRecorded = true;
+          timePerf('webSocketToTerminalMs', socketOpenedAt);
+        }
+        break;
+      }
+      case 'session.resyncRequired':
+        requestTerminalSnapshot(msg.id);
+        break;
       case 'closed':
         removeTerminal(msg.id);
         break;
@@ -158,24 +188,6 @@ function connect() {
       case 'session.dispatch':
         playAskDispatchSound(msg);
         break;
-      // Server requests terminal capture (e.g. after PermissionRequest hook)
-      case 'terminal.capture': {
-        const ce = state.terms.get(msg.id);
-        if (ce?.term) {
-          const buf = ce.term.buffer.active;
-          const lines = [];
-          for (let i = 0; i < buf.length; i++) { const line = buf.getLine(i); if (line) lines.push(line.translateToString(true)); }
-          send({ type: 'terminal.buffer', id: msg.id, lines, menuVersion: msg.menuVersion });
-        }
-        break;
-      }
-      case 'session.history': {
-        const entry = state.terms.get(msg.id);
-        const historyText = normalizeTerminalHistoryText(msg.text);
-        terminalRecovery.handleHistory(ws, entry, msg, historyText);
-        updatePreview(msg.id);
-        break;
-      }
       // Bridge preview text (OpenCode plugin)
       case 'session.preview': {
         const pe = state.terms.get(msg.id);
@@ -222,6 +234,8 @@ function connect() {
       [OLD-STATUS] */
       case 'transcript.cache':
         state.transcriptCache = msg.cache;
+        state.transcriptCacheLoaded = true;
+        state.transcriptCacheRequested = true;
         for (const [id, text] of Object.entries(msg.cache)) {
           const entry = state.terms.get(id);
           if (entry) entry.searchText = text;
@@ -246,7 +260,7 @@ function connect() {
         const entry = state.terms.get(msg.id);
         if (entry) {
           entry.themeId = msg.themeId;
-          applyTheme(entry.term, msg.themeId);
+          if (entry.term) applyTheme(entry.term, msg.themeId);
         }
         break;
       }
@@ -437,6 +451,12 @@ const closeMobileSidebar = initCompactNavigation({
   reconnect: reconnectForegroundSocket,
   suspend: suspendSocket,
   setConnectionState: setServerConnectionState,
+  onHidden: () => suspendActiveTerminal({ disposeTouch: true }),
+  onVisible: resumeActiveTerminal,
+});
+document.addEventListener('clideck:terminal-visibility', event => {
+  if (event.detail?.visible) resumeActiveTerminal();
+  else suspendActiveTerminal({ disposeTouch: true });
 });
 
 // Sidebar events
@@ -1132,7 +1152,7 @@ async function loadPlugins(list) {
           addToolbarButton(opts) { return addPluginToolbarButton(plugin.id, opts); },
           addTerminalInputButton(opts) { return addTerminalInputAction(plugin.id, opts); },
           getActiveSessionId() { return state.active; },
-          getTerminalSelection() { const e = state.terms.get(state.active); return e ? e.term.getSelection() : ''; },
+          getTerminalSelection() { return state.terms.get(state.active)?.term?.getSelection() || ''; },
           writeToSession(id, text) { trackTerminalInputData(id, text); send({ type: 'input', id, data: text }); },
           toast(message, opts) { return showToast(message, opts); },
           registerHotkey(combo, callback) { return registerHotkey(plugin.id, combo, callback); },
@@ -1566,6 +1586,7 @@ document.getElementById('remote-disconnect').addEventListener('click', doRemoteD
 document.getElementById('remote-disconnect2').addEventListener('click', doRemoteDisconnect);
 
 initDrag();
+installTestSurface();
 initSessionScrollbarVisibility();
 initClipboardClient();
 connect();

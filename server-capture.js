@@ -46,8 +46,11 @@ class ServerCapture {
   }
 
   resize(cols, rows) {
-    if (this.disposed) return;
-    this.terminal.resize(cols, rows);
+    if (this.disposed) return Promise.resolve();
+    this.pending = this.pending.then(() => {
+      if (!this.disposed) this.terminal.resize(cols, rows);
+    });
+    return this.pending;
   }
 
   async lines() {

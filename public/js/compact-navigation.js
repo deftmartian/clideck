@@ -1,7 +1,7 @@
 import { state } from './state.js';
 import { TOUCH_FIRST_MEDIA } from './touch-ui.js';
 
-export function initCompactNavigation({ reconnect, suspend, setConnectionState }) {
+export function initCompactNavigation({ reconnect, suspend, setConnectionState, onHidden, onVisible }) {
   const compactLayoutQuery = window.matchMedia(`(max-width: 960px), ${TOUCH_FIRST_MEDIA}`);
   const close = () => document.body.classList.remove('mobile-nav-open');
 
@@ -17,11 +17,13 @@ export function initCompactNavigation({ reconnect, suspend, setConnectionState }
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') {
       backgroundedAt = Date.now();
+      onHidden?.();
       return;
     }
     close();
     windowBlurredAt = 0;
     if (!backgroundedAt || Date.now() - backgroundedAt >= 1000) reconnect();
+    onVisible?.();
     backgroundedAt = 0;
   });
   window.addEventListener('blur', () => {

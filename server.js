@@ -71,9 +71,9 @@ const plugins = require('./plugin-loader');
 ensurePtyHelper();
 sessions.loadSessions();
 transcript.init(sessions.broadcast, new Set(sessions.getResumable().map(s => s.id)), (...args) => plugins.notifyTranscript(...args));
-telemetry.init(sessions.broadcast, sessions.getSessions);
+telemetry.init(sessions.broadcast, sessions.getSessions, sessions.capture);
 require('./opencode-bridge').init(sessions.broadcast, sessions.getSessions);
-require('./pi-bridge').init(sessions.broadcast, sessions.getSessions);
+require('./pi-bridge').init(sessions.broadcast, sessions.getSessions, sessions.capture);
 const config = require('./config');
 plugins.init(sessions.broadcast, sessions.getSessions, () => require('./handlers').getConfig(), (cfg) => config.save(cfg), sessions.input, sessions.createProgrammatic, sessions.close);
 
@@ -89,7 +89,7 @@ function startGeminiMenuPoll(id) {
       geminiMenuPoll.delete(id);
       return;
     }
-    sessions.broadcast({ type: 'terminal.capture', id });
+    sessions.capture(id);
   }, 500);
   geminiMenuPoll.set(id, timer);
 }
@@ -176,7 +176,7 @@ const server = http.createServer((req, res) => {
             // Stop, idle, and SessionEnd all mean Claude is settled enough to
             // snapshot the visible transcript. Resume/clear flows can emit
             // SessionEnd without a normal Stop event.
-            setTimeout(() => sessions.broadcast({ type: 'terminal.capture', id: clideckId }), 500);
+            setTimeout(() => sessions.capture(clideckId), 500);
           } else if (route === 'session-start') {
             const source = String(payload.source || '').toLowerCase();
             // Startup/resume/clear SessionStart means Claude is back at an
@@ -184,13 +184,13 @@ const server = http.createServer((req, res) => {
             // not use it as an idle signal.
             if (source !== 'compact') {
               sessions.broadcast({ type: 'session.status', id: clideckId, working: false, source: 'hook' });
-              setTimeout(() => sessions.broadcast({ type: 'terminal.capture', id: clideckId }), 500);
+              setTimeout(() => sessions.capture(clideckId), 500);
             }
           } else if (route === 'menu') {
             // PreToolUse: trigger terminal capture — detectMenu will set idle if a choice menu is visible
             const menuVersion = sess ? ((sess._menuVersion || 0) + 1) : 1;
             if (sess) sess._menuVersion = menuVersion;
-            setTimeout(() => sessions.broadcast({ type: 'terminal.capture', id: clideckId, menuVersion }), 500);
+            setTimeout(() => sessions.capture(clideckId, { menuVersion }), 500);
           }
         }
       } catch {}
@@ -291,6 +291,11 @@ function isAllowedWsOrigin(origin, hostHeader) {
 }
 const wss = new WebSocketServer({
   server,
+  perMessageDeflate: {
+    threshold: 1024,
+    clientNoContextTakeover: true,
+    serverNoContextTakeover: true,
+  },
   verifyClient: ({ req }) => {
     return isAllowedWsOrigin(req.headers.origin, req.headers.host);
   },

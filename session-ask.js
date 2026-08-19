@@ -182,14 +182,14 @@ function waitForAnswer({ sessionsApi, targetId, sinceTs, timeoutMs }) {
           return;
         }
         if (sawWorking) {
-          sessionsApi.broadcast({ type: 'terminal.capture', id: targetId });
+          sessionsApi.capture?.(targetId);
           setTimeout(finish, 700);
         }
       } else if (msg.type === 'output') {
         if (quietTimer) clearTimeout(quietTimer);
         quietTimer = setTimeout(() => {
           if (!sessions.get(targetId)?.working) {
-            sessionsApi.broadcast({ type: 'terminal.capture', id: targetId });
+            sessionsApi.capture?.(targetId);
             setTimeout(finish, 700);
           }
         }, 2500);

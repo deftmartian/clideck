@@ -24,6 +24,7 @@ const codexToolPhasePending = new Set(); // sessionId set once Codex has announc
 const codexPendingTools = new Map(); // sessionId → Set(callId) for approved Codex tool calls still awaiting a result
 let broadcastFn = null;
 let sessionsFn = null;
+let captureFn = null;
 
 function getPendingToolSet(id) {
   let set = codexPendingTools.get(id);
@@ -56,9 +57,10 @@ function hasPendingToolState(id) {
   return codexToolPhasePending.has(id) || hasPendingTools(id);
 }
 
-function init(broadcast, getSessions) {
+function init(broadcast, getSessions, captureSession) {
   broadcastFn = broadcast;
   sessionsFn = getSessions;
+  captureFn = captureSession;
 }
 
 // Flatten OTLP attribute arrays into plain objects
@@ -269,8 +271,8 @@ function startCodexMenuPoll(id) {
   const started = Date.now();
   const poll = setInterval(() => {
     if (Date.now() - started > 3000) { cancelCodexMenuPoll(id); return; }
-    // console.log(`[terminal.capture] session=${id.slice(0,8)} source=codex-menu-poll`);
-    broadcastFn?.({ type: 'terminal.capture', id });
+    // console.log(`[server.capture] session=${id.slice(0,8)} source=codex-menu-poll`);
+    captureFn?.(id);
   }, 500);
   codexMenuPoll.set(id, poll);
 }

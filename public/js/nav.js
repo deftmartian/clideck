@@ -29,6 +29,7 @@ function showSettings() {
   document.getElementById('btn-new').classList.add('opacity-30', 'pointer-events-none');
   setRailActive('settings');
   document.title = 'CliDeck — Settings';
+  document.dispatchEvent(new CustomEvent('clideck:terminal-visibility', { detail: { visible: false } }));
 }
 
 function hideSettings() {
@@ -45,6 +46,7 @@ export function switchPanel(panelId) {
   if (el) { el.classList.remove('hidden'); el.classList.add('flex'); }
   setRailActive(panelId);
   document.title = 'CliDeck — ' + (PANEL_TITLES[panelId] || 'CliDeck');
+  document.dispatchEvent(new CustomEvent('clideck:terminal-visibility', { detail: { visible: true } }));
 }
 
 document.getElementById('nav-rail').addEventListener('click', (e) => {

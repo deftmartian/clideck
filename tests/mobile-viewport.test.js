@@ -55,22 +55,20 @@ test('one viewport controller owns mobile geometry changes', () => {
 test('terminal loads the installed xterm beta line with accelerated rendering and a safe fallback', () => {
   const pkg = JSON.parse(read('package.json'));
   const index = read('public/index.html');
-  const serverStatic = read('server-static.js');
+  const buildTool = read('tools/build-client.js');
   const terminals = read('public/js/terminals.js');
   const terminalLocal = read('public/js/terminal-local.js');
-  const vendoredWebgl = read('public/addon-webgl.js');
-  const installedWebgl = read('node_modules/@xterm/addon-webgl/lib/addon-webgl.js');
 
   for (const dependency of ['@xterm/xterm', '@xterm/addon-fit', '@xterm/addon-webgl']) {
     assert.match(pkg.dependencies[dependency], /-beta\.\d+$/);
   }
-  assert.match(serverStatic, /'\/xterm\.css':\s+require\.resolve\('@xterm\/xterm\/css\/xterm\.css'\)/);
-  assert.match(serverStatic, /'\/xterm\.js':\s+require\.resolve\('@xterm\/xterm\/lib\/xterm\.js'\)/);
-  assert.match(serverStatic, /'\/addon-fit\.js':\s+require\.resolve\('@xterm\/addon-fit\/lib\/addon-fit\.js'\)/);
-  assert.match(index, /<script src="\/addon-webgl\.js"><\/script>/);
-  assert.equal(vendoredWebgl, installedWebgl);
+  assert.match(terminals, /import \{ Terminal \} from '@xterm\/xterm'/);
+  assert.match(terminals, /import \{ FitAddon \} from '@xterm\/addon-fit'/);
+  assert.match(index, /<script type="module" src="\/build\/app-[A-Z0-9]+\.js"><\/script>/);
+  assert.match(buildTool, /splitting:\s*true/);
+  assert.match(buildTool, /target:\s*'es2020'/);
   assert.match(terminals, /smoothScrollDuration:\s*180/);
-  assert.match(terminalLocal, /globalThis\.WebglAddon\?\.WebglAddon/);
+  assert.match(terminalLocal, /import\('@xterm\/addon-webgl'\)/);
   assert.match(terminalLocal, /onContextLoss\(\(\) => \{[\s\S]{0,100}addon\.dispose\(\)/);
   assert.match(terminalLocal, /catch \{[\s\S]{0,60}addon\?\.dispose\(\)/);
 });

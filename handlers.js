@@ -7,7 +7,7 @@ const sessions = require('./sessions');
 const themes = require('./themes');
 const presets = JSON.parse(readFileSync(join(__dirname, 'agent-presets.json'), 'utf8'));
 const { listDirs, binName, defaultShell } = require('./utils');
-const { presetForCommand: findPresetForCommand, menuStartsWork } = require('./preset-utils');
+const { presetForCommand: findPresetForCommand } = require('./preset-utils');
 const { PORT, localUrl } = require('./runtime');
 const { saveClipboardImage, bracketedPaste } = require('./clipboard-images');
 const { CLIENT_PROTOCOL_VERSION } = require('./protocol');
@@ -342,17 +342,16 @@ function remoteVoiceCapabilityError() {
 }
 
 function onConnection(ws) {
-  sessions.clients.add(ws);
+  sessions.registerClient(ws);
 
-  ws.send(JSON.stringify({ type: 'config', config: configForClient() }));
-  ws.send(JSON.stringify({ type: 'themes', themes }));
-  ws.send(JSON.stringify({ type: 'presets', presets: clientPresets() }));
-  ws.send(JSON.stringify({ type: 'sessions', list: sessions.list() }));
-  ws.send(JSON.stringify({ type: 'sessions.resumable', list: sessions.getResumable(cfg) }));
-  ws.send(JSON.stringify({ type: 'transcript.cache', cache: transcript.getCache() }));
-  ws.send(JSON.stringify({ type: 'plugins', list: plugins.getInfo() }));
-  ws.send(JSON.stringify({ type: 'pills', list: plugins.getPills() }));
-  sessions.sendBuffers(ws);
+  const sendControl = message => sessions.sendControl(ws, message);
+  sendControl({ type: 'config', config: configForClient() });
+  sendControl({ type: 'themes', themes });
+  sendControl({ type: 'presets', presets: clientPresets() });
+  sendControl({ type: 'sessions', list: sessions.list() });
+  sendControl({ type: 'sessions.resumable', list: sessions.getResumable(cfg) });
+  sendControl({ type: 'plugins', list: plugins.getInfo() });
+  sendControl({ type: 'pills', list: plugins.getPills() });
 
   ws.on('message', (raw) => {
     let msg;
@@ -362,7 +361,15 @@ function onConnection(ws) {
       case 'create':          sessions.create(msg, ws, cfg); break;
       case 'session.resume':  sessions.resume(msg, ws, cfg); break;
       case 'session.restart': console.log('[handler] session.restart', msg.id); sessions.restart(msg, ws, cfg); break;
-      case 'input':                sessions.input(msg); break;
+      case 'session.subscribe':    sessions.subscribe(ws, msg); break;
+      case 'session.unsubscribe':  sessions.unsubscribe(ws, msg.id); break;
+      case 'transcript.cache.request':
+        ws.send(JSON.stringify({ type: 'transcript.cache', cache: transcript.getCache() }));
+        break;
+      case 'transport.stats.request':
+        sendControl({ type: 'transport.stats', ...sessions.streamStats(ws) });
+        break;
+      case 'input':                sessions.input(msg, ws); break;
       case 'clipboard.image': {
         const result = sessions.getSessions().has(String(msg.id || ''))
           ? saveClipboardImage(msg)
@@ -373,7 +380,7 @@ function onConnection(ws) {
         }
         // Codex treats a pasted image path as an image attachment. Bracketed
         // paste keeps this on the same path as ordinary terminal paste.
-        sessions.input({ id: msg.id, data: bracketedPaste(result.path) });
+        sessions.input({ id: msg.id, data: bracketedPaste(result.path) }, ws);
         ws.send(JSON.stringify({
           type: 'clipboard.image.saved', id: msg.id, path: result.path, bytes: result.bytes,
         }));
@@ -384,64 +391,7 @@ function onConnection(ws) {
           sessions.broadcast({ type: 'session.status', id: msg.id, working: !!msg.working, source: 'client' });
         }
         break;
-      case 'terminal.buffer': {
-        const transcript = require('./transcript');
-        const sess = sessions.getSessions().get(msg.id);
-        if (sess) {
-          const rawChoices = transcript.detectMenu(msg.lines, sess.presetId);
-          let choices = rawChoices;
-          // Codex: only trust menu detection if last OTEL event was response.completed
-          if (choices && sess.presetId === 'codex') {
-            const last = require('./telemetry-receiver').getLastEvent(msg.id);
-            if (!last.startsWith('codex.sse_event:response.completed')) {
-              choices = null;
-            }
-          }
-          if (choices && sess.presetId === 'claude-code' && msg.menuVersion && (sess._menuConsumedVersion || 0) >= msg.menuVersion) {
-            choices = null;
-          }
-          let key = choices ? JSON.stringify(choices) : '';
-          // Claude can keep rendering the same approval menu briefly after Enter.
-          // Once that exact menu was approved, ignore repeated detections of the
-          // same signature until the next real turn starts.
-          if (choices && sess.presetId === 'claude-code' && key === (sess._resolvedMenuKey || '')) {
-            choices = null;
-            key = '';
-          }
-          const candidateLines = (choices || (rawChoices && sess.presetId === 'claude-code'))
-            ? transcript.stripMenu(msg.lines, sess.presetId)
-            : msg.lines;
-          transcript.updateAgentCandidate(msg.id, sess.presetId, candidateLines);
-          if (!sess.working && sess._finalizeOnIdle) {
-            sess._finalizeOnIdle = false;
-            transcript.commitAgentCandidate(msg.id, sess.presetId);
-          } else if (sess._finalizeOnCapture && msg.settled) {
-            // Agents with no push status (e.g. antigravity) never hit the idle
-            // path above. The client only sends settled buffers after render
-            // silence, so commit each one — commitAgentCandidate skips empty and
-            // duplicate text, making repeated captures idempotent.
-            transcript.commitAgentCandidate(msg.id, sess.presetId);
-          }
-          // Auto-approve: send Enter immediately when menu detected
-          if (choices && plugins.shouldAutoApproveMenu(msg.id)) {
-            setTimeout(() => sessions.input({ id: msg.id, data: '\r' }), 500);
-          }
-          if (choices) transcript.commitAgentCandidate(msg.id, sess.presetId);
-          if (key !== (sess._menuKey || '')) {
-            sess._menuKey = key;
-            sess._menuStartsWork = menuStartsWork(sess.presetId, !!msg.menuVersion, sess._finalizeOnCapture);
-            sessions.broadcast({ type: 'session.menu', id: msg.id, choices: choices || [] });
-            if (choices) {
-              if (sess.presetId === 'claude-code' && msg.menuVersion) sess._menuActiveVersion = msg.menuVersion;
-              plugins.notifyMenu(msg.id, choices);
-              if (sess.presetId === 'codex') require('./telemetry-receiver').cancelCodexMenuPoll(msg.id);
-              sessions.broadcast({ type: 'session.status', id: msg.id, working: false, source: 'menu' });
-            }
-          }
-        }
-        break;
-      }
-      case 'resize':               sessions.resize(msg); break;
+      case 'resize':               sessions.resize(msg, ws); break;
       case 'rename':          sessions.rename(msg); break;
       case 'close':           sessions.close(msg, cfg); break;
 
@@ -788,7 +738,7 @@ function onConnection(ws) {
     }
   });
 
-  ws.on('close', () => sessions.clients.delete(ws));
+  ws.on('close', () => sessions.unregisterClient(ws));
 }
 
 // Deterministic telemetry config writers per agent — no AI, no YOLO

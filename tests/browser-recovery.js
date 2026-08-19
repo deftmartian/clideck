@@ -42,7 +42,7 @@ async function waitForAnimationFrames(page, count = 4) {
 
 async function terminalText(page, sessionId) {
   return page.evaluate(async id => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     const term = state.terms.get(id)?.term;
     if (!term) return '';
     const lines = [];
@@ -57,7 +57,7 @@ async function terminalText(page, sessionId) {
 
 async function socketOpen(page) {
   return page.evaluate(async () => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     return state.ws?.readyState === WebSocket.OPEN;
   });
 }
@@ -85,6 +85,15 @@ async function writeMarker(client, sessionId, marker) {
   await waitForOutput(client, sessionId, marker, marker);
 }
 
+async function verifyTerminalQueryExactlyOnce(client, sessionId) {
+  client.send({
+    type: 'input',
+    id: sessionId,
+    data: `node -e "process.stdin.setRawMode(true);let b='';process.stdin.on('data',d=>b+=d.toString('binary'));process.stdout.write('\\x1b[6n');setTimeout(()=>{console.log('\\nQUERY_'+'REPLY_COUNT_'+((b.match(/\\x1b\\[/g)||[]).length));process.exit(0)},500)"\r`,
+  });
+  await waitForOutput(client, sessionId, 'QUERY_REPLY_COUNT_1', 'one terminal query reply');
+}
+
 // An attached image is bracket-pasted into the shell as a bare path. Its echo
 // can still be arriving when the next command is typed, so settle, clear the
 // line, and prove the prompt is clean before moving on.
@@ -96,7 +105,7 @@ async function clearPromptAfterAttach(client, sessionId, label) {
 
 function showTestToast(page, message) {
   return page.evaluate(async text => {
-    const { showToast } = await import('/js/toast.js');
+    const { showToast } = window.__clideckTest;
     showToast(text, { title: 'Probe', duration: 4000 });
   }, message);
 }
@@ -121,7 +130,35 @@ async function touchUiState(page) {
   }));
 }
 
-async function verifyNarrowDesktopTouchUi(browser, baseUrl, browserName, sessionId, marker) {
+async function verifyTouchRendererLifecycle(page, browserName, primaryId, sessionIds) {
+  const initial = await page.evaluate(async () => {
+    const { state } = window.__clideckTest;
+    return {
+      sessions: state.terms.size,
+      renderers: [...state.terms.values()].filter(entry => entry.term).length,
+      webgl: document.querySelectorAll('.term-wrap[data-renderer="webgl"]').length,
+    };
+  });
+  if (initial.sessions !== sessionIds.length || initial.renderers !== 1 || initial.webgl > 1) {
+    throw new Error(`${browserName} touch renderer budget failed: ${JSON.stringify(initial)}`);
+  }
+  const alternate = sessionIds.find(id => id !== primaryId);
+  await page.evaluate(async id => {
+    const { select } = window.__clideckTest;
+    select(id);
+  }, alternate);
+  await waitFor(async () => page.evaluate(async id => {
+    const { state } = window.__clideckTest;
+    return !!state.terms.get(id)?.term
+      && [...state.terms.values()].filter(entry => entry.term).length === 1;
+  }, alternate), `${browserName} single renderer after switching`);
+  await page.evaluate(async id => {
+    const { select } = window.__clideckTest;
+    select(id);
+  }, primaryId);
+}
+
+async function verifyNarrowDesktopTouchUi(browser, baseUrl, browserName, sessionId, sessionIds, marker) {
   const context = await browser.newContext({
     viewport: { width: 800, height: 844 },
     isMobile: false,
@@ -152,6 +189,20 @@ async function verifyNarrowDesktopTouchUi(browser, baseUrl, browserName, session
       || initial.composerHidden !== 'true'
     ) {
       throw new Error(`${browserName} narrow desktop was misclassified: ${JSON.stringify(initial)}`);
+    }
+
+    const alternate = sessionIds.find(id => id !== sessionId);
+    await page.evaluate(id => window.__clideckTest.select(id), alternate);
+    await waitFor(() => page.evaluate(id => {
+      const { state } = window.__clideckTest;
+      return !!state.terms.get(id)?.term
+        && [...state.terms.values()].filter(entry => entry.term).length === 2;
+    }, alternate), `${browserName} desktop lazy second renderer`);
+    await page.evaluate(id => window.__clideckTest.select(id), sessionId);
+    const retained = await page.evaluate(() =>
+      [...window.__clideckTest.state.terms.values()].filter(entry => entry.term).length);
+    if (retained !== 2 || !(await terminalText(page, sessionId)).includes(marker)) {
+      throw new Error(`${browserName} desktop renderer was not retained across revisit`);
     }
 
     await setTouchUiModeFromSettings(page, 'touch');
@@ -294,7 +345,7 @@ async function verifyMobileComposer(page, browserName, client, sessionId) {
   }
   if (await accessories.isVisible()) throw new Error(`${browserName} terminal keys start expanded`);
   const initial = await page.evaluate(async id => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     const entry = state.terms.get(id);
     return {
       terminalReadOnly: entry?.term?.textarea?.readOnly,
@@ -307,7 +358,7 @@ async function verifyMobileComposer(page, browserName, client, sessionId) {
   }
 
   await page.evaluate(async id => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     const ws = state.ws;
     const originalSend = ws.send.bind(ws);
     globalThis.__clideckComposerFrames = [];
@@ -352,7 +403,7 @@ async function verifyMobileComposer(page, browserName, client, sessionId) {
 
   await page.evaluate(() => { globalThis.__clideckComposerFrames = []; });
   const rowsBeforeTools = await page.evaluate(async id => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     return state.terms.get(id)?.term?.rows;
   }, sessionId);
   await toolsButton.click();
@@ -368,7 +419,7 @@ async function verifyMobileComposer(page, browserName, client, sessionId) {
     throw new Error(`${browserName} terminal key did not send the real control byte: ${JSON.stringify(controlFrames)}`);
   }
   const rowsAfterTools = await page.evaluate(async id => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     return state.terms.get(id)?.term?.rows;
   }, sessionId);
   if (rowsAfterTools !== rowsBeforeTools) {
@@ -378,7 +429,7 @@ async function verifyMobileComposer(page, browserName, client, sessionId) {
 
   await textarea.fill('one\ntwo\nthree\nfour');
   const expanded = await page.evaluate(async id => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     return {
       composerHeight: document.getElementById('mobile-composer')?.getBoundingClientRect().height,
       editorHeight: document.getElementById('mobile-composer-text')?.getBoundingClientRect().height,
@@ -395,7 +446,7 @@ async function verifyMobileComposer(page, browserName, client, sessionId) {
   await toolsButton.click();
   await directButton.click();
   const direct = await page.evaluate(async id => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     const entry = state.terms.get(id);
     return {
       terminalReadOnly: entry?.term?.textarea?.readOnly,
@@ -411,7 +462,7 @@ async function verifyMobileComposer(page, browserName, client, sessionId) {
   await toolsButton.click();
   await directButton.click();
   const restored = await page.evaluate(async id => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     const entry = state.terms.get(id);
     const editor = document.getElementById('mobile-composer-text');
     return {
@@ -438,7 +489,7 @@ async function verifyMobileComposer(page, browserName, client, sessionId) {
     throw new Error(`${browserName} terminal history tap opened the composer keyboard`);
   }
   const terminalFocusGuard = await page.evaluate(async id => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     const entry = state.terms.get(id);
     const terminalTextarea = entry?.term?.textarea;
     const screen = entry?.el?.querySelector('.xterm-screen');
@@ -476,7 +527,7 @@ async function verifyDirectModeLinkTap(page, browserName, client, sessionId, cdp
   });
   await waitForOutput(client, sessionId, label, `${browserName} OSC 8 link output`);
   await page.evaluate(async id => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     state.terms.get(id)?.term?.scrollToBottom();
     globalThis.__clideckOpenedLinks = [];
     globalThis.__clideckOriginalOpen = window.open;
@@ -491,7 +542,7 @@ async function verifyDirectModeLinkTap(page, browserName, client, sessionId, cdp
   await toolsButton.click();
   await directButton.click();
   const point = await page.evaluate(async ({ id, targetLabel }) => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     const entry = state.terms.get(id);
     const term = entry?.term;
     const screen = entry?.el?.querySelector('.xterm-screen');
@@ -548,7 +599,7 @@ async function verifyMobileSelection(page, browserName, client, sessionId, cdp =
   });
   await waitForOutput(client, sessionId, marker, `${browserName} selection output`);
   await page.evaluate(async id => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     state.terms.get(id)?.term?.scrollToBottom();
     document.getElementById('mobile-composer-text')?.focus();
   }, sessionId);
@@ -556,7 +607,7 @@ async function verifyMobileSelection(page, browserName, client, sessionId, cdp =
   await page.locator('#mobile-composer-tools').click();
   await page.locator('#mobile-selection-toggle').click();
   const mode = await page.evaluate(async id => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     const term = state.terms.get(id)?.term;
     return {
       active: document.body.classList.contains('mobile-selection-active'),
@@ -590,12 +641,12 @@ async function verifyMobileSelection(page, browserName, client, sessionId, cdp =
     }
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
     selectedText = await waitFor(async () => page.evaluate(async id => {
-      const { state } = await import('/js/state.js');
+      const { state } = window.__clideckTest;
       return state.terms.get(id)?.term?.getSelection() || '';
     }, sessionId), `${browserName} drag selection`);
   } else {
     selectedText = await page.evaluate(async id => {
-      const { state } = await import('/js/state.js');
+      const { state } = window.__clideckTest;
       const term = state.terms.get(id)?.term;
       const buffer = term?.buffer.active;
       if (!term || !buffer) return '';
@@ -612,7 +663,7 @@ async function verifyMobileSelection(page, browserName, client, sessionId, cdp =
   }
 
   const selected = await page.evaluate(async id => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     const term = state.terms.get(id)?.term;
     return {
       text: term?.getSelection(),
@@ -629,7 +680,7 @@ async function verifyMobileSelection(page, browserName, client, sessionId, cdp =
   if (cdp) {
     await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
     const copySource = await page.evaluate(async id => {
-      const { state } = await import('/js/state.js');
+      const { state } = window.__clideckTest;
       const term = state.terms.get(id)?.term;
       const buffer = term?.buffer.active;
       if (!term || !buffer) return '';
@@ -644,7 +695,7 @@ async function verifyMobileSelection(page, browserName, client, sessionId, cdp =
       return term.getSelection();
     }, sessionId);
     const expectedCopy = await page.evaluate(async source => {
-      const { trimTerminalSelection } = await import('/js/terminal-clipboard.js');
+      const { trimTerminalSelection } = window.__clideckTest;
       return trimTerminalSelection(source);
     }, copySource);
     await waitFor(
@@ -662,7 +713,7 @@ async function verifyMobileSelection(page, browserName, client, sessionId, cdp =
   }
 
   const finished = await page.evaluate(async id => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     return {
       active: document.body.classList.contains('mobile-selection-active'),
       selection: state.terms.get(id)?.term?.getSelection(),
@@ -730,7 +781,7 @@ async function verifyBottomActionClearance(page, browserName) {
 
 async function verifyVisualViewportHeight(page, browserName, sessionId) {
   const initial = await page.evaluate(async id => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     const viewport = window.visualViewport;
     return {
       rows: state.terms.get(id)?.term?.rows || 0,
@@ -756,7 +807,7 @@ async function verifyVisualViewportHeight(page, browserName, sessionId) {
   await page.evaluate(async ({ id, visual }) => {
     const viewport = window.visualViewport;
     if (!viewport) throw new Error('visualViewport is unavailable');
-    const { state: appState } = await import('/js/state.js');
+    const { state: appState } = window.__clideckTest;
     const entry = appState.terms.get(id);
     if (!entry) throw new Error('active terminal is unavailable');
     const propertyNames = ['height', 'width', 'offsetTop', 'offsetLeft', 'scale'];
@@ -864,14 +915,14 @@ async function verifyVisualViewportHeight(page, browserName, sessionId) {
   );
   await page.waitForFunction(
     async ({ id, beforeRows }) => {
-      const { state } = await import('/js/state.js');
+      const { state } = window.__clideckTest;
       return (state.terms.get(id)?.term?.rows || 0) < beforeRows;
     },
     { id: sessionId, beforeRows: initial.rows },
   );
   await waitForAnimationFrames(page);
   const changed = await page.evaluate(async id => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     return {
       writes: window.__clideckViewportProbe.writes,
       fits: window.__clideckViewportProbe.fits,
@@ -888,13 +939,13 @@ async function verifyVisualViewportHeight(page, browserName, sessionId) {
     window.__setClideckTestViewport({ height: height - offsetTop, offsetTop }, 25);
   }, { height: compactHeight, offsetTop: pannedOffset });
   await page.waitForFunction(async ({ top, bottom }) => {
-    const { getViewportRect } = await import('/js/viewport.js');
+    const { getViewportRect } = window.__clideckTest;
     const viewport = getViewportRect();
     return viewport.top === top && viewport.bottom === bottom;
   }, { top: pannedOffset, bottom: compactHeight });
   await waitForAnimationFrames(page);
   const panned = await page.evaluate(async id => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     return {
       writes: window.__clideckViewportProbe.writes,
       fits: window.__clideckViewportProbe.fits,
@@ -915,7 +966,7 @@ async function verifyVisualViewportHeight(page, browserName, sessionId) {
 
   const expectedBottom = compactHeight;
   const geometry = await page.evaluate(async id => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     const bounds = selector => {
       const rect = document.querySelector(selector)?.getBoundingClientRect();
       return rect ? { top: rect.top, bottom: rect.bottom, height: rect.height } : null;
@@ -946,7 +997,7 @@ async function verifyVisualViewportHeight(page, browserName, sessionId) {
     initial.appHeight,
   );
   await page.waitForFunction(async ({ id, rows }) => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     return state.terms.get(id)?.term?.rows === rows;
   }, { id: sessionId, rows: initial.rows });
   await waitForAnimationFrames(page);
@@ -960,8 +1011,8 @@ async function verifyVisualViewportHeight(page, browserName, sessionId) {
   }, compactHeight);
   await waitForAnimationFrames(page);
   const pinch = await page.evaluate(async id => {
-    const { state } = await import('/js/state.js');
-    const { getViewportRect } = await import('/js/viewport.js');
+    const { state } = window.__clideckTest;
+    const { getViewportRect } = window.__clideckTest;
     const viewport = getViewportRect();
     return {
       height: Number.parseFloat(
@@ -1051,23 +1102,23 @@ async function verifyTouchScrollDuringStream(page, cdp, client, sessionId) {
     data: `node -e "let n=0;console.log('\\n\\n\\n');const tick=()=>{process.stdout.write('\\u001b[3F\\u001b[J');console.log('TRANSCRIPT_'+(n++));console.log('UI_ROW_A');console.log('UI_ROW_B');console.log('UI_ROW_C')};const t=setInterval(tick,45);setTimeout(()=>{clearInterval(t);console.log('${endMarker}')},12000)"\r`,
   });
   await waitFor(async () => page.evaluate(async id => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     const buffer = state.terms.get(id)?.term?.buffer.active;
     return buffer?.baseY > 0;
   }, sessionId), 'Chromium streaming scrollback');
   await page.evaluate(async id => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     state.terms.get(id)?.term?.scrollToBottom();
   }, sessionId);
   await dispatchTouchDrag(page, cdp);
   await page.waitForFunction(async id => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     const buffer = state.terms.get(id)?.term?.buffer.active;
     return buffer && buffer.viewportY < buffer.baseY;
   }, sessionId);
   await new Promise(resolve => setTimeout(resolve, 700));
   const held = await page.evaluate(async id => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     const buffer = state.terms.get(id)?.term?.buffer.active;
     return buffer ? buffer.baseY - buffer.viewportY : 0;
   }, sessionId);
@@ -1076,7 +1127,7 @@ async function verifyTouchScrollDuringStream(page, cdp, client, sessionId) {
   }
   await waitForOutput(client, sessionId, endMarker, 'Chromium stream end');
   await page.evaluate(async id => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     state.terms.get(id)?.term?.scrollToBottom();
   }, sessionId);
 }
@@ -1093,7 +1144,7 @@ async function verifyTouchScrollWithMouseTracking(page, cdp, client, sessionId) 
     data: `node -e "let p=0;process.stdout.write('\\u001b[?1049h\\u001b[?1000h\\u001b[?1002h\\u001b[?1003h\\u001b[?1006hAPP_POS_0');process.stdin.setRawMode(true);process.stdin.resume();process.stdin.on('data',d=>{const s=d.toString('latin1');if(s.includes('q')){process.stdout.write('\\u001b[?1006l\\u001b[?1003l\\u001b[?1002l\\u001b[?1000l\\u001b[?1049l');process.exit(0)}const before=p;let m,n=0;const wheel=/\\u001b\\[<6([45]);\\d+;\\d+M/g;while((m=wheel.exec(s))){p=m[1]==='4'?Math.min(999,p+3):Math.max(0,p-1);n++}if(n){const bottom=before>0&&p===0?' AT_BOTTOM_AFTER_JUMP':'';process.stdout.write('\\u001b[2J\\u001b[HAPP_POS_'+p+bottom+' RX['+s.replace(/\\u001b/g,'E')+']')}})"\r`,
   });
   await waitFor(async () => page.evaluate(async id => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     return state.terms.get(id)?.term?.modes.mouseTrackingMode === 'any';
   }, sessionId), 'Chromium mouse-tracking mode');
   const sawWheelReport = waitForOutput(client, sessionId, 'E[<64;', 'Chromium touch wheel report');
@@ -1108,7 +1159,7 @@ async function verifyTouchScrollWithMouseTracking(page, cdp, client, sessionId) 
   // The app owns this scrollback, so the jump-to-latest button must be driven
   // by the emitted wheel reports rather than xterm's (frozen) viewport.
   await waitFor(async () => page.evaluate(async id => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     const btn = document.querySelector('.term-wrap.active .tmx-jump-latest');
     const actions = document.querySelector('.terminal-input-actions');
     const mic = document.querySelector('.terminal-input-action[data-plugin-id="voice-input"]');
@@ -1122,13 +1173,13 @@ async function verifyTouchScrollWithMouseTracking(page, cdp, client, sessionId) 
   // debt and mic-to-jump handoff to remain intact.
   await new Promise(resolve => setTimeout(resolve, 1300));
   const debtBeforeCommit = await page.evaluate(async id => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     return state.terms.get(id)?.appScrollDebt || 0;
   }, sessionId);
   await page.locator('#mobile-composer-text').fill('x');
   await page.locator('#mobile-composer-send').click();
   await waitFor(async () => page.evaluate(async ({ id, expected }) => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     const btn = document.querySelector('.term-wrap.active .tmx-jump-latest');
     const actions = document.querySelector('.terminal-input-actions');
     return document.getElementById('mobile-composer-text')?.value === ''
@@ -1144,7 +1195,7 @@ async function verifyTouchScrollWithMouseTracking(page, cdp, client, sessionId) 
   await sawUnwind;
   await reachedBottom;
   await waitFor(async () => page.evaluate(async id => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     const btn = document.querySelector('.term-wrap.active .tmx-jump-latest');
     const actions = document.querySelector('.terminal-input-actions');
     const mic = document.querySelector('.terminal-input-action[data-plugin-id="voice-input"]');
@@ -1154,7 +1205,7 @@ async function verifyTouchScrollWithMouseTracking(page, cdp, client, sessionId) 
       && !actions?.classList.contains('is-hidden');
   }, sessionId), 'Chromium mouse-mode jump button hidden after click');
   const focus = await page.evaluate(async id => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     return {
       composer: document.activeElement?.id === 'mobile-composer-text',
       terminal: document.activeElement === state.terms.get(id)?.term?.textarea,
@@ -1168,7 +1219,7 @@ async function verifyTouchScrollWithMouseTracking(page, cdp, client, sessionId) 
   await new Promise(resolve => setTimeout(resolve, 1300));
   client.send({ type: 'input', id: sessionId, data: 'q' });
   await waitFor(async () => page.evaluate(async id => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     return state.terms.get(id)?.term?.modes.mouseTrackingMode === 'none';
   }, sessionId), 'Chromium mouse-tracking reset');
   client.send({ type: 'input', id: sessionId, data: '\u0003' });
@@ -1187,7 +1238,7 @@ async function verifyScrollDismissesKeyboard(page, cdp, sessionId) {
     'Chromium terminal drag composer blur',
   );
   await page.evaluate(async id => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     state.terms.get(id)?.term?.scrollToBottom();
   }, sessionId);
 }
@@ -1318,23 +1369,23 @@ async function verifyTouchScrolling(page, cdp, client, sessionId) {
   });
   await waitForOutput(client, sessionId, marker, 'Chromium touch-scroll output');
   await waitFor(async () => page.evaluate(async id => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     const buffer = state.terms.get(id)?.term?.buffer.active;
     return buffer?.baseY > 0;
   }, sessionId), 'Chromium terminal scrollback');
   await page.evaluate(async id => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     state.terms.get(id)?.term?.scrollToBottom();
   }, sessionId);
   const before = await waitFor(async () => page.evaluate(async id => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     const buffer = state.terms.get(id)?.term?.buffer.active;
     return buffer && buffer.viewportY === buffer.baseY
       ? { baseY: buffer.baseY, viewportY: buffer.viewportY }
       : null;
   }, sessionId), 'Chromium terminal bottom');
   const beforeRefit = await page.evaluate(async id => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     const entry = state.terms.get(id);
     const buffer = entry?.term?.buffer.active;
     if (!entry || !buffer) return null;
@@ -1353,51 +1404,51 @@ async function verifyTouchScrolling(page, cdp, client, sessionId) {
     throw new Error(`Chromium did not establish a scrollback anchor: ${JSON.stringify(beforeRefit)}`);
   }
   await page.waitForFunction(async ({ id, rows, distance }) => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     const term = state.terms.get(id)?.term;
     const buffer = term?.buffer.active;
     return term && buffer && term.rows < rows
       && buffer.baseY - buffer.viewportY === distance;
   }, { id: sessionId, rows: beforeRefit.rows, distance: beforeRefit.distanceFromBottom });
   await page.evaluate(async ({ id, smoothScrollDuration }) => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     const entry = state.terms.get(id);
     entry?.el?.style.removeProperty('bottom');
     if (entry) entry.term.options.smoothScrollDuration = smoothScrollDuration;
   }, { id: sessionId, smoothScrollDuration: beforeRefit.smoothScrollDuration });
   await page.waitForFunction(async ({ id, rows, distance }) => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     const term = state.terms.get(id)?.term;
     const buffer = term?.buffer.active;
     return term && buffer && term.rows === rows
       && buffer.baseY - buffer.viewportY === distance;
   }, { id: sessionId, rows: beforeRefit.rows, distance: beforeRefit.distanceFromBottom });
   await page.evaluate(async id => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     state.terms.get(id)?.term?.scrollToBottom();
   }, sessionId);
   await page.waitForFunction(async id => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     const buffer = state.terms.get(id)?.term?.buffer.active;
     return buffer && buffer.viewportY === buffer.baseY;
   }, sessionId);
   await dispatchTouchDrag(page, cdp);
 
   await page.waitForFunction(async ({ id, beforeYdisp }) => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     return (state.terms.get(id)?.term?.buffer.active.viewportY ?? beforeYdisp) < beforeYdisp;
   }, { id: sessionId, beforeYdisp: before.viewportY });
   await page.evaluate(async id => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     state.terms.get(id)?.term?.scrollToBottom();
   }, sessionId);
   await page.waitForFunction(async id => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     const buffer = state.terms.get(id)?.term?.buffer.active;
     return buffer && buffer.viewportY === buffer.baseY;
   }, sessionId);
   const inputFocus = await page.evaluate(async id => {
-    const { state } = await import('/js/state.js');
+    const { state } = window.__clideckTest;
     return {
       composer: document.activeElement?.id === 'mobile-composer-text',
       terminal: document.activeElement === state.terms.get(id)?.term?.textarea,
@@ -1441,6 +1492,20 @@ async function run(browserName) {
     const { id } = await client.waitFor('created');
     const base = `${browserName.toUpperCase()}_BASE_${Date.now()}`;
     await writeMarker(client, id, base);
+    const sessionIds = [id];
+    for (let index = 1; index < 10; index += 1) {
+      client.send({
+        type: 'create', commandId, name: `${browserName}-quiet-${index}`,
+        cwd: sandbox.workDir(`${browserName}-quiet-${index}`), cols: 80, rows: 24,
+      });
+      const quiet = await client.waitFor(
+        message => message.type === 'created' && message.name === `${browserName}-quiet-${index}`,
+      );
+      sessionIds.push(quiet.id);
+    }
+    client.messages.length = 0;
+    client.subscribe(id, { replay: 'resume' });
+    await client.waitFor(message => message.type === 'session.subscribed' && message.id === id);
 
     const executablePath = process.env.CLIDECK_BROWSER_PATH
       || (browserName === 'chromium' && existsSync('/usr/bin/chromium')
@@ -1452,9 +1517,10 @@ async function run(browserName) {
     });
     await verifyNarrowDesktopTouchUi(
       browser,
-      `http://127.0.0.1:${port}/`,
+      `http://127.0.0.1:${port}/?clideckPerf=1`,
       browserName,
       id,
+      sessionIds,
       base,
     );
     const context = await browser.newContext({
@@ -1473,11 +1539,13 @@ async function run(browserName) {
       if (message.type() === 'error') browserErrors.push(message.text());
     });
     page.on('pageerror', error => browserErrors.push(error.message));
-    await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: 'domcontentloaded' });
+    await page.goto(`http://127.0.0.1:${port}/?clideckPerf=1`, { waitUntil: 'domcontentloaded' });
     await waitFor(
       async () => (await terminalText(page, id)).includes(base),
       `${browserName} initial replay`,
     );
+    await verifyTouchRendererLifecycle(page, browserName, id, sessionIds);
+    await verifyTerminalQueryExactlyOnce(client, id);
     await verifyTouchFirstDesktopOverride(page, browserName);
     await verifyBottomActionClearance(page, browserName);
     await verifyVisualViewportHeight(page, browserName, id);
@@ -1534,6 +1602,16 @@ async function run(browserName) {
     }, `${browserName} offline recovery`);
     if (!recovered.includes(base)) throw new Error(`${browserName} lost existing scrollback`);
     if (count(recovered, missed) !== 1) throw new Error(`${browserName} duplicated recovered output`);
+    const recoveryMs = await page.evaluate(() => {
+      const events = window.__clideckPerfSnapshot().events;
+      const opened = [...events].reverse().find(event => event.name === 'webSocketOpen');
+      const subscribed = opened && events.find(event =>
+        event.name === 'terminalSubscribed' && event.at >= opened.at);
+      return subscribed ? subscribed.at - opened.at : null;
+    });
+    if (!Number.isFinite(recoveryMs) || recoveryMs > 500) {
+      throw new Error(`${browserName} foreground terminal recovery used ${recoveryMs}ms after WebSocket open`);
+    }
 
     await page.evaluate(() => {
       for (let index = 0; index < 12; index += 1) {
@@ -1560,7 +1638,7 @@ async function run(browserName) {
       // emulation may reload the page when network access is restored, which
       // would replace the guarded terminal before this assertion can inspect it.
       await page.evaluate(async () => {
-        const { state } = await import('/js/state.js');
+        const { state } = window.__clideckTest;
         state.ws?.close(4001, 'buffer gap probe');
       });
       await waitFor(async () => !(await socketOpen(page)), 'Firefox gap socket disconnect');
@@ -1575,7 +1653,7 @@ async function run(browserName) {
         throw new Error('Firefox received gap output while its application socket was disconnected');
       }
       const gapReport = await waitFor(() => page.evaluate(async ({ sessionId, marker }) => {
-        const { state } = await import('/js/state.js');
+        const { state } = window.__clideckTest;
         const banner = document.getElementById('pwa-update-banner');
         const action = document.getElementById('pwa-update-action');
         const dismiss = document.getElementById('pwa-update-dismiss');

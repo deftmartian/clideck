@@ -10,11 +10,13 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="CliDeck">
   <title>CliDeck</title>
-  <link rel="icon" type="image/png" href="/img/clideck-logo-icon.png">
+  <link rel="icon" type="image/png" href="/icons/clideck-64.png">
   <link rel="apple-touch-icon" href="/icons/clideck-apple-180.png">
   <link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials">
-  <link rel="stylesheet" href="/xterm.css">
-  <link rel="stylesheet" href="/tailwind.css">
+  <!-- client-build:styles:start -->
+  <link rel="stylesheet" href="/build/styles-W5GVJK2D.css">
+  <meta name="clideck-build-id" content="c0ded156373c77af">
+  <!-- client-build:styles:end -->
   <style>
     :root {
       --color-project-header-bg: #191c21;
@@ -284,9 +286,6 @@
       #folder-picker > div { width: 100%; max-width: 420px; }
     }
   </style>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@700&display=swap" rel="stylesheet">
 </head>
 <body class="flex bg-slate-950 text-slate-200 font-sans overflow-hidden">
   <div id="mobile-sidebar-backdrop" aria-hidden="true"></div>
@@ -402,7 +401,7 @@
         </button>
       </div>
       <div id="version-footer" class="flex flex-col items-center px-4 py-4 border-t border-slate-700/50">
-        <img src="/img/clideck-logo-terminal-panel.png" alt="CliDeck" style="width:24px;height:24px" class="opacity-30 mb-2" draggable="false">
+        <img src="/icons/clideck-64.png" alt="CliDeck" style="width:24px;height:24px" class="opacity-30 mb-2" draggable="false">
         <div class="text-[10px] leading-relaxed text-center space-y-px">
           <div class="text-slate-600">clideck version: <span id="version-clideck" class="text-slate-500"></span></div>
           <div class="text-slate-600">clideck remote version: <span id="version-remote" class="text-slate-500"></span></div>
@@ -453,7 +452,7 @@
     </section>
     <div id="plugin-toolbar" class="absolute top-2 right-3 z-10 flex gap-1.5 empty:hidden"></div>
     <div id="empty" class="absolute inset-0 flex flex-col items-center justify-center select-none">
-      <img src="/img/clideck-logo-terminal-panel.png" alt="CliDeck" class="w-44 opacity-60 mb-5" draggable="false">
+      <img src="/icons/clideck-192.png" alt="CliDeck" class="w-44 opacity-60 mb-5" draggable="false">
       <p class="text-slate-500 text-[13px] leading-relaxed text-center">Press <kbd class="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 text-[11px] font-mono">+</kbd> to start a new session<br>or resume a previous one from the sidebar</p>
     </div>
 
@@ -710,9 +709,8 @@
     </div>
   </main>
 
-  <script src="/xterm.js"></script>
-  <script src="/addon-fit.js"></script>
-  <script src="/addon-webgl.js"></script>
-  <script type="module" src="/js/app.js"></script>
+  <!-- client-build:scripts:start -->
+  <script type="module" src="/build/app-JV6PGT7W.js"></script>
+  <!-- client-build:scripts:end -->
 </body>
 </html>

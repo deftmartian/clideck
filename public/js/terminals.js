@@ -1,4 +1,6 @@
 import { state, send } from './state.js';
+import { Terminal } from '@xterm/xterm';
+import { FitAddon } from '@xterm/addon-fit';
 import { esc, miniMarkdown, resolveIconPath } from './utils.js';
 import { resolveTheme, resolveAccent, applyTheme } from './profiles.js';
 import { attachToTerminal, registerHotkey } from './hotkeys.js';
@@ -6,6 +8,7 @@ import { closeDropdown } from './prompts.js';
 import { showToast } from './toast.js';
 import { createTerminalLocalIntegration } from './terminal-local.js';
 import { countPerf, notePerf } from './perf.js';
+import { isTouchUiEnabled, onTouchUiChange } from './touch-ui.js';
 
 function isLightBg(themeId) {
   const bg = resolveTheme(themeId)?.background;
@@ -461,7 +464,10 @@ function openMenu(sessionId, anchor) {
       toggleMute(sessionId);
     } else if (action === 'refresh') {
       const re = state.terms.get(sessionId);
-      if (re) send({ type: 'session.restart', id: sessionId, themeId: re.themeId, cols: re.term.cols, rows: re.term.rows });
+      if (re) {
+        const size = re.term ? { cols: re.term.cols, rows: re.term.rows } : estimateSize();
+        send({ type: 'session.restart', id: sessionId, themeId: re.themeId, ...size });
+      }
     } else if (action === 'delete') {
       document.getElementById('session-list').dispatchEvent(
         new CustomEvent('session-delete', { detail: { id: sessionId } })
@@ -590,15 +596,74 @@ export function addTerminal(id, name, themeId, commandId, projectId, muted, last
   const hasBridge = !!cmd?.bridge;
   const stopBounce = null;
 
+  const entry = {
+    term: null,
+    fit: null,
+    el: null,
+    ro: null,
+    fitted: false,
+    requestFit: null,
+    cancelFitRaf: null,
+    onContextMenu: null,
+    inputLength: 0,
+    inputHasText: false,
+    scrolledUp: false,
+    themeId,
+    commandId,
+    presetId: presetId || null,
+    projectId: projectId || null,
+    muted: !!muted,
+    working: false,
+    workStartedAt: null,
+    stopBounce,
+    outputGeneration: null,
+    lastOutputSeq: null,
+    replayInitialized: false,
+    lastActivityAt: Date.now(),
+    unread: false,
+    lastPreviewText: lastPreview || '',
+    searchText: '',
+    hasBridge,
+  };
+  state.terms.set(id, entry);
+  if (working) setStatus(id, true);
+  else renderSessionStatus(entry, statusEl, false);
+  refreshTerminalInputActions();
+  document.getElementById('empty').style.display = 'none';
+  document.getElementById('terminals').style.pointerEvents = '';
+  if (muted) requestAnimationFrame(() => updateMuteIndicator(id));
+  regroupSessions();
+}
+
+function subscribeRenderer(id, { snapshot = false } = {}) {
+  const entry = state.terms.get(id);
+  if (!entry?.term || document.visibilityState === 'hidden') return false;
+  const hasCursor = !snapshot && entry.outputGeneration && Number.isSafeInteger(entry.lastOutputSeq);
+  return send({
+    type: 'session.subscribe',
+    id,
+    replay: hasCursor ? 'resume' : 'snapshot',
+    ...(hasCursor ? { cursor: { generation: entry.outputGeneration, seq: entry.lastOutputSeq } } : {}),
+    claimResize: true,
+    cols: entry.term.cols,
+    rows: entry.term.rows,
+  });
+}
+
+function mountRenderer(id) {
+  const entry = state.terms.get(id);
+  if (!entry || entry.term) return entry;
+
   const el = document.createElement('div');
   el.className = 'term-wrap';
-  el.style.backgroundColor = resolveTheme(themeId).background;
+  if (state.active === id) el.classList.add('active');
+  el.style.backgroundColor = resolveTheme(entry.themeId).background;
   document.getElementById('terminals').appendChild(el);
 
   const term = new Terminal({
     fontSize: 13,
     fontFamily: 'Menlo, Monaco, "Courier New", monospace',
-    theme: resolveTheme(themeId),
+    theme: resolveTheme(entry.themeId),
     // Keep ANSI/truecolor output readable across dark and light terminal themes.
     minimumContrastRatio: MIN_CONTRAST_RATIO,
     cursorBlink: true,
@@ -608,91 +673,14 @@ export function addTerminal(id, name, themeId, commandId, projectId, muted, last
   });
   countPerf('renderersCreated');
   notePerf('rendererCreated', { id });
-  const fit = new FitAddon.FitAddon();
+  const fit = new FitAddon();
   term.loadAddon(fit);
   addLinkProvider(term);
   term.onData(data => terminalLocal.handleTerminalData(id, data));
-
-  // [TRANSCRIPT-CAPTURE] initial settled capture, plus one delayed idle save;
-  // agents with no push status (finalizeOnCapture) also save on each settled render
-  let _captureTimer = null, _renderSilent = false, _lastTyping = 0, _initialCaptureDone = false, _idleSaveTimer = null;
-  function _sendCapture(settled) {
-    const entry = state.terms.get(id);
-    if (!entry?.term) return;
-    const buf = entry.term.buffer.active;
-    const lines = [];
-    for (let i = 0; i < buf.length; i++) { const line = buf.getLine(i); if (line) lines.push(line.translateToString(true)); }
-    // `settled` marks a post-render-silence frame — the server commits the
-    // transcript from these for agents with no push status (finalizeOnCapture).
-    send({ type: 'terminal.buffer', id, lines, settled: !!settled });
-  }
-  function _isChrome(t) {
-    return !t
-      || /^[─━═\u2500-\u257f]+$/.test(t)
-      || /^[▀▄█▌▐░▒▓╭╮╰╯│╔╗╚╝║]+$/.test(t)
-      || (/[█▀▄▌▐░▒▓]/.test(t) && /^[█▀▄▌▐░▒▓\s]+$/.test(t))
-      || /^[❯>$%#]\s*$/.test(t)
-      || /^(esc to interrupt|\? for shortcuts)$/i.test(t);
-  }
-  function _hasContent() {
-    const entry = state.terms.get(id);
-    if (!entry?.term) return false;
-    const buf = entry.term.buffer.active;
-    for (let i = 0; i < buf.length; i++) {
-      const text = buf.getLine(i)?.translateToString(true).trim();
-      if (!_isChrome(text)) return true;
-    }
-    return false;
-  }
-  function _tryCapture() {
-    const entry = state.terms.get(id);
-    if (!_renderSilent || Date.now() - _lastTyping < 2000) return;
-    // Initial capture: first time render settles with real content, capture regardless of working/idle
-    if (!_initialCaptureDone) {
-      if (!_hasContent()) return; // retry on next silence
-      _initialCaptureDone = true;
-      _sendCapture(true);
-      return;
-    }
-    // Agents with no push status (antigravity) never trigger the status- or
-    // hook-driven capture paths, so keep saving on each settled render.
-    if (state.presets.find(p => p.presetId === presetId)?.finalizeOnCapture) _sendCapture(true);
-  }
-  term.onData(() => {
-    _lastTyping = Date.now();
-    // User typing invalidates pending capture — will re-try after silence
-    _renderSilent = false;
-    clearTimeout(_captureTimer);
-    _captureTimer = setTimeout(() => { _renderSilent = true; _tryCapture(); }, 2000);
-  });
-  term.onRender(() => {
-    _renderSilent = false;
-    clearTimeout(_captureTimer);
-    _captureTimer = setTimeout(() => { _renderSilent = true; _tryCapture(); }, 2000);
-  });
   term.onWriteParsed(() => {
-    if (Date.now() - _lastTyping < 500) return;
-    const entry = state.terms.get(id);
-    if (entry) entry.lastRenderAt = Date.now();
+    const current = state.terms.get(id);
+    if (current) current.lastRenderAt = Date.now();
   });
-
-  // Expose capture function so setStatus can schedule a retry
-  setTimeout(() => {
-    const e = state.terms.get(id);
-    if (e) {
-      e.tryCapture = _tryCapture;
-      e.sendCaptureNow = _sendCapture;
-      e.scheduleIdleCapture = () => {
-        clearTimeout(_idleSaveTimer);
-        _idleSaveTimer = setTimeout(() => {
-          const entry = state.terms.get(id);
-          if (!entry || entry.working) return;
-          _sendCapture();
-        }, 300);
-      };
-      e.cancelIdleCapture = () => clearTimeout(_idleSaveTimer);
-    }
-  }, 0);
 
   term.open(el);
   const refreshJumpLatest = terminalLocal.attachTerminal(id, term, el, shouldShowJumpLatest);
@@ -702,7 +690,7 @@ export function addTerminal(id, name, themeId, commandId, projectId, muted, last
     replayWrites += 1;
     term.write(data, () => { replayWrites -= 1; });
   };
-  attachToTerminal(term, presetId, () => replayWrites > 0);
+  attachToTerminal(term, entry.presetId, () => replayWrites > 0);
   const onContextMenu = (e) => {
     if (e.shiftKey) return;
     e.preventDefault();
@@ -711,68 +699,72 @@ export function addTerminal(id, name, themeId, commandId, projectId, muted, last
     openMenu(id, { x: e.clientX, y: e.clientY });
   };
   el.addEventListener('contextmenu', onContextMenu);
-  let fitted = false, pending = [];
+  let fitted = false;
+  let pending = [];
   // [FIT-GUARD] only call fit() when proposed dimensions actually change — prevents
   // unnecessary buffer reflows that cause scrollbar jumpiness on sub-pixel layout shifts
   const fitController = terminalLocal.createFitController(id, term, fit);
   const requestFit = () => fitController.request();
+  Object.assign(entry, {
+    term, fit, el, requestFit,
+    cancelFitRaf: () => fitController.cancel(),
+    onContextMenu,
+    queue(data, replay = false) {
+      if (!fitted) { pending.push({ data, replay }); return true; }
+      return false;
+    },
+    writeChunk,
+    ...terminalLocal.entryState(id, refreshJumpLatest, requestFit),
+  });
   const ro = new ResizeObserver(() => {
     if (!el.offsetWidth) return;
     if (!fitted) {
       fitted = true;
       fit.fit();
       countPerf('terminalFits');
-      send({ type: 'resize', id, cols: term.cols, rows: term.rows });
+      entry.fitted = true;
       for (const chunk of pending) writeChunk(chunk.data, chunk.replay);
       pending = null;
-      updatePreview(id);
       refreshJumpLatest();
+      subscribeRenderer(id, { snapshot: true });
       return;
     }
     requestFit();
   });
+  entry.ro = ro;
   ro.observe(el);
-  // Safety: if RO hasn't fired within 500ms, let visible terminals proceed.
-  // For hidden/unmeasured terminals, keep the PTY at a reasonable fallback size
-  // but do not flush queued output until a real measured fit happens; replaying
-  // buffered output into fake geometry is what leaves the rebuilt terminal messy
-  // after refresh/logout/login.
-  setTimeout(() => {
-    if (!fitted) {
-      if (!el.offsetWidth) {
-        term.resize(120, 30);
-        send({ type: 'resize', id, cols: 120, rows: 30 });
-        return;
-      }
-      fitted = true;
-      for (const chunk of pending) writeChunk(chunk.data, chunk.replay);
-      pending = null;
-      updatePreview(id);
-      refreshJumpLatest();
-    }
-  }, 500);
-  state.terms.set(id, { term, fit, el, ro, requestFit, cancelFitRaf: () => fitController.cancel(), onContextMenu, inputLength: 0, inputHasText: false, scrolledUp: false, ...terminalLocal.entryState(id, refreshJumpLatest, requestFit), themeId, commandId, presetId: presetId || null, projectId: projectId || null, muted: !!muted, working: false, workStartedAt: null, stopBounce, queue: (data, replay = false) => { if (!fitted) { pending.push({ data, replay }); return true; } return false; }, writeChunk, lastActivityAt: Date.now(), unread: false, lastPreviewText: lastPreview || '', searchText: '' });
-  if (working) setStatus(id, true);
-  else renderSessionStatus(state.terms.get(id), statusEl, false); // idle sessions get the zᶻZ icon now, not a blank slot until their first transition
-  refreshTerminalInputActions();
-  document.getElementById('empty').style.display = 'none';
-  document.getElementById('terminals').style.pointerEvents = '';
-  if (muted) requestAnimationFrame(() => updateMuteIndicator(id));
-
-  regroupSessions();
+  return entry;
 }
+
+function disposeRenderer(id) {
+  const entry = state.terms.get(id);
+  if (!entry?.term) return;
+  entry.cancelFitRaf?.();
+  entry.ro?.disconnect();
+  entry.el?.removeEventListener?.('contextmenu', entry.onContextMenu);
+  terminalLocal.detach(id);
+  entry.term.dispose();
+  countPerf('renderersDisposed');
+  entry.el?.remove();
+  Object.assign(entry, {
+    term: null, fit: null, el: null, ro: null, fitted: false,
+    requestFit: null, cancelFitRaf: null, onContextMenu: null,
+    queue: null, writeChunk: null,
+  });
+}
+
+onTouchUiChange(enabled => {
+  if (!enabled) return;
+  for (const [id, entry] of state.terms) {
+    if (id !== state.active && entry.term) disposeRenderer(id);
+  }
+});
 
 export function removeTerminal(id) {
   const entry = state.terms.get(id);
   if (!entry) return;
   if (entry.stopBounce) entry.stopBounce();
-  entry.cancelFitRaf?.();
-  entry.ro?.disconnect();
-  entry.el.removeEventListener?.('contextmenu', entry.onContextMenu);
-  terminalLocal.detach(id);
-  entry.term.dispose();
-  countPerf('renderersDisposed');
-  entry.el.remove();
+  disposeRenderer(id);
   state.terms.delete(id);
   document.querySelector(`.group[data-id="${id}"]`)?.remove();
 
@@ -791,10 +783,15 @@ export function removeTerminal(id) {
 }
 
 export function select(id) {
-  if (state.active === id) return;
+  if (state.active === id && state.terms.get(id)?.term) return;
   closeDropdown();
   closePillLog();
   document.querySelectorAll('.pill-row.active-session').forEach(r => r.classList.remove('active-session'));
+
+  const previousId = state.active;
+  if (previousId && previousId !== id) {
+    send({ type: 'session.unsubscribe', id: previousId });
+  }
 
   const prev = document.querySelector('.group.active-session');
   if (prev) prev.classList.remove('active-session');
@@ -803,10 +800,13 @@ export function select(id) {
   const item = document.querySelector(`.group[data-id="${id}"]`);
   if (item) item.classList.add('active-session');
 
-  const entry = state.terms.get(id);
+  state.active = id;
+  if (isTouchUiEnabled() && previousId && previousId !== id) disposeRenderer(previousId);
+  const entry = mountRenderer(id);
   if (entry) {
     entry.el.classList.add('active');
     entry.requestFit?.();
+    if (entry.fitted) subscribeRenderer(id);
     if (entry.unread) {
       entry.unread = false;
       const dot = document.querySelector(`.group[data-id="${id}"] .unread-dot`);
@@ -822,10 +822,23 @@ export function select(id) {
     if (!document.querySelector('[contenteditable="true"]')
       && !terminalLocal.ownsInput(entry)) entry.term.focus();
   }
-  state.active = id;
   terminalLocal.refresh();
   refreshTerminalInputActions();
   localStorage.setItem('clideck.activeSessionId', id);
+}
+
+export function suspendActiveTerminal({ disposeTouch = false } = {}) {
+  const id = state.active;
+  if (!id) return;
+  send({ type: 'session.unsubscribe', id });
+  if (disposeTouch && isTouchUiEnabled()) disposeRenderer(id);
+}
+
+export function resumeActiveTerminal() {
+  const id = state.active;
+  if (!id || document.visibilityState === 'hidden') return;
+  const entry = mountRenderer(id);
+  if (entry?.fitted) subscribeRenderer(id);
 }
 
 // --- Preview & status ---
@@ -842,7 +855,7 @@ export function markUnread(id) {
 
 export function updatePreview(id) {
   const entry = state.terms.get(id);
-  if (!entry) return;
+  if (!entry?.term) return;
   const last = readLastAgentLine(entry.term, entry.commandId);
   const el = document.querySelector(`.group[data-id="${id}"] .session-preview`);
   if (el && last && el.textContent !== last) {
@@ -911,7 +924,7 @@ function setStatus(id, working) {
         const sessionName = document.querySelector(`.group[data-id="${id}"] .name`)?.textContent || 'Session';
         const proj = state.cfg.projects?.find(p => p.id === entry.projectId);
         const title = proj ? `${proj.name}: ${sessionName}` : sessionName;
-        const n = new Notification(title, { body: `Is now idle.\n${entry.lastPreviewText || ''}`, icon: '/img/clideck-logo-icon.png', tag: id });
+        const n = new Notification(title, { body: `Is now idle.\n${entry.lastPreviewText || ''}`, icon: '/icons/clideck-64.png', tag: id });
         n.onclick = () => { window.focus(); select(id); n.close(); };
       }
     }
@@ -994,8 +1007,8 @@ export function setSessionTheme(id, themeId, { showBanner = true } = {}) {
   const oldLight = isLightBg(entry.themeId);
   const newLight = isLightBg(themeId);
   entry.themeId = themeId;
-  applyTheme(entry.term, themeId);
-  entry.el.style.backgroundColor = resolveTheme(themeId).background;
+  if (entry.term) applyTheme(entry.term, themeId);
+  if (entry.el) entry.el.style.backgroundColor = resolveTheme(themeId).background;
   send({ type: 'session.theme', id, themeId });
   if (showBanner && oldLight !== newLight) showRestartBanner(id, themeId);
   else hideRestartBanner(id);
@@ -1014,7 +1027,8 @@ function showRestartBanner(id, themeId) {
   banner.addEventListener('click', (e) => {
     e.stopPropagation();
     console.log('[restart] click banner, sending session.restart', { id, themeId: entry.themeId });
-    send({ type: 'session.restart', id, themeId: entry.themeId, cols: entry.term.cols, rows: entry.term.rows });
+    const size = entry.term ? { cols: entry.term.cols, rows: entry.term.rows } : estimateSize();
+    send({ type: 'session.restart', id, themeId: entry.themeId, ...size });
   });
   group.appendChild(banner);
 }
@@ -1027,9 +1041,10 @@ export function restartComplete(id, msg) {
   hideRestartBanner(id);
   const entry = state.terms.get(id);
   if (!entry) return;
-  entry.term.clear();
   if (state.active !== id) select(id);
-  else entry.term.focus();
+  else if (!entry.term) mountRenderer(id);
+  entry.term?.clear();
+  entry.term?.focus();
 }
 
 // --- Rename ---
@@ -1311,6 +1326,9 @@ export function renderResumable() {
 export function applyFilter() {
   const { query, tab } = state.filter;
   const q = query.toLowerCase();
+  if (q && !state.transcriptCacheRequested) {
+    state.transcriptCacheRequested = send({ type: 'transcript.cache.request' });
+  }
 
   // Filter active sessions
   for (const [id, entry] of state.terms) {
@@ -1501,6 +1519,11 @@ function buildPillRow(pill) {
 
 function selectPill(id) {
   // Deselect any active terminal
+  const previousId = state.active;
+  if (previousId) {
+    send({ type: 'session.unsubscribe', id: previousId });
+    if (isTouchUiEnabled()) disposeRenderer(previousId);
+  }
   const prev = document.querySelector('.group.active-session');
   if (prev) prev.classList.remove('active-session');
   document.querySelector('.term-wrap.active')?.classList.remove('active');
@@ -1638,7 +1661,7 @@ export { openMenu, closeMenu, setStatus, updateMuteIndicator, positionMenu, PROJ
 // Clear active terminal scrollback — Cmd+K (macOS), Ctrl+Shift+K (Windows/Linux)
 const clearTerminal = () => {
   const entry = state.active && state.terms.get(state.active);
-  if (entry) entry.term.clear();
+  if (entry?.term) entry.term.clear();
 };
 registerHotkey('core', 'Cmd+K', clearTerminal);
 registerHotkey('core', 'Ctrl+Shift+K', clearTerminal);

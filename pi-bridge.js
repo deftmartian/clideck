@@ -2,10 +2,12 @@
 
 let broadcastFn = null;
 let sessionsFn = null;
+let captureFn = null;
 
-function init(broadcast, getSessions) {
+function init(broadcast, getSessions, captureSession) {
   broadcastFn = broadcast;
   sessionsFn = getSessions;
+  captureFn = captureSession;
 }
 
 function findByToken(token) {
@@ -17,7 +19,7 @@ function findByToken(token) {
 }
 
 function capture(id) {
-  setTimeout(() => broadcastFn?.({ type: 'terminal.capture', id }), 500);
+  setTimeout(() => captureFn?.(id), 500);
 }
 
 function handleEvent(payload) {

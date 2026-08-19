@@ -9,7 +9,9 @@
   "scripts": {
     "start": "node server.js",
     "build:css": "tailwindcss -i src/input.css -o public/tailwind.css --minify",
-    "prepublishOnly": "npm run build:css",
+    "build:client": "node tools/build-client.js",
+    "check:client": "node tools/build-client.js --check",
+    "prepublishOnly": "npm run build:css && npm run build:client",
     "test": "node --test tests/*.test.js",
     "test:browser": "node tests/browser-recovery.js",
     "smoke:providers": "node tests/providers/run.js",
@@ -53,6 +55,7 @@
     "ws": "^8.21.1"
   },
   "devDependencies": {
+    "esbuild": "0.28.2",
     "playwright-core": "1.61.1",
     "tailwindcss": "^3.4.19"
   },

@@ -185,6 +185,7 @@ function encodeRgbaPng(image) {
 const source = decodeRgbaPng(readFileSync(sourcePath));
 const dark = [15, 23, 42, 255];
 const outputs = [
+  ['clideck-64.png', resize(source, 64, 64)],
   ['clideck-192.png', resize(source, 192, 192)],
   ['clideck-512.png', resize(source, 512, 512)],
   ['clideck-maskable-512.png', composite(source, 512, 384, dark)],

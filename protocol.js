@@ -1,4 +1,4 @@
-const CLIENT_PROTOCOL_VERSION = 2;
+const CLIENT_PROTOCOL_VERSION = 3;
 const CLIENT_PROTOCOL_PARAM = 'clideckProtocol';
 
 function clientProtocolVersionFromUrl(requestUrl) {

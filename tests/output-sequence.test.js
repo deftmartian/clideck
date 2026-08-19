@@ -32,8 +32,14 @@ test('live output and reconnect replay carry continuous sequence metadata', asyn
     rows: 24,
   });
   const created = await first.waitFor('created');
+  await first.waitFor(
+    msg => msg.type === 'session.subscribed' && msg.id === created.id,
+    { label: 'initial session subscription' },
+  );
+  const liveMarker = `SEQUENCE_LIVE_${Date.now()}`;
+  first.send({ type: 'input', id: created.id, data: `printf '${liveMarker}\\n'\r` });
   const live = await first.waitFor(
-    msg => msg.type === 'output' && msg.id === created.id,
+    msg => msg.type === 'output' && msg.id === created.id && String(msg.data).includes(liveMarker),
     { label: 'sequenced live output' },
   );
   assert.match(live.generation, /^[0-9a-f-]{36}$/i);
@@ -41,13 +47,11 @@ test('live output and reconnect replay carry continuous sequence metadata', asyn
 
   await second.connect();
   const replay = await second.waitFor(
-    msg => msg.type === 'output' && msg.id === created.id && msg.replay,
-    { label: 'sequenced reconnect replay' },
+    msg => msg.type === 'session.snapshot' && msg.id === created.id,
+    { label: 'sequenced reconnect snapshot' },
   );
   assert.equal(replay.generation, live.generation);
-  assert.equal(replay.endSeq - replay.startSeq, replay.data.length);
-  assert.ok(replay.startSeq <= live.startSeq);
-  assert.ok(replay.endSeq >= live.endSeq);
+  assert.ok(replay.atSeq >= live.endSeq);
 
   const overflowMarker = `BUFFER_DONE_${Date.now()}`;
   first.send({
@@ -65,10 +69,9 @@ test('live output and reconnect replay carry continuous sequence metadata', asyn
   third.port = port;
   await third.connect();
   const boundedReplay = await third.waitFor(
-    msg => msg.type === 'output' && msg.id === created.id && msg.replay,
-    { label: 'bounded reconnect replay' },
+    msg => msg.type === 'session.snapshot' && msg.id === created.id,
+    { label: 'bounded reconnect snapshot' },
   );
-  assert.ok(boundedReplay.data.length <= 2 * 1024 * 1024);
-  assert.equal(boundedReplay.endSeq - boundedReplay.startSeq, boundedReplay.data.length);
-  assert.ok(boundedReplay.startSeq > 0, 'oversized output must advance the buffer start');
+  assert.ok(Buffer.byteLength(boundedReplay.data) <= 1024 * 1024);
+  assert.ok(boundedReplay.atSeq > 0, 'snapshot must be associated with processed output');
 });

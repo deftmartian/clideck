@@ -272,7 +272,7 @@ function pastePrompt(text) {
   send({ type: 'input', id: state.active, data: fillPromptVars(text, state.active) });
   // Refocus the terminal after pasting
   const entry = state.terms.get(state.active);
-  if (entry) entry.term.focus();
+  entry?.term?.focus();
 }
 
 // PORT-TO-NEXT: @@ agent mentions — new feature, replicate in clideck-next.
@@ -324,7 +324,7 @@ function insertMention(address) {
   if (!state.active) return;
   send({ type: 'input', id: state.active, data: `${BRACKETED_PASTE_START}${address} ${BRACKETED_PASTE_END}` });
   const entry = state.terms.get(state.active);
-  if (entry) entry.term.focus();
+  entry?.term?.focus();
 }
 
 // --- // (prompts) and @@ (agents) autocomplete ---

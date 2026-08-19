@@ -28,17 +28,17 @@ function handleGrokHook(req, res, sessions) {
           sessions.broadcast({ type: 'session.status', id: clideckId, working: true, source: 'hook' });
         } else if (route === 'stop' || route === 'session-end') {
           sessions.broadcast({ type: 'session.status', id: clideckId, working: false, source: 'hook' });
-          setTimeout(() => sessions.broadcast({ type: 'terminal.capture', id: clideckId }), 500);
+          setTimeout(() => sessions.capture(clideckId), 500);
         } else if (route === 'session-start') {
           // Compact can fire mid-turn; only treat interactive starts as idle.
           if (String(payload.source || '').toLowerCase() !== 'compact') {
             sessions.broadcast({ type: 'session.status', id: clideckId, working: false, source: 'hook' });
-            setTimeout(() => sessions.broadcast({ type: 'terminal.capture', id: clideckId }), 500);
+            setTimeout(() => sessions.capture(clideckId), 500);
           }
         } else if (route === 'menu') {
           const menuVersion = session ? ((session._menuVersion || 0) + 1) : 1;
           if (session) session._menuVersion = menuVersion;
-          setTimeout(() => sessions.broadcast({ type: 'terminal.capture', id: clideckId, menuVersion }), 500);
+          setTimeout(() => sessions.capture(clideckId, { menuVersion }), 500);
         }
       }
     } catch {}

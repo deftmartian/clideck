@@ -36,9 +36,13 @@ function activateTerminalLinkAtPoint(term, screen, touch) {
   return true;
 }
 
-function enableAcceleratedRenderer(term, element) {
+async function enableAcceleratedRenderer(term, element) {
   element.dataset.renderer = 'dom';
-  const WebglAddonCtor = globalThis.WebglAddon?.WebglAddon;
+  let WebglAddonCtor;
+  try {
+    ({ WebglAddon: WebglAddonCtor } = await import('@xterm/addon-webgl'));
+  } catch {}
+  if (!element.isConnected) return;
   if (!WebglAddonCtor) {
     element.dataset.rendererFallback = 'addon-unavailable';
     return;
@@ -198,7 +202,10 @@ export function createTerminalLocalIntegration({
     mobileComposer.syncTerminalInput({ term, mobileDirect: false });
     mobileSelection.attach(id, term, element);
     mobileTouchScroll.attach(id, term, element);
-    enableAcceleratedRenderer(term, element);
+    const scheduleRenderer = globalThis.requestIdleCallback
+      ? callback => requestIdleCallback(callback, { timeout: 250 })
+      : callback => setTimeout(callback, 0);
+    scheduleRenderer(() => enableAcceleratedRenderer(term, element));
 
     const button = createJumpLatestButton(id, term);
     element.appendChild(button);
@@ -220,7 +227,10 @@ export function createTerminalLocalIntegration({
 
   function createFitController(id, term, fit) {
     let frame = 0;
+    let resizeTimer = 0;
     function fitPreservingScrollback() {
+      const entry = state.terms.get(id);
+      if (state.active !== id || !entry?.el?.classList.contains('active') || !entry.el.offsetWidth) return;
       const dimensions = fit.proposeDimensions();
       if (!dimensions || (dimensions.cols === term.cols && dimensions.rows === term.rows)) return;
       const oldBuffer = term.buffer.active;
@@ -231,7 +241,14 @@ export function createTerminalLocalIntegration({
         const newBuffer = term.buffer.active;
         term.scrollToLine(Math.max(0, newBuffer.baseY - distanceFromBottom));
       }
-      send({ type: 'resize', id, cols: term.cols, rows: term.rows });
+      clearTimeout(resizeTimer);
+      const cols = term.cols;
+      const rows = term.rows;
+      resizeTimer = setTimeout(() => {
+        const current = state.terms.get(id);
+        if (state.active !== id || current?.term !== term || term.cols !== cols || term.rows !== rows) return;
+        send({ type: 'resize', id, cols, rows });
+      }, 120);
     }
     return {
       request() {
@@ -239,9 +256,12 @@ export function createTerminalLocalIntegration({
         frame = requestAnimationFrame(() => { frame = 0; fitPreservingScrollback(); });
       },
       cancel() {
-        if (!frame) return;
-        cancelAnimationFrame(frame);
-        frame = 0;
+        if (frame) {
+          cancelAnimationFrame(frame);
+          frame = 0;
+        }
+        clearTimeout(resizeTimer);
+        resizeTimer = 0;
       },
     };
   }

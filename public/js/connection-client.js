@@ -6,7 +6,7 @@ import {
   showConnectionState,
 } from './pwa.js';
 
-const CLIENT_PROTOCOL_VERSION = 2;
+const CLIENT_PROTOCOL_VERSION = 3;
 const CLIENT_PROTOCOL_PARAM = 'clideckProtocol';
 
 export function createConnectionClient({ connect }) {
@@ -14,6 +14,11 @@ export function createConnectionClient({ connect }) {
   let lastForegroundReconnectAt = 0;
   let connectionBlocked = false;
   let saveTimer = null;
+  let stableTimer = null;
+  let consecutiveFailures = 0;
+  let reconnectAttempt = 0;
+  let diagnosticAttempt = 0;
+  const retryDelays = [250, 500, 1000, 2000, 5000];
 
   function clearReconnectTimer() {
     if (reconnectTimer === null) return;
@@ -48,10 +53,13 @@ export function createConnectionClient({ connect }) {
 
   function scheduleReconnect() {
     if (connectionBlocked || reconnectTimer !== null) return;
+    const base = retryDelays[Math.min(reconnectAttempt, retryDelays.length - 1)];
+    reconnectAttempt += 1;
+    const delay = Math.max(0, Math.round(base * (0.8 + Math.random() * 0.4)));
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       connect();
-    }, 1000);
+    }, delay);
   }
 
   function stopUntilReload(ws, reason) {
@@ -106,6 +114,11 @@ export function createConnectionClient({ connect }) {
   function finishServerConfig(firstConfigForSocket) {
     setConnectionState('connected');
     if (!firstConfigForSocket) return;
+    clearTimeout(stableTimer);
+    stableTimer = setTimeout(() => {
+      consecutiveFailures = 0;
+      reconnectAttempt = 0;
+    }, 10000);
     flushQueuedSends();
     send({ type: 'remote.status', forceUpdate: true });
   }
@@ -114,10 +127,15 @@ export function createConnectionClient({ connect }) {
     if (state.ws !== ws) return;
     state.ws = null;
     state.protocolReady = false;
+    clearTimeout(stableTimer);
+    consecutiveFailures += 1;
     setConnectionState(navigator.onLine ? 'reconnecting' : 'offline');
-    diagnoseConnectionFailure().then(result => {
-      if (!state.ws && !connectionBlocked) setConnectionState(result);
-    });
+    if (consecutiveFailures >= 2) {
+      const attempt = ++diagnosticAttempt;
+      diagnoseConnectionFailure().then(result => {
+        if (attempt === diagnosticAttempt && !state.ws && !connectionBlocked) setConnectionState(result);
+      });
+    }
     scheduleReconnect();
   }
 
@@ -142,7 +160,7 @@ export function createConnectionClient({ connect }) {
   function reconnect() {
     if (connectionBlocked || document.visibilityState === 'hidden') return;
     const now = Date.now();
-    if (now - lastForegroundReconnectAt < 750) return;
+    if (now - lastForegroundReconnectAt < 100) return;
     lastForegroundReconnectAt = now;
     suspend('foreground resume');
     setConnectionState(navigator.onLine ? 'reconnecting' : 'offline');

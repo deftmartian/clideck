@@ -9,11 +9,13 @@ const telemetry = require('./telemetry-receiver');
 const opencodeBridge = require('./opencode-bridge');
 const piBridge = require('./pi-bridge');
 const plugins = require('./plugin-loader');
-const { presetForCommand } = require('./preset-utils');
+const { presetForCommand, menuStartsWork } = require('./preset-utils');
 const { lineageOf } = require('./lineage');
 const { stripAnsi } = require('./ansi-utils');
 const { withCliDeckGuide } = require('./agent-session-guide');
 const { initialResumeReady, hasUsableResumeToken } = require('./resume-readiness');
+const { ServerCapture } = require('./server-capture');
+const { createSessionStream } = require('./session-stream');
 
 const THEMES = require('./themes');
 const MAX_BUFFER = 2 * 1024 * 1024;
@@ -24,6 +26,33 @@ const { DATA_DIR } = require('./paths');
 const SAVED_PATH = join(DATA_DIR, 'sessions.json');
 const sessions = new Map();
 const clients = new Set();
+
+function terminalReplyKind(data) {
+  const value = String(data || '');
+  if (/^\x1b\[\??\d+(?:;\d+)*R$/.test(value)) return 'cursor-position';
+  if (/^\x1b\[(?:\?|>)?[\d;]*c$/.test(value)) return 'device-attributes';
+  return '';
+}
+
+function resizeSession(id, cols, rows) {
+  const session = sessions.get(id);
+  if (!session) return false;
+  session.pty.resize(cols, rows);
+  session.capture.resize(cols, rows);
+  return true;
+}
+
+const stream = createSessionStream({
+  clients,
+  getSession: id => sessions.get(id),
+  snapshot: id => {
+    const session = sessions.get(id);
+    if (!session) throw new Error('session is not available');
+    return session.capture.snapshot();
+  },
+  applyResize: resizeSession,
+});
+stream.start();
 
 // Persisted sessions awaiting resume (loaded on startup, cleared as they're resumed)
 let resumable = [];
@@ -39,8 +68,7 @@ function addBroadcastListener(fn) {
 }
 
 function broadcast(msg) {
-  const raw = JSON.stringify(msg);
-  for (const c of clients) if (c.readyState === 1) c.send(raw);
+  for (const client of clients) stream.sendControl(client, msg);
   if (msg.type === 'session.status') {
     // Status broadcasts currently also apply the local state transition. This is
     // intentional for now but couples transport with session state; if this area
@@ -55,6 +83,7 @@ function broadcast(msg) {
       // reply; keep idle finalization enabled there so the completed post-menu
       // answer is not lost. Other agents still suppress transcript finalization on menu.
       s._finalizeOnIdle = !msg.working && msg.source !== 'esc' && (msg.source !== 'menu' || s.presetId === 'codex');
+      if (!msg.working && msg.source !== 'menu') scheduleCapture(msg.id, 300);
       // if (s.presetId === 'claude-code') {
       //   console.log(`[claude] broadcast status session=${msg.id.slice(0,8)} working=${!!msg.working} source=${msg.source} finalizeOnIdle=${!!s._finalizeOnIdle}`);
       // }
@@ -63,6 +92,70 @@ function broadcast(msg) {
     plugins.notifyStatus(msg.id, msg.working, msg.source);
   }
   for (const fn of broadcastListeners) try { fn(msg); } catch {}
+}
+
+function scheduleCapture(id, delay = 0, options = {}) {
+  const session = sessions.get(id);
+  if (!session) return;
+  clearTimeout(session._captureTimer);
+  session._captureTimer = setTimeout(() => capture(id, options), delay);
+}
+
+async function capture(id, { menuVersion, settled = false } = {}) {
+  const session = sessions.get(id);
+  if (!session) return false;
+  const captureRef = session.capture;
+  const lines = await captureRef.lines();
+  if (sessions.get(id) !== session || session.capture !== captureRef) return false;
+
+  const rawChoices = transcript.detectMenu(lines, session.presetId);
+  let choices = rawChoices;
+  if (choices && session.presetId === 'codex') {
+    const last = telemetry.getLastEvent(id);
+    if (!last.startsWith('codex.sse_event:response.completed')) choices = null;
+  }
+  if (choices && session.presetId === 'claude-code' && menuVersion
+    && (session._menuConsumedVersion || 0) >= menuVersion) choices = null;
+  let key = choices ? JSON.stringify(choices) : '';
+  if (choices && session.presetId === 'claude-code' && key === (session._resolvedMenuKey || '')) {
+    choices = null;
+    key = '';
+  }
+  const candidateLines = (choices || (rawChoices && session.presetId === 'claude-code'))
+    ? transcript.stripMenu(lines, session.presetId)
+    : lines;
+  transcript.updateAgentCandidate(id, session.presetId, candidateLines);
+
+  if (!session.working && session._finalizeOnIdle) {
+    session._finalizeOnIdle = false;
+    transcript.commitAgentCandidate(id, session.presetId);
+  } else if (session._finalizeOnCapture && settled) {
+    transcript.commitAgentCandidate(id, session.presetId);
+  }
+  if (choices && plugins.shouldAutoApproveMenu(id)) {
+    setTimeout(() => input({ id, data: '\r' }), 500);
+  }
+  if (choices) transcript.commitAgentCandidate(id, session.presetId);
+  if (key !== (session._menuKey || '')) {
+    session._menuKey = key;
+    session._menuStartsWork = menuStartsWork(session.presetId, !!menuVersion, session._finalizeOnCapture);
+    broadcast({ type: 'session.menu', id, choices: choices || [] });
+    if (choices) {
+      if (session.presetId === 'claude-code' && menuVersion) session._menuActiveVersion = menuVersion;
+      plugins.notifyMenu(id, choices);
+      if (session.presetId === 'codex') telemetry.cancelCodexMenuPoll(id);
+      broadcast({ type: 'session.status', id, working: false, source: 'menu' });
+    }
+  }
+
+  const candidate = transcript.getAgentCandidate(id);
+  const preview = String(candidate || '').trim().split('\n').filter(Boolean).pop()?.slice(0, 200) || '';
+  if (preview && preview !== session.lastPreview) {
+    session.lastPreview = preview;
+    session.lastActivityAt = new Date().toISOString();
+    broadcast({ type: 'session.preview', id, text: preview });
+  }
+  return true;
 }
 
 // --- Spawn a PTY and wire up a session ---
@@ -134,6 +227,27 @@ function spawnSession(id, cmd, parts, cwd, name, themeId, commandId, savedToken,
     working: undefined,
     _finalizeOnCapture: !!preset?.finalizeOnCapture,
   };
+  session.capture = new ServerCapture({
+    cols: cols || 80,
+    rows: rows || 24,
+    onReply: data => {
+      // A subscribed browser xterm receives the same query and answers it. The
+      // headless twin replies only when no healthy renderer is available.
+      if (!stream.hasHealthySubscriber(id)) {
+        term.write(data);
+        return;
+      }
+      const now = Date.now();
+      session._terminalQueryReplies = (session._terminalQueryReplies || [])
+        .filter(item => item.expiresAt > now);
+      session._terminalQueryReplies.push({
+        data,
+        kind: terminalReplyKind(data),
+        expiresAt: now + 2000,
+        consumed: false,
+      });
+    },
+  });
   sessions.set(id, session);
   transcript.setFinalizeOnIdle(id, ['claude-code', 'codex', 'gemini-cli', 'opencode', 'pi', 'clideck-agent', 'grok'].includes(lineageOf(session.presetId)) ? session.presetId : null);
 
@@ -167,15 +281,10 @@ function spawnSession(id, cmd, parts, cwd, name, themeId, commandId, savedToken,
     }
     activity.trackOut(id, data);
     transcript.trackOutput(id, data);
+    session.capture.write(data, session.outputSeq);
+    scheduleCapture(id, 2000, { settled: true });
     plugins.notifyOutput(id, data);
-    broadcast({
-      type: 'output',
-      id,
-      data,
-      generation: session.outputGeneration,
-      startSeq,
-      endSeq: session.outputSeq,
-    });
+    stream.queueOutput(id, data, startSeq, session.outputSeq);
   });
 
   term.onExit(() => {
@@ -187,6 +296,9 @@ function spawnSession(id, cmd, parts, cwd, name, themeId, commandId, savedToken,
     opencodeBridge.clear(id);
     piBridge.clear(id);
     plugins.clearStatus(id);
+    clearTimeout(s._captureTimer);
+    stream.clearSession(id);
+    s.capture?.dispose();
     const canPersist = !s.ephemeral && cmd.canResume && cmd.resumeCommand && hasUsableResumeToken(s);
     // If resumable and a durable token was captured, move to resumable list.
     if (canPersist) {
@@ -358,11 +470,26 @@ function writeSessionInput(id, data) {
   sessions.get(id)?.pty.write(data);
 }
 
-function input(msg) {
-  const data = plugins.transformInput(msg.id, msg.data);
-  activity.trackIn(msg.id, data.length);
+function input(msg, ws) {
   const s = sessions.get(msg.id);
   if (!s) return;
+  const now = Date.now();
+  s._terminalQueryReplies = (s._terminalQueryReplies || []).filter(item => item.expiresAt > now);
+  const replyKind = terminalReplyKind(msg.data);
+  const matchingReplies = ws && s._terminalQueryReplies.filter(item =>
+    item.data === msg.data || (replyKind && item.kind === replyKind));
+  if (matchingReplies?.length) {
+    if (!stream.ownsTerminalReplies(ws, msg.id)) return;
+    const queryReply = matchingReplies.find(item => !item.consumed);
+    if (!queryReply) return;
+    queryReply.consumed = true;
+    activity.trackIn(msg.id, String(msg.data).length);
+    s.pty.write(msg.data);
+    return;
+  }
+  if (ws) stream.claimResize(ws, msg.id);
+  const data = plugins.transformInput(msg.id, msg.data);
+  activity.trackIn(msg.id, data.length);
   // Menu choice selected → back to working (Enter or digit keys only)
   if (s._menuKey && !s.working && (data === '\r' || /^[1-9]$/.test(data))) {
     // Approval/denial menus can leave a transient tool line as the latest
@@ -389,7 +516,7 @@ function input(msg) {
     broadcast({ type: 'session.status', id: msg.id, working: false, source: 'esc' });
   }
 }
-function resize(msg) { sessions.get(msg.id)?.pty.resize(msg.cols, msg.rows); }
+function resize(msg, ws) { return ws ? stream.resize(ws, msg) : false; }
 
 function rename(msg) {
   const s = sessions.get(msg.id);
@@ -418,7 +545,19 @@ function setMute(id, muted) {
 
 function close(msg, cfg) {
   const s = sessions.get(msg.id);
-  if (s) { s.pty.kill(); telemetry.clear(msg.id); opencodeBridge.clear(msg.id); piBridge.clear(msg.id); transcript.clear(msg.id); plugins.clearStatus(msg.id); sessions.delete(msg.id); broadcast({ type: 'closed', id: msg.id }); }
+  if (s) {
+    clearTimeout(s._captureTimer);
+    stream.clearSession(msg.id);
+    s.capture?.dispose();
+    s.pty.kill();
+    telemetry.clear(msg.id);
+    opencodeBridge.clear(msg.id);
+    piBridge.clear(msg.id);
+    transcript.clear(msg.id);
+    plugins.clearStatus(msg.id);
+    sessions.delete(msg.id);
+    broadcast({ type: 'closed', id: msg.id });
+  }
   // Also remove from resumable list if present
   const before = resumable.length;
   resumable = resumable.filter(r => r.id !== msg.id);
@@ -454,6 +593,9 @@ function restart(msg, ws, cfg) {
   piBridge.clear(id);
   transcript.clear(id);
 
+  clearTimeout(s._captureTimer);
+  stream.clearSession(id);
+  s.capture?.dispose();
   s.pty.kill();
   sessions.delete(id);
 
@@ -516,38 +658,6 @@ function getResumable(cfg) {
     const preset = matchPreset(cmd);
     return { ...s, presetId: preset?.presetId || 'shell' };
   });
-}
-
-function sendBuffers(ws) {
-  for (const [id, s] of sessions) {
-    if (s.chunks.length) {
-      const data = s.chunks.join('');
-      ws.send(JSON.stringify({
-        type: 'output',
-        id,
-        data,
-        replay: true,
-        generation: s.outputGeneration,
-        startSeq: s.outputSeq - data.length,
-        endSeq: s.outputSeq,
-      }));
-      continue;
-    }
-    if (['claude-code', 'codex', 'gemini-cli', 'opencode', 'pi', 'clideck-agent'].includes(lineageOf(s.presetId)) && !s.working) {
-      const text = transcript.getReplayText(id, s.presetId);
-      if (text) {
-        ws.send(JSON.stringify({
-          type: 'session.history',
-          id,
-          text,
-          replay: true,
-          generation: s.outputGeneration,
-          snapshotId: crypto.createHash('sha256').update(text).digest('hex').slice(0, 16),
-        }));
-        continue;
-      }
-    }
-  }
 }
 
 // --- Persistence: save on shutdown, load on startup ---
@@ -627,7 +737,11 @@ function startAutoSave(getConfig) {
 function shutdown(cfg) {
   clearInterval(autoSaveInterval);
   saveSessions(cfg);
-  for (const [, s] of sessions) {
+  stream.stop();
+  for (const [id, s] of sessions) {
+    clearTimeout(s._captureTimer);
+    stream.clearSession(id);
+    s.capture?.dispose();
     try { s.pty.kill(); } catch {}
   }
 }
@@ -635,6 +749,15 @@ function shutdown(cfg) {
 module.exports = {
   clients, broadcast, addBroadcastListener, getSessions: () => sessions,
   create, createProgrammatic, resume, restart, input, resize, rename, setTheme, setMute, setProject, setPreview, close,
-  list, getResumable, sendBuffers,
+  list, getResumable, capture,
+  registerClient: stream.register,
+  unregisterClient: stream.unregister,
+  subscribe: stream.subscribe,
+  unsubscribe: stream.unsubscribe,
+  claimResize: stream.claimResize,
+  sendControl: stream.sendControl,
+  streamStats: stream.stats,
+  stream,
+  terminalReplyKind,
   loadSessions, startAutoSave, shutdown,
 };

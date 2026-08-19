@@ -290,7 +290,7 @@ test('protocol compatibility gates queued mutations until server config arrives'
   const clientProtocol = Number(connectionClient.match(/CLIENT_PROTOCOL_VERSION\s*=\s*(\d+)/)?.[1]);
   assert.equal(clientProtocol, serverProtocol, 'client and server protocol constants must move together');
   assert.equal(serverProtocol, CLIENT_PROTOCOL_VERSION);
-  assert.equal(serverProtocol, 2, 'sequence-aware replay requires protocol v2');
+  assert.equal(serverProtocol, 3, 'subscription recovery requires protocol v3');
   assert.equal(clientProtocolVersionFromUrl(`/?${CLIENT_PROTOCOL_PARAM}=2`), 2);
   assert.equal(clientProtocolVersionFromUrl(`/?${CLIENT_PROTOCOL_PARAM}=1`), 1);
   assert.equal(clientProtocolVersionFromUrl('/'), undefined);
@@ -368,7 +368,7 @@ test('connection diagnostics distinguish offline, server, and authentication fai
   assert.match(app, /createConnectionClient\(/);
 });
 
-test('unrecoverable terminal gaps require an explicit page reload', () => {
+test('terminal gaps request a protocol snapshot without reloading the page', () => {
   const app = read('public/js/app.js');
   const pwa = read('public/js/pwa.js');
   const connectionClient = read('public/js/connection-client.js');
@@ -380,18 +380,15 @@ test('unrecoverable terminal gaps require an explicit page reload', () => {
   assert.match(pwa, /if\s*\(required\)\s*document\.body\.dataset\.reloadRequired\s*=\s*['"]true['"]/);
   assert.match(pwa, /if\s*\(!worker\s*\|\|\s*isReloadMandatory\(\)\)\s*return/);
   assert.match(app, /createTerminalRecoveryClient\(\{/);
-  assert.match(recoveryClient, /requireReload\(ws, message\)/);
+  assert.match(recoveryClient, /requestResync\(sessionId, recovery\.status\)/);
+  assert.match(app, /function requestTerminalSnapshot\(id\)/);
+  assert.match(app, /replay:\s*['"]snapshot['"]/);
+  assert.doesNotMatch(recoveryClient, /requireReload/);
   assert.match(connectionClient, /state\.protocolBlocked\s*=\s*true/);
   assert.match(connectionClient, /if\s*\(connectionBlocked\s*\|\|\s*state\.protocolBlocked\)\s*return null/);
   assert.doesNotMatch(connectionClient, /state\.protocolBlocked\s*=\s*false/);
-  assert.match(
-    recoveryClient,
-    /recovery\.status !== ['"]gap['"][\s\S]{0,420}requireReload\(ws, message\)/,
-  );
-  assert.match(
-    recoveryClient,
-    /recovery\.status !== ['"]legacy-gap['"][\s\S]{0,420}requireReload\(ws, message\)/,
-  );
+  assert.match(recoveryClient, /recovery\.status !== ['"]gap['"]/);
+  assert.match(recoveryClient, /recovery\.status !== ['"]legacy-gap['"]/);
 });
 
 test('a mandatory reload cannot be downgraded by worker or version notifications', async () => {
@@ -484,7 +481,7 @@ test('a mandatory reload cannot be downgraded by worker or version notifications
   }
 });
 
-test('foreground reconnect uses server offsets and preserves scrollback', async () => {
+test('foreground reconnect uses protocol-v3 cursors and server snapshots', async () => {
   const source = read('public/js/terminal-recovery.js');
   const moduleUrl = `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;
   const {
@@ -575,8 +572,12 @@ test('foreground reconnect uses server offsets and preserves scrollback', async 
   assert.match(recoveryClient, /planTerminalReplay\(entry,\s*output,\s*message\)/);
   assert.match(recoveryClient, /planTerminalHistory\(entry,\s*historyText,\s*message\)/);
   assert.match(recoveryClient, /noteTerminalLiveOutput\(entry,\s*message\.data,\s*message\)/);
+  assert.match(recoveryClient, /function handleSnapshot\(entry, message\)/);
+  assert.match(recoveryClient, /entry\.term\.reset\(\)/);
   assert.match(app, /terminalRecovery\.handleOutput\(ws, entry, msg\)/);
-  assert.match(app, /terminalRecovery\.handleHistory\(ws, entry, msg, historyText\)/);
+  assert.match(app, /terminalRecovery\.handleSnapshot\(entry, msg\)/);
+  assert.match(app, /terminalRecovery\.handleSubscribed\(state\.terms\.get\(msg\.id\), msg\)/);
+  assert.match(app, /case ['"]session\.resyncRequired['"]/);
   assert.match(app, /if\s*\(output\)\s*markUnread\(msg\.id\)/);
   assert.doesNotMatch(
     app,

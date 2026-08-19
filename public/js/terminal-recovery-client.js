@@ -6,16 +6,16 @@ import {
   planTerminalReplay,
 } from './terminal-recovery.js';
 
-export function createTerminalRecoveryClient({ requireReload }) {
+export function createTerminalRecoveryClient({ requestResync }) {
   const warnedSessions = new Set();
 
-  function requireReloadOnce(ws, sessionId, message, recovery) {
+  function requestResyncOnce(sessionId, recovery) {
     if (
       (recovery.status !== 'gap' && recovery.status !== 'legacy-gap')
       || warnedSessions.has(sessionId)
     ) return;
     warnedSessions.add(sessionId);
-    requireReload(ws, message);
+    requestResync(sessionId, recovery.status);
   }
 
   function handleOutput(ws, entry, message) {
@@ -24,14 +24,9 @@ export function createTerminalRecoveryClient({ requireReload }) {
       const recovery = planTerminalReplay(entry, output, message);
       output = recovery.data;
       commitTerminalReplay(entry, recovery);
-      requireReloadOnce(
-        ws,
-        message.id,
-        'Terminal output changed beyond the recovery window. Reload to rebuild its recent view.',
-        recovery,
-      );
+      requestResyncOnce(message.id, recovery);
     }
-    if (entry && output && !entry.queue(output, !!message.replay)) {
+    if (entry?.term && output && !entry.queue(output, !!message.replay)) {
       entry.writeChunk(output, !!message.replay);
     }
     if (entry && !message.replay) noteTerminalLiveOutput(entry, message.data, message);
@@ -46,13 +41,27 @@ export function createTerminalRecoveryClient({ requireReload }) {
     if (entry && recovery.data && !entry.queue(recovery.data, true)) {
       entry.writeChunk(recovery.data, true);
     }
-    requireReloadOnce(
-      ws,
-      message.id,
-      'Terminal history changed beyond the recovery window. Reload to rebuild its recent view.',
-      recovery,
-    );
+    requestResyncOnce(message.id, recovery);
   }
 
-  return { handleHistory, handleOutput };
+  function handleSnapshot(entry, message) {
+    if (!entry?.term) return;
+    warnedSessions.delete(message.id);
+    try { entry.term.reset(); } catch {}
+    entry.replayInitialized = true;
+    entry.outputGeneration = message.generation;
+    entry.lastOutputSeq = message.atSeq;
+    const data = String(message.data || '');
+    if (data && !entry.queue(data, true)) entry.writeChunk(data, true);
+  }
+
+  function handleSubscribed(entry, message) {
+    if (!entry) return;
+    warnedSessions.delete(message.id);
+    entry.replayInitialized = true;
+    entry.outputGeneration = message.generation;
+    entry.lastOutputSeq = message.atSeq;
+  }
+
+  return { handleHistory, handleOutput, handleSnapshot, handleSubscribed };
 }
