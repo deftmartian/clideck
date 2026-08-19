@@ -143,6 +143,15 @@ test('touch UI override is browser-local and exposed in Appearance settings', ()
   assert.doesNotMatch(settings, /state\.cfg\.touchUiMode/);
 });
 
+test('desktop renderer retention is capped while touch keeps one renderer', () => {
+  const terminals = read('public/js/terminals.js');
+  assert.match(terminals, /MAX_DESKTOP_RENDERERS = 4/);
+  assert.match(terminals, /rendererLastUsed/);
+  assert.match(terminals, /disposeRenderer\(retained\.shift\(\)\[0\], \{ evicted: true \}\)/);
+  assert.match(terminals, /if \(isTouchUiEnabled\(\)[\s\S]{0,160}disposeRenderer\(previousId, \{ evicted: true \}\)/);
+  assert.match(terminals, /snapshotRehydrations/);
+});
+
 test('mobile Select mode owns drag only while armed and uses xterm public selection APIs', () => {
   const index = read('public/index.html');
   const sourceCss = read('src/input.css');

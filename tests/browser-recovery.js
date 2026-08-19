@@ -191,18 +191,47 @@ async function verifyNarrowDesktopTouchUi(browser, baseUrl, browserName, session
       throw new Error(`${browserName} narrow desktop was misclassified: ${JSON.stringify(initial)}`);
     }
 
-    const alternate = sessionIds.find(id => id !== sessionId);
-    await page.evaluate(id => window.__clideckTest.select(id), alternate);
-    await waitFor(() => page.evaluate(id => {
+    const alternates = sessionIds.filter(id => id !== sessionId).slice(0, 4);
+    for (const alternate of alternates) {
+      await page.evaluate(id => window.__clideckTest.select(id), alternate);
+      await waitFor(() => page.evaluate(id => {
+        const { state } = window.__clideckTest;
+        const renderers = [...state.terms.values()].filter(entry => entry.term).length;
+        return !!state.terms.get(id)?.term && renderers <= 4;
+      }, alternate), `${browserName} bounded desktop renderer switch`);
+    }
+    const afterEviction = await page.evaluate(primary => {
       const { state } = window.__clideckTest;
-      return !!state.terms.get(id)?.term
-        && [...state.terms.values()].filter(entry => entry.term).length === 2;
-    }, alternate), `${browserName} desktop lazy second renderer`);
+      return {
+        primaryEvicted: !state.terms.get(primary)?.term,
+        renderers: [...state.terms.values()].filter(entry => entry.term).length,
+        perf: window.__clideckPerfSnapshot().renderers,
+      };
+    }, sessionId);
+    if (!afterEviction.primaryEvicted || afterEviction.renderers !== 4
+      || afterEviction.perf.current !== 4 || afterEviction.perf.webgl > 4
+      || afterEviction.perf.evictions < 1) {
+      throw new Error(`${browserName} desktop LRU cap failed: ${JSON.stringify(afterEviction)}`);
+    }
+
+    const retainedId = alternates[2];
+    await page.evaluate(id => {
+      const entry = window.__clideckTest.state.terms.get(id);
+      entry.term.__clideckRetainedProbe = true;
+      window.__clideckTest.select(id);
+    }, retainedId);
+    const retained = await page.evaluate(id =>
+      window.__clideckTest.state.terms.get(id)?.term?.__clideckRetainedProbe === true, retainedId);
+    if (!retained) throw new Error(`${browserName} recent desktop renderer was not retained`);
+
     await page.evaluate(id => window.__clideckTest.select(id), sessionId);
-    const retained = await page.evaluate(() =>
-      [...window.__clideckTest.state.terms.values()].filter(entry => entry.term).length);
-    if (retained !== 2 || !(await terminalText(page, sessionId)).includes(marker)) {
-      throw new Error(`${browserName} desktop renderer was not retained across revisit`);
+    await waitFor(
+      async () => (await terminalText(page, sessionId)).includes(marker),
+      `${browserName} evicted desktop snapshot rehydration`,
+    );
+    const rehydrated = await page.evaluate(() => window.__clideckPerfSnapshot().renderers);
+    if (rehydrated.current !== 4 || rehydrated.webgl > 4 || rehydrated.snapshotRehydrations < 1) {
+      throw new Error(`${browserName} desktop rehydration diagnostics failed: ${JSON.stringify(rehydrated)}`);
     }
 
     await setTouchUiModeFromSettings(page, 'touch');

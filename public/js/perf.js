@@ -53,6 +53,12 @@ if (enabled) {
         enabled: true,
         elapsedMs: performance.now() - startedAt,
         counters: { ...counters },
+        renderers: {
+          current: document.querySelectorAll('.term-wrap').length,
+          webgl: document.querySelectorAll('.term-wrap[data-renderer="webgl"]').length,
+          evictions: counters.rendererEvictions || 0,
+          snapshotRehydrations: counters.snapshotRehydrations || 0,
+        },
         timings: { ...timings },
         resources: {
           count: resources.length,

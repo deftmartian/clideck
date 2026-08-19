@@ -28,5 +28,9 @@ test('browser diagnostics are opt-in and remain in memory', () => {
   const perf = require('fs').readFileSync(require('path').join(__dirname, '..', 'public', 'js', 'perf.js'), 'utf8');
   assert.match(perf, /clideckPerf/);
   assert.match(perf, /__clideckPerfSnapshot/);
+  assert.match(perf, /current:\s*document\.querySelectorAll\(['"]\.term-wrap['"]\)\.length/);
+  assert.match(perf, /webgl:\s*document\.querySelectorAll\(['"]\.term-wrap\[data-renderer=/);
+  assert.match(perf, /evictions:\s*counters\.rendererEvictions/);
+  assert.match(perf, /snapshotRehydrations:\s*counters\.snapshotRehydrations/);
   assert.doesNotMatch(perf, /localStorage|sessionStorage|fetch\s*\(/);
 });
