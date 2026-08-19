@@ -65,6 +65,8 @@ lazy content-hashed chunk. Generated assets and their Brotli/gzip sidecars are
 committed and verified by `npm run check:client`. Hashed assets are immutable;
 HTML, the service worker, offline fallback, plugin clients, APIs, and auth stay
 network-first. Plugin modules remain external under `/plugins/`.
+For packaged preflight, `CLIDECK_DATA_DIR` selects an explicit isolated state
+directory and disables migrations from the normal home or package directory.
 
 ### Measured result
 
