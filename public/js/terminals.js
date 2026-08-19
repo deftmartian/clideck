@@ -620,6 +620,10 @@ export function addTerminal(id, name, themeId, commandId, projectId, muted, last
     lastOutputSeq: null,
     replayInitialized: false,
     lastActivityAt: Date.now(),
+    latestActivityGeneration: null,
+    latestActivitySeq: null,
+    seenActivityGeneration: null,
+    seenActivitySeq: null,
     unread: false,
     lastPreviewText: lastPreview || '',
     searchText: '',
@@ -818,6 +822,10 @@ export function select(id) {
         else setTab('all');
       }
     }
+    if (entry.latestActivityGeneration && Number.isSafeInteger(entry.latestActivitySeq)) {
+      entry.seenActivityGeneration = entry.latestActivityGeneration;
+      entry.seenActivitySeq = entry.latestActivitySeq;
+    }
     entry.term.scrollToBottom();
     if (!document.querySelector('[contenteditable="true"]')
       && !terminalLocal.ownsInput(entry)) entry.term.focus();
@@ -851,6 +859,30 @@ export function markUnread(id) {
   if (dot) dot.classList.remove('hidden');
   updateUnreadBadge();
   applyFilter();
+}
+
+export function noteSessionActivity(id, message) {
+  const entry = state.terms.get(id);
+  if (!entry || !message.generation || !Number.isSafeInteger(message.atSeq)) return;
+  const sameLatestGeneration = entry.latestActivityGeneration === message.generation;
+  if (sameLatestGeneration && Number.isSafeInteger(entry.latestActivitySeq)
+    && message.atSeq <= entry.latestActivitySeq) return;
+  entry.latestActivityGeneration = message.generation;
+  entry.latestActivitySeq = message.atSeq;
+  const timestamp = Date.parse(message.timestamp || '');
+  if (Number.isFinite(timestamp)) entry.lastActivityAt = timestamp;
+  const timeEl = document.querySelector(`.group[data-id="${id}"] .session-time`);
+  if (timeEl) updateTimeEl(timeEl, entry.lastActivityAt);
+
+  if (state.active === id) {
+    entry.seenActivityGeneration = message.generation;
+    entry.seenActivitySeq = message.atSeq;
+    return;
+  }
+  const alreadySeen = entry.seenActivityGeneration === message.generation
+    && Number.isSafeInteger(entry.seenActivitySeq)
+    && entry.seenActivitySeq >= message.atSeq;
+  if (!alreadySeen) markUnread(id);
 }
 
 export function updatePreview(id) {
@@ -1041,10 +1073,21 @@ export function restartComplete(id, msg) {
   hideRestartBanner(id);
   const entry = state.terms.get(id);
   if (!entry) return;
-  if (state.active !== id) select(id);
-  else if (!entry.term) mountRenderer(id);
-  entry.term?.clear();
-  entry.term?.focus();
+  if (msg?.error) {
+    removeTerminal(id);
+    showToast(msg.error, { type: 'error', title: 'Session restart failed', duration: 5000 });
+    return;
+  }
+  entry.outputGeneration = null;
+  entry.lastOutputSeq = null;
+  entry.replayInitialized = false;
+  entry.latestActivityGeneration = null;
+  entry.latestActivitySeq = null;
+  if (state.active !== id) return;
+  const active = entry.term ? entry : mountRenderer(id);
+  active?.term?.clear();
+  if (active?.fitted) subscribeRenderer(id, { snapshot: true });
+  active?.term?.focus();
 }
 
 // --- Rename ---
@@ -1326,8 +1369,8 @@ export function renderResumable() {
 export function applyFilter() {
   const { query, tab } = state.filter;
   const q = query.toLowerCase();
-  if (q && !state.transcriptCacheRequested) {
-    state.transcriptCacheRequested = send({ type: 'transcript.cache.request' });
+  if (q && state.transcriptCacheState === 'idle') {
+    if (send({ type: 'transcript.cache.request' })) state.transcriptCacheState = 'loading';
   }
 
   // Filter active sessions

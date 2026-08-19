@@ -127,6 +127,7 @@ export function createConnectionClient({ connect }) {
     if (state.ws !== ws) return;
     state.ws = null;
     state.protocolReady = false;
+    state.transcriptCacheState = 'idle';
     clearTimeout(stableTimer);
     consecutiveFailures += 1;
     setConnectionState(navigator.onLine ? 'reconnecting' : 'offline');
@@ -149,6 +150,7 @@ export function createConnectionClient({ connect }) {
     const ws = state.ws;
     state.ws = null;
     state.protocolReady = false;
+    state.transcriptCacheState = 'idle';
     if (!ws) return;
     ws.onopen = null;
     ws.onmessage = null;

@@ -14,8 +14,7 @@ export const state = {
   pills: new Map(),
   activePill: null,
   transcriptCache: {},
-  transcriptCacheLoaded: false,
-  transcriptCacheRequested: false,
+  transcriptCacheState: 'idle',
   remoteVersion: null,
 };
 

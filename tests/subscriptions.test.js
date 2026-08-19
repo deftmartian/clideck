@@ -78,6 +78,36 @@ test('active-session subscriptions isolate output and broadcast it to multiple a
   assert.equal(same.messages.some(msg => msg.type === 'output' && msg.id === b.id), false);
 });
 
+test('inactive sessions broadcast activity without leaking terminal output', async t => {
+  const box = new Sandbox();
+  const producer = new Client();
+  const viewer = new Client();
+  producer.autoSubscribe = false;
+  viewer.autoSubscribe = false;
+  t.after(async () => { producer.close(); viewer.close(); await box.cleanup(); });
+  const port = await box.start();
+  producer.port = viewer.port = port;
+  await producer.connect(); await producer.waitFor('config');
+  const inactive = await createShell(producer, box, 'activity-inactive');
+  const active = await createShell(producer, box, 'activity-active');
+  await viewer.connect(); await viewer.waitFor('config');
+  viewer.subscribe(active.id, { replay: 'snapshot' });
+  await viewer.waitFor(msg => msg.type === 'session.subscribed' && msg.id === active.id);
+  viewer.messages.length = 0;
+
+  producer.send({ type: 'input', id: inactive.id, data: "printf 'INACTIVE_ACTIVITY_MARK\\n'\r" });
+  const activity = await viewer.waitFor(
+    msg => msg.type === 'session.activity' && msg.id === inactive.id,
+    { label: 'inactive activity signal' },
+  );
+  await settle();
+
+  assert.equal(typeof activity.timestamp, 'string');
+  assert.match(activity.generation, /^[0-9a-f-]{36}$/i);
+  assert.ok(Number.isSafeInteger(activity.atSeq) && activity.atSeq > 0);
+  assert.equal(viewer.messages.some(msg => msg.type === 'output' && msg.id === inactive.id), false);
+});
+
 test('last interaction owns PTY dimensions and resize messages alone cannot claim them', async t => {
   const box = new Sandbox();
   const producer = new Client();

@@ -1,6 +1,6 @@
 import { state, send } from './state.js';
 import { esc, binName, resolveIconPath, randomUUID } from './utils.js';
-import { addTerminal, removeTerminal, select, startRename, startProjectRename, setSessionTheme, openMenu, closeMenu, setStatus, updateMuteIndicator, updatePreview, markUnread, applyFilter, setTab, renderResumable, regroupSessions, toggleProjectCollapse, setSessionProject, estimateSize, restartComplete, positionMenu, addPill, updatePill, removePill, appendPillLog, setPillLogs, closePillLog, addTerminalInputAction, removeTerminalInputActionsForPlugin, trackTerminalInputData, copySessionName, resumeActiveTerminal, suspendActiveTerminal } from './terminals.js';
+import { addTerminal, removeTerminal, select, startRename, startProjectRename, setSessionTheme, openMenu, closeMenu, setStatus, updateMuteIndicator, updatePreview, noteSessionActivity, applyFilter, setTab, renderResumable, regroupSessions, toggleProjectCollapse, setSessionProject, estimateSize, restartComplete, positionMenu, addPill, updatePill, removePill, appendPillLog, setPillLogs, closePillLog, addTerminalInputAction, removeTerminalInputActionsForPlugin, trackTerminalInputData, copySessionName, resumeActiveTerminal, suspendActiveTerminal } from './terminals.js';
 import { renderSettings, updateVersionFooter } from './settings.js';
 import { openCreator, closeCreator, refreshCreator } from './creator.js';
 import { handleDirsResponse, handleMkdirResponse, openFolderPicker } from './folder-picker.js';
@@ -151,11 +151,13 @@ function connect() {
       case 'output': {
         countPerf(msg.replay ? 'terminalReplayBytes' : 'terminalLiveBytes', String(msg.data || '').length);
         const entry = state.terms.get(msg.id);
-        const output = terminalRecovery.handleOutput(ws, entry, msg);
+        terminalRecovery.handleOutput(ws, entry, msg);
         updatePreview(msg.id);
-        if (output) markUnread(msg.id);
         break;
       }
+      case 'session.activity':
+        noteSessionActivity(msg.id, msg);
+        break;
       case 'session.snapshot': {
         const entry = state.terms.get(msg.id);
         terminalRecovery.handleSnapshot(entry, msg);
@@ -234,12 +236,12 @@ function connect() {
       [OLD-STATUS] */
       case 'transcript.cache':
         state.transcriptCache = msg.cache;
-        state.transcriptCacheLoaded = true;
-        state.transcriptCacheRequested = true;
+        state.transcriptCacheState = 'loaded';
         for (const [id, text] of Object.entries(msg.cache)) {
           const entry = state.terms.get(id);
           if (entry) entry.searchText = text;
         }
+        applyFilter();
         break;
       case 'transcript.append': {
         state.transcriptCache[msg.id] = (state.transcriptCache[msg.id] || '') + '\n' + msg.text;

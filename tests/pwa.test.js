@@ -578,7 +578,8 @@ test('foreground reconnect uses protocol-v3 cursors and server snapshots', async
   assert.match(app, /terminalRecovery\.handleSnapshot\(entry, msg\)/);
   assert.match(app, /terminalRecovery\.handleSubscribed\(state\.terms\.get\(msg\.id\), msg\)/);
   assert.match(app, /case ['"]session\.resyncRequired['"]/);
-  assert.match(app, /if\s*\(output\)\s*markUnread\(msg\.id\)/);
+  assert.match(app, /case ['"]session\.activity['"]:[\s\S]{0,100}noteSessionActivity\(msg\.id, msg\)/);
+  assert.doesNotMatch(app, /markUnread\(msg\.id\)/);
   assert.doesNotMatch(
     app,
     /msg\.replay\s*&&[\s\S]{0,120}\.has\(msg\.id\)[\s\S]{0,80}\bbreak\b/,

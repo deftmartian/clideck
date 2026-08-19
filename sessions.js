@@ -27,6 +27,11 @@ const SAVED_PATH = join(DATA_DIR, 'sessions.json');
 const sessions = new Map();
 const clients = new Set();
 
+function clearActivityTimer(session) {
+  clearTimeout(session?._activityTimer);
+  if (session) session._activityTimer = null;
+}
+
 function terminalReplyKind(data) {
   const value = String(data || '');
   if (/^\x1b\[\??\d+(?:;\d+)*R$/.test(value)) return 'cursor-position';
@@ -92,6 +97,29 @@ function broadcast(msg) {
     plugins.notifyStatus(msg.id, msg.working, msg.source);
   }
   for (const fn of broadcastListeners) try { fn(msg); } catch {}
+}
+
+function emitSessionActivity(id, session) {
+  if (sessions.get(id) !== session) return;
+  const now = Date.now();
+  const elapsed = now - (session._activitySentAt || 0);
+  if (elapsed < 1000) {
+    if (!session._activityTimer) {
+      session._activityTimer = setTimeout(() => {
+        session._activityTimer = null;
+        emitSessionActivity(id, session);
+      }, 1000 - elapsed);
+      session._activityTimer.unref?.();
+    }
+    return;
+  }
+  session._activitySentAt = now;
+  broadcast({
+    type: 'session.activity', id,
+    generation: session.outputGeneration,
+    atSeq: session.outputSeq,
+    timestamp: new Date(now).toISOString(),
+  });
 }
 
 function scheduleCapture(id, delay = 0, options = {}) {
@@ -282,6 +310,7 @@ function spawnSession(id, cmd, parts, cwd, name, themeId, commandId, savedToken,
     activity.trackOut(id, data);
     transcript.trackOutput(id, data);
     session.capture.write(data, session.outputSeq);
+    emitSessionActivity(id, session);
     scheduleCapture(id, 2000, { settled: true });
     plugins.notifyOutput(id, data);
     stream.queueOutput(id, data, startSeq, session.outputSeq);
@@ -297,6 +326,7 @@ function spawnSession(id, cmd, parts, cwd, name, themeId, commandId, savedToken,
     piBridge.clear(id);
     plugins.clearStatus(id);
     clearTimeout(s._captureTimer);
+    clearActivityTimer(s);
     stream.clearSession(id);
     s.capture?.dispose();
     const canPersist = !s.ephemeral && cmd.canResume && cmd.resumeCommand && hasUsableResumeToken(s);
@@ -547,6 +577,7 @@ function close(msg, cfg) {
   const s = sessions.get(msg.id);
   if (s) {
     clearTimeout(s._captureTimer);
+    clearActivityTimer(s);
     stream.clearSession(msg.id);
     s.capture?.dispose();
     s.pty.kill();
@@ -594,6 +625,7 @@ function restart(msg, ws, cfg) {
   transcript.clear(id);
 
   clearTimeout(s._captureTimer);
+  clearActivityTimer(s);
   stream.clearSession(id);
   s.capture?.dispose();
   s.pty.kill();
@@ -740,6 +772,7 @@ function shutdown(cfg) {
   stream.stop();
   for (const [id, s] of sessions) {
     clearTimeout(s._captureTimer);
+    clearActivityTimer(s);
     stream.clearSession(id);
     s.capture?.dispose();
     try { s.pty.kill(); } catch {}
