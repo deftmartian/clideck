@@ -5,6 +5,7 @@ import { attachToTerminal, registerHotkey } from './hotkeys.js';
 import { closeDropdown } from './prompts.js';
 import { showToast } from './toast.js';
 import { createTerminalLocalIntegration } from './terminal-local.js';
+import { countPerf, notePerf } from './perf.js';
 
 function isLightBg(themeId) {
   const bg = resolveTheme(themeId)?.background;
@@ -605,6 +606,8 @@ export function addTerminal(id, name, themeId, commandId, projectId, muted, last
     smoothScrollDuration: 180,
     linkHandler: terminalLocal.linkHandler,
   });
+  countPerf('renderersCreated');
+  notePerf('rendererCreated', { id });
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
   addLinkProvider(term);
@@ -718,6 +721,7 @@ export function addTerminal(id, name, themeId, commandId, projectId, muted, last
     if (!fitted) {
       fitted = true;
       fit.fit();
+      countPerf('terminalFits');
       send({ type: 'resize', id, cols: term.cols, rows: term.rows });
       for (const chunk of pending) writeChunk(chunk.data, chunk.replay);
       pending = null;
@@ -767,6 +771,7 @@ export function removeTerminal(id) {
   entry.el.removeEventListener?.('contextmenu', entry.onContextMenu);
   terminalLocal.detach(id);
   entry.term.dispose();
+  countPerf('renderersDisposed');
   entry.el.remove();
   state.terms.delete(id);
   document.querySelector(`.group[data-id="${id}"]`)?.remove();

@@ -1,3 +1,5 @@
+import { countPerf } from './perf.js';
+
 export const state = {
   ws: null,
   protocolReady: false,
@@ -59,7 +61,11 @@ function enqueue(msg) {
 export function send(msg) {
   if (state.protocolBlocked) return false;
   if (!canSendNow()) return enqueue(msg);
-  state.ws.send(JSON.stringify(msg));
+  const raw = JSON.stringify(msg);
+  countPerf('wsFramesSent');
+  countPerf('wsBytesSent', raw.length);
+  if (msg.type === 'resize') countPerf('ptyResizeMessagesSent');
+  state.ws.send(raw);
   return true;
 }
 
@@ -70,6 +76,9 @@ export function discardQueuedSends() {
 export function flushQueuedSends() {
   if (!canSendNow()) return;
   while (queuedMessages.length) {
-    state.ws.send(JSON.stringify(queuedMessages.shift()));
+    const raw = JSON.stringify(queuedMessages.shift());
+    countPerf('wsFramesSent');
+    countPerf('wsBytesSent', raw.length);
+    state.ws.send(raw);
   }
 }

@@ -321,7 +321,10 @@ test('protocol compatibility gates queued mutations until server config arrives'
 });
 
 test('terminal input is never queued while reconnecting', async () => {
-  const source = read('public/js/state.js');
+  const source = read('public/js/state.js').replace(
+    /import \{ countPerf \} from ['"]\.\/perf\.js['"];?/,
+    'const countPerf = () => {};',
+  );
   const moduleUrl = `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;
   const previousWebSocket = global.WebSocket;
   global.WebSocket = { OPEN: 1 };

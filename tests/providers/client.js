@@ -17,7 +17,21 @@ class Client {
     this.statusLog = [];          // { id, working, source } transitions
     this.config = null;           // last { type:'config' } payload
     this.resumable = [];          // last sessions.resumable list
+    this.accounting = this._newAccounting();
   }
+
+  _newAccounting() {
+    return {
+      initialControlBytes: 0,
+      snapshotReplayBytes: 0,
+      liveBytesBySession: Object.create(null),
+      frameCount: 0,
+      maximumBacklog: 0,
+      totalBytes: 0,
+    };
+  }
+
+  resetAccounting() { this.accounting = this._newAccounting(); }
 
   connect(timeoutMs = 10000) {
     return new Promise((resolve, reject) => {
@@ -32,8 +46,19 @@ class Client {
   }
 
   _onMessage(raw) {
+    const bytes = Buffer.byteLength(raw);
+    this.accounting.frameCount += 1;
+    this.accounting.totalBytes += bytes;
+    this.accounting.maximumBacklog = Math.max(this.accounting.maximumBacklog, bytes);
     let msg;
     try { msg = JSON.parse(raw); } catch { return; }
+    if ((msg.type === 'output' && msg.replay) || msg.type === 'session.history' || msg.type === 'session.snapshot') {
+      this.accounting.snapshotReplayBytes += bytes;
+    } else if (msg.type === 'output') {
+      this.accounting.liveBytesBySession[msg.id] = (this.accounting.liveBytesBySession[msg.id] || 0) + bytes;
+    } else {
+      this.accounting.initialControlBytes += bytes;
+    }
     this.messages.push(msg);
 
     if (msg.type === 'config') this.config = msg.config;

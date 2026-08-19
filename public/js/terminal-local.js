@@ -2,6 +2,7 @@ import { state, send } from './state.js';
 import { closeDropdown } from './prompts.js';
 import { showToast } from './toast.js';
 import { syncViewport } from './viewport.js';
+import { countPerf, notePerf } from './perf.js';
 import { createMobileComposer, loadStoredDraft } from './mobile-composer.js';
 import { createMobileSelection } from './mobile-selection.js';
 import { createMobileTouchScroll } from './mobile-touch-scroll.js';
@@ -52,6 +53,8 @@ function enableAcceleratedRenderer(term, element) {
     });
     term.loadAddon(addon);
     element.dataset.renderer = 'webgl';
+    countPerf('webglContextsCreated');
+    notePerf('webglRendererReady');
     delete element.dataset.rendererFallback;
   } catch {
     try { addon?.dispose(); } catch {}
@@ -223,6 +226,7 @@ export function createTerminalLocalIntegration({
       const oldBuffer = term.buffer.active;
       const distanceFromBottom = Math.max(0, oldBuffer.baseY - oldBuffer.viewportY);
       fit.fit();
+      countPerf('terminalFits');
       if (distanceFromBottom > 0) {
         const newBuffer = term.buffer.active;
         term.scrollToLine(Math.max(0, newBuffer.baseY - distanceFromBottom));

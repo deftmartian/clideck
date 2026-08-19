@@ -17,6 +17,7 @@ import { initClipboardClient } from './clipboard-client.js';
 import { initCompactNavigation } from './compact-navigation.js';
 import { createConnectionClient } from './connection-client.js';
 import { createTerminalRecoveryClient } from './terminal-recovery-client.js';
+import { countPerf, notePerf, timePerf } from './perf.js';
 
 const shownAgentHealthToasts = new Set();
 
@@ -62,11 +63,14 @@ const terminalRecovery = createTerminalRecoveryClient({
 });
 
 function connect() {
+  const connectStartedAt = performance.now();
   const ws = connectionClient.openSocket();
   if (!ws) return;
 
   ws.onmessage = ({ data }) => {
     if (state.ws !== ws) return;
+    countPerf('wsFramesReceived');
+    countPerf('wsBytesReceived', typeof data === 'string' ? data.length : (data?.byteLength || 0));
     const msg = JSON.parse(data);
     switch (msg.type) {
       case 'config': {
@@ -80,6 +84,10 @@ function connect() {
         refreshCreator();
         for (const [, entry] of state.terms) applyTheme(entry.term, entry.themeId);
         connectionClient.finishServerConfig(firstConfigForSocket);
+        if (firstConfigForSocket) {
+          timePerf('webSocketToConfigMs', connectStartedAt);
+          notePerf('connectionReady');
+        }
         break;
       }
       case 'protocol.incompatible':
@@ -129,6 +137,7 @@ function connect() {
         closeMobileSidebar();
         break;
       case 'output': {
+        countPerf(msg.replay ? 'terminalReplayBytes' : 'terminalLiveBytes', String(msg.data || '').length);
         const entry = state.terms.get(msg.id);
         const output = terminalRecovery.handleOutput(ws, entry, msg);
         updatePreview(msg.id);
