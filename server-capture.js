@@ -5,6 +5,7 @@
 // bounded serialized snapshots.
 const { Terminal } = require('@xterm/headless');
 const { SerializeAddon } = require('@xterm/addon-serialize');
+const { requireTerminalSize } = require('./terminal-size');
 
 const SCROLLBACK_LINES = 5000;
 const SNAPSHOT_SCROLLBACK_LINES = 1000;
@@ -15,10 +16,11 @@ function integer(value, fallback) {
 }
 
 class ServerCapture {
-  constructor({ cols = 80, rows = 24, onReply } = {}) {
+  constructor({ cols, rows, onReply } = {}) {
+    const size = requireTerminalSize(cols, rows);
     this.terminal = new Terminal({
-      cols: integer(cols, 80),
-      rows: integer(rows, 24),
+      cols: size.cols,
+      rows: size.rows,
       scrollback: SCROLLBACK_LINES,
       allowProposedApi: false,
     });
@@ -47,8 +49,9 @@ class ServerCapture {
 
   resize(cols, rows) {
     if (this.disposed) return Promise.resolve();
+    const size = requireTerminalSize(cols, rows);
     this.pending = this.pending.then(() => {
-      if (!this.disposed) this.terminal.resize(cols, rows);
+      if (!this.disposed) this.terminal.resize(size.cols, size.rows);
     });
     return this.pending;
   }

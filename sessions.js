@@ -16,6 +16,7 @@ const { withCliDeckGuide } = require('./agent-session-guide');
 const { initialResumeReady, hasUsableResumeToken } = require('./resume-readiness');
 const { ServerCapture } = require('./server-capture');
 const { createSessionStream } = require('./session-stream');
+const { normalizeTerminalSize } = require('./terminal-size');
 
 const THEMES = require('./themes');
 const MAX_BUFFER = 2 * 1024 * 1024;
@@ -230,7 +231,7 @@ function spawnSession(id, cmd, parts, cwd, name, themeId, commandId, savedToken,
   let term;
   try {
     term = pty.spawn(launchParts[0], launchParts.slice(1), {
-      name: 'xterm-256color', cols: cols || 80, rows: rows || 24, cwd,
+      name: 'xterm-256color', cols, rows, cwd,
       env: { ...process.env, ...extraEnv, ...telemetryEnv, ...colorEnv },
     });
   } catch (e) {
@@ -256,25 +257,9 @@ function spawnSession(id, cmd, parts, cwd, name, themeId, commandId, savedToken,
     _finalizeOnCapture: !!preset?.finalizeOnCapture,
   };
   session.capture = new ServerCapture({
-    cols: cols || 80,
-    rows: rows || 24,
-    onReply: data => {
-      // A subscribed browser xterm receives the same query and answers it. The
-      // headless twin replies only when no healthy renderer is available.
-      if (!stream.hasHealthySubscriber(id)) {
-        term.write(data);
-        return;
-      }
-      const now = Date.now();
-      session._terminalQueryReplies = (session._terminalQueryReplies || [])
-        .filter(item => item.expiresAt > now);
-      session._terminalQueryReplies.push({
-        data,
-        kind: terminalReplyKind(data),
-        expiresAt: now + 2000,
-        consumed: false,
-      });
-    },
+    cols,
+    rows,
+    onReply: data => term.write(data),
   });
   sessions.set(id, session);
   transcript.setFinalizeOnIdle(id, ['claude-code', 'codex', 'gemini-cli', 'opencode', 'pi', 'clideck-agent', 'grok'].includes(lineageOf(session.presetId)) ? session.presetId : null);
@@ -381,11 +366,16 @@ function create(msg, ws, cfg) {
   const name = msg.name || cmd.label;
 
   const projectId = msg.projectId || null;
+  const size = normalizeTerminalSize(msg.cols, msg.rows);
+  if (!size.ok) {
+    ws.send(JSON.stringify({ type: 'error', message: size.error }));
+    return;
+  }
   if (sessionNameExistsInScope(name, projectId)) {
     ws.send(JSON.stringify({ type: 'error', message: `Agent name "${name}" is already taken in this project.` }));
     return;
   }
-  const err = spawnSession(id, cmd, parts, cwd, name, themeId, cmd.id, null, projectId, msg.cols, msg.rows);
+  const err = spawnSession(id, cmd, parts, cwd, name, themeId, cmd.id, null, projectId, size.cols, size.rows);
   if (err) {
     console.error('Failed to spawn pty:', err.message);
     ws.send(JSON.stringify({ type: 'error', message: err.message }));
@@ -417,11 +407,13 @@ function createProgrammatic(opts, cfg) {
   const themeId = opts.themeId || cfg.defaultTheme || 'default';
   const name = opts.name || cmd.label;
   const projectId = opts.projectId || null;
+  const size = normalizeTerminalSize(opts.cols, opts.rows);
+  if (!size.ok) return { error: size.error };
   if (sessionNameExistsInScope(name, projectId)) {
     return { error: `Agent name "${name}" is already taken in this project.` };
   }
 
-  const err = spawnSession(id, cmd, parts, cwd, name, themeId, cmd.id, null, projectId);
+  const err = spawnSession(id, cmd, parts, cwd, name, themeId, cmd.id, null, projectId, size.cols, size.rows);
   if (err) return { error: err.message };
 
   const s = sessions.get(id);
@@ -458,6 +450,11 @@ function resume(msg, ws, cfg) {
     ws.send(JSON.stringify({ type: 'error', message: 'Command does not support resume' }));
     return;
   }
+  const size = normalizeTerminalSize(msg.cols, msg.rows);
+  if (!size.ok) {
+    ws.send(JSON.stringify({ type: 'error', message: size.error }));
+    return;
+  }
 
   // Build the resume command, substituting {{sessionId}} if present
   const cwd = resolveValidDir(saved.cwd || cfg.defaultPath);
@@ -473,7 +470,7 @@ function resume(msg, ws, cfg) {
   const parts = parseCommand(resumeStr);
   const id = saved.id;
 
-  const err = spawnSession(id, cmd, parts, cwd, saved.name, saved.themeId || saved.profileId || 'default', saved.commandId, saved.sessionToken, saved.projectId);
+  const err = spawnSession(id, cmd, parts, cwd, saved.name, saved.themeId || saved.profileId || 'default', saved.commandId, saved.sessionToken, saved.projectId, size.cols, size.rows);
   if (err) {
     console.error('Failed to resume pty:', err.message);
     ws.send(JSON.stringify({ type: 'error', message: err.message }));
@@ -503,20 +500,7 @@ function writeSessionInput(id, data) {
 function input(msg, ws) {
   const s = sessions.get(msg.id);
   if (!s) return;
-  const now = Date.now();
-  s._terminalQueryReplies = (s._terminalQueryReplies || []).filter(item => item.expiresAt > now);
-  const replyKind = terminalReplyKind(msg.data);
-  const matchingReplies = ws && s._terminalQueryReplies.filter(item =>
-    item.data === msg.data || (replyKind && item.kind === replyKind));
-  if (matchingReplies?.length) {
-    if (!stream.ownsTerminalReplies(ws, msg.id)) return;
-    const queryReply = matchingReplies.find(item => !item.consumed);
-    if (!queryReply) return;
-    queryReply.consumed = true;
-    activity.trackIn(msg.id, String(msg.data).length);
-    s.pty.write(msg.data);
-    return;
-  }
+  if (ws && terminalReplyKind(msg.data)) return;
   if (ws) stream.claimResize(ws, msg.id);
   const data = plugins.transformInput(msg.id, msg.data);
   activity.trackIn(msg.id, data.length);
@@ -604,6 +588,11 @@ function restart(msg, ws, cfg) {
   if (!s) { ws.send(JSON.stringify({ type: 'session.restarted', id, error: 'not found' })); return; }
   const cmd = cfg.commands.find(c => c.id === s.commandId);
   if (!cmd) { ws.send(JSON.stringify({ type: 'session.restarted', id, error: 'command missing' })); return; }
+  const size = normalizeTerminalSize(msg.cols, msg.rows);
+  if (!size.ok) {
+    ws.send(JSON.stringify({ type: 'session.restarted', id, error: size.error, retained: true }));
+    return;
+  }
 
   const themeId = msg.themeId || s.themeId;
   const canResume = cmd.canResume && cmd.resumeCommand && hasUsableResumeToken(s);
@@ -631,7 +620,7 @@ function restart(msg, ws, cfg) {
   s.pty.kill();
   sessions.delete(id);
 
-  const err = spawnSession(id, cmd, parts, cwd, name, themeId, commandId, savedToken, projectId, msg.cols, msg.rows);
+  const err = spawnSession(id, cmd, parts, cwd, name, themeId, commandId, savedToken, projectId, size.cols, size.rows);
   if (err) {
     console.error('[restart] spawn failed:', err.message);
     broadcast({ type: 'session.restarted', id, error: err.message });

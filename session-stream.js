@@ -1,17 +1,13 @@
 'use strict';
 
 const crypto = require('crypto');
+const { normalizeTerminalSize } = require('./terminal-size');
 
 const BATCH_DELAY_MS = 16;
 const BATCH_MAX_BYTES = 32 * 1024;
 const BACKLOG_HIGH_WATER = 1024 * 1024;
 const BACKLOG_RECOVERY = 256 * 1024;
 const HEARTBEAT_MS = 25 * 1000;
-
-function validSize(cols, rows) {
-  return Number.isSafeInteger(cols) && cols >= 20 && cols <= 500
-    && Number.isSafeInteger(rows) && rows >= 5 && rows <= 300;
-}
 
 function bufferStart(session) {
   return session.outputSeq - session.chunksSize;
@@ -123,8 +119,9 @@ function createSessionStream({ clients, getSession, snapshot, applyResize }) {
   function resize(ws, message) {
     const id = String(message.id || '');
     if (resizeOwners.get(id) !== ws) return false;
-    if (!validSize(message.cols, message.rows)) return false;
-    applyResize(id, message.cols, message.rows);
+    const size = normalizeTerminalSize(message.cols, message.rows);
+    if (!size.ok) return false;
+    applyResize(id, size.cols, size.rows);
     return true;
   }
 
@@ -185,11 +182,16 @@ function createSessionStream({ clients, getSession, snapshot, applyResize }) {
     const id = String(message.id || '');
     const session = getSession(id);
     const state = stateFor(ws);
-    unsubscribe(ws);
+    const size = normalizeTerminalSize(message.cols, message.rows);
+    if (!size.ok) {
+      sendControl(ws, { type: 'session.resyncRequired', id, reason: 'invalid-size' });
+      return false;
+    }
     if (!session) {
       sendControl(ws, { type: 'session.resyncRequired', id, reason: 'session-missing' });
       return false;
     }
+    unsubscribe(ws);
     state.sessionId = id;
     state.recovering = true;
     state.paused = false;
@@ -198,13 +200,8 @@ function createSessionStream({ clients, getSession, snapshot, applyResize }) {
     state.token = token;
 
     if (message.claimResize) {
-      if (!validSize(message.cols, message.rows)) {
-        unsubscribe(ws, id);
-        sendControl(ws, { type: 'session.resyncRequired', id, reason: 'invalid-size' });
-        return false;
-      }
       claimResize(ws, id);
-      applyResize(id, message.cols, message.rows);
+      applyResize(id, size.cols, size.rows);
     }
 
     const replay = message.replay === 'resume' ? 'resume' : 'snapshot';
@@ -310,27 +307,6 @@ function createSessionStream({ clients, getSession, snapshot, applyResize }) {
     delete ws._clideckStream;
   }
 
-  function hasHealthySubscriber(id) {
-    for (const ws of clients) {
-      const state = stateFor(ws);
-      if (state.sessionId === id && !state.recovering && !state.paused
-        && ready(ws) && ws.bufferedAmount <= BACKLOG_HIGH_WATER) return true;
-    }
-    return false;
-  }
-
-  function ownsTerminalReplies(ws, id) {
-    if (!hasHealthySubscriber(id)) return false;
-    const owner = resizeOwners.get(id);
-    if (owner) return owner === ws;
-    for (const candidate of clients) {
-      const state = stateFor(candidate);
-      if (state.sessionId === id && !state.recovering && !state.paused
-        && ready(candidate) && candidate.bufferedAmount <= BACKLOG_HIGH_WATER) return candidate === ws;
-    }
-    return false;
-  }
-
   function start() {
     if (!recoveryTimer) {
       recoveryTimer = setInterval(() => {
@@ -372,8 +348,6 @@ function createSessionStream({ clients, getSession, snapshot, applyResize }) {
   return {
     claimResize,
     clearSession,
-    hasHealthySubscriber,
-    ownsTerminalReplies,
     queueOutput,
     register,
     resize,
@@ -391,7 +365,6 @@ function createSessionStream({ clients, getSession, snapshot, applyResize }) {
     subscribe,
     unsubscribe,
     unregister,
-    validSize,
     _stateFor: stateFor,
     _resizeOwner: id => resizeOwners.get(id),
     _flush: id => { const session = getSession(id); if (session) flush(session, id); },
@@ -406,5 +379,4 @@ module.exports = {
   HEARTBEAT_MS,
   bufferedSlice,
   createSessionStream,
-  validSize,
 };

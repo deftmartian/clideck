@@ -136,3 +136,61 @@ test('last interaction owns PTY dimensions and resize messages alone cannot clai
   const snapshot = await observer.waitFor(msg => msg.type === 'session.snapshot' && msg.id === created.id);
   assert.deepEqual([snapshot.cols, snapshot.rows], [121, 33]);
 });
+
+test('invalid create and restart sizes preserve the live session', async t => {
+  const box = new Sandbox();
+  const client = new Client();
+  client.autoSubscribe = false;
+  t.after(async () => { client.close(); await box.cleanup(); });
+  client.port = await box.start();
+  await client.connect(); await client.waitFor('config');
+  client.send({
+    type: 'create', commandId: client.commandIdFor('shell'), name: 'invalid-size',
+    cwd: box.workDir('invalid-size'), cols: 19, rows: 24,
+  });
+  const createError = await client.waitFor(msg => msg.type === 'error' && /Terminal size/.test(msg.message));
+  assert.match(createError.message, /20-500/);
+  assert.equal(client.messages.some(msg => msg.type === 'created' && msg.name === 'invalid-size'), false);
+
+  const created = await createShell(client, box, 'restart-size');
+  client.subscribe(created.id, { replay: 'snapshot' });
+  await client.waitFor(msg => msg.type === 'session.subscribed' && msg.id === created.id);
+  client.send({ type: 'session.restart', id: created.id, cols: 80, rows: 301 });
+  const rejected = await client.waitFor(
+    msg => msg.type === 'session.restarted' && msg.id === created.id && msg.error,
+  );
+  assert.equal(rejected.retained, true);
+  const marker = `RESTART_RETAINED_${Date.now()}`;
+  client.send({ type: 'input', id: created.id, data: `printf '${marker}\\n'\r` });
+  await client.waitFor(msg => msg.type === 'output' && msg.id === created.id && msg.data.includes(marker));
+});
+
+test('headless capture owns DSR and DA replies while browser replies are discarded', async t => {
+  const box = new Sandbox();
+  const client = new Client();
+  client.autoSubscribe = false;
+  t.after(async () => { client.close(); await box.cleanup(); });
+  client.port = await box.start();
+  await client.connect(); await client.waitFor('config');
+  const created = await createShell(client, box, 'query-owner');
+  client.subscribe(created.id, { replay: 'snapshot' });
+  await client.waitFor(msg => msg.type === 'session.subscribed' && msg.id === created.id);
+  const program = [
+    'process.stdin.setRawMode(true)',
+    "let s='',timer",
+    "process.stdin.on('data',d=>{s+=d.toString('latin1');clearTimeout(timer);timer=setTimeout(()=>{const r=(s.match(/R/g)||[]).length,c=(s.match(/c/g)||[]).length;console.log('QUERY_COUNTS_'+r+'_'+c);process.exit(0)},200)})",
+    "process.stdout.write('\\u001b[6n\\u001b[c')",
+  ].join(';');
+  client.send({ type: 'input', id: created.id, data: `node -e "${program}"\r` });
+  await client.waitFor(
+    msg => msg.type === 'output' && msg.id === created.id && msg.data.includes('\x1b[6n'),
+    { label: 'terminal query output' },
+  );
+  client.send({ type: 'input', id: created.id, data: '\x1b[99;99R' });
+  client.send({ type: 'input', id: created.id, data: '\x1b[>99c' });
+  await client.waitFor(
+    msg => msg.type === 'output' && msg.id === created.id
+      && (client.output.get(created.id) || '').includes('QUERY_COUNTS_1_1'),
+    { label: 'single headless terminal replies' },
+  );
+});

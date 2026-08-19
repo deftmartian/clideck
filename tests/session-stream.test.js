@@ -85,23 +85,28 @@ test('only the most recently interacting subscriber owns validated resize', asyn
   assert.equal(f.stream.resize(two, { id: 'a', cols: 120, rows: 32 }), true);
   assert.equal(f.stream.resize(two, { id: 'a', cols: 10, rows: 2 }), false);
   f.stream.claimResize(one, 'a');
-  assert.equal(f.stream.ownsTerminalReplies(one, 'a'), true);
-  assert.equal(f.stream.ownsTerminalReplies(two, 'a'), false);
+  assert.equal(f.stream._resizeOwner('a'), one);
   assert.equal(f.stream.resize(one, { id: 'a', cols: 90, rows: 20 }), true);
   assert.deepEqual(f.resizes.map(item => [item.cols, item.rows]), [[100, 30], [110, 31], [120, 32], [90, 20]]);
 });
 
-test('one healthy subscriber owns terminal query replies even without a resize owner', async t => {
+test('invalid replacement subscriptions retain the previous stream and resize ownership', async t => {
   const f = fixture();
   t.after(() => f.stream.stop());
-  f.add('a');
+  f.add('a'); f.add('b');
   const one = new FakeSocket();
-  const two = new FakeSocket();
-  f.stream.register(one); f.stream.register(two);
-  await f.stream.subscribe(one, { id: 'a', replay: 'snapshot' });
-  await f.stream.subscribe(two, { id: 'a', replay: 'snapshot' });
-  assert.equal(f.stream.ownsTerminalReplies(one, 'a'), true);
-  assert.equal(f.stream.ownsTerminalReplies(two, 'a'), false);
+  f.stream.register(one);
+  await f.stream.subscribe(one, {
+    id: 'a', replay: 'snapshot', claimResize: true, cols: 100, rows: 30,
+  });
+  one.messages.length = 0;
+  assert.equal(await f.stream.subscribe(one, {
+    id: 'b', replay: 'snapshot', claimResize: true, cols: 10, rows: 2,
+  }), false);
+  assert.equal(f.stream._stateFor(one).sessionId, 'a');
+  assert.equal(f.stream._resizeOwner('a'), one);
+  assert.equal(f.stream._resizeOwner('b'), undefined);
+  assert.equal(messages(one, 'session.resyncRequired').at(-1).reason, 'invalid-size');
 });
 
 test('resume current, delta, generation changes, and buffer gaps use one recovery state machine', async t => {

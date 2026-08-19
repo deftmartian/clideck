@@ -1074,7 +1074,7 @@ export function restartComplete(id, msg) {
   const entry = state.terms.get(id);
   if (!entry) return;
   if (msg?.error) {
-    removeTerminal(id);
+    if (!msg.retained) removeTerminal(id);
     showToast(msg.error, { type: 'error', title: 'Session restart failed', duration: 5000 });
     return;
   }
