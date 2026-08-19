@@ -56,29 +56,6 @@ export function commitTerminalReplay(entry, plan) {
   if (Number.isSafeInteger(plan.nextSeq)) entry.lastOutputSeq = plan.nextSeq;
 }
 
-export function planTerminalHistory(entry, history, meta = {}) {
-  const incoming = String(history || '');
-  const snapshotId = String(meta?.snapshotId || '');
-  const initialized = !!entry?.replayInitialized || !!entry?.historyReplayInitialized;
-  if (!snapshotId) {
-    return initialized
-      ? { status: 'legacy-gap', data: '' }
-      : { status: 'initial', data: incoming };
-  }
-  if (!initialized) return { status: 'initial', data: incoming, nextSnapshotId: snapshotId };
-  if (entry.historySnapshotId === snapshotId) {
-    return { status: 'current', data: '', nextSnapshotId: snapshotId };
-  }
-  return { status: 'gap', data: '', nextSnapshotId: snapshotId };
-}
-
-export function commitTerminalHistory(entry, plan) {
-  if (!entry || !plan) return;
-  entry.replayInitialized = true;
-  entry.historyReplayInitialized = true;
-  if (plan.nextSnapshotId) entry.historySnapshotId = plan.nextSnapshotId;
-}
-
 export function noteTerminalLiveOutput(entry, data, meta = {}) {
   if (!entry) return;
   entry.replayInitialized = true;

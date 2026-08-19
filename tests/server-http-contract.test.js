@@ -59,6 +59,37 @@ test('HTTP health and static asset contracts survive server routing changes', as
   assert.notEqual(gzip.headers.get('etag'), compressedEtag, 'ETags must describe the selected encoding');
   await gzip.arrayBuffer();
 
+  const equalQuality = await fetch(`${baseUrl}${entries.app}`, {
+    headers: { 'Accept-Encoding': 'gzip;q=0.8, br;q=0.8' },
+  });
+  assert.equal(equalQuality.status, 200);
+  assert.equal(equalQuality.headers.get('content-encoding'), 'br');
+  await equalQuality.arrayBuffer();
+
+  const disabledBrotli = await fetch(`${baseUrl}${entries.app}`, {
+    headers: { 'Accept-Encoding': 'br;q=0, gzip;q=0.7' },
+  });
+  assert.equal(disabledBrotli.status, 200);
+  assert.equal(disabledBrotli.headers.get('content-encoding'), 'gzip');
+  await disabledBrotli.arrayBuffer();
+
+  const identityFallback = await fetch(`${baseUrl}${entries.app}`, {
+    headers: { 'Accept-Encoding': 'br;q=0, gzip;q=0' },
+  });
+  assert.equal(identityFallback.status, 200);
+  assert.equal(identityFallback.headers.get('content-encoding'), null);
+  await identityFallback.arrayBuffer();
+
+  const unacceptable = await fetch(`${baseUrl}${entries.app}`, {
+    headers: { 'Accept-Encoding': 'br;q=0, gzip;q=0, identity;q=0' },
+  });
+  assert.equal(unacceptable.status, 406);
+
+  const wildcardDisabled = await fetch(`${baseUrl}${entries.app}`, {
+    headers: { 'Accept-Encoding': '*;q=0' },
+  });
+  assert.equal(wildcardDisabled.status, 406);
+
   const unchangedBuild = await fetch(`${baseUrl}${entries.app}`, {
     headers: { 'Accept-Encoding': 'br', 'If-None-Match': compressedEtag },
   });

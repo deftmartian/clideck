@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const WebSocket = require('ws');
 const { Sandbox } = require('./providers/sandbox');
+const { Client } = require('./providers/client');
 const { CLIENT_PROTOCOL_PARAM, CLIENT_PROTOCOL_VERSION } = require('../protocol');
 
 function collectUntilClose(url, onOpen) {
@@ -121,4 +122,32 @@ test('WebSocket protocol gate accepts the current client and rejects stale clien
     false,
     'a rejected client action must never reach the session handler',
   );
+});
+
+test('transport statistics are available only to explicitly opted-in sockets', async t => {
+  const box = new Sandbox();
+  t.after(async () => box.cleanup());
+  const port = await box.start();
+  const normal = new Client(port);
+  const perf = new Client(port, { perf: true });
+  t.after(() => {
+    normal.close();
+    perf.close();
+  });
+
+  normal.autoSubscribe = false;
+  await normal.connect();
+  await normal.waitFor('config');
+  normal.messages.length = 0;
+  normal.send({ type: 'transport.stats.request' });
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(normal.messages.some(message => message.type === 'transport.stats'), false);
+
+  perf.autoSubscribe = false;
+  await perf.connect();
+  await perf.waitFor('config');
+  perf.messages.length = 0;
+  perf.send({ type: 'transport.stats.request' });
+  const stats = await perf.waitFor('transport.stats');
+  assert.equal(Number.isFinite(stats.maximumBacklog), true);
 });

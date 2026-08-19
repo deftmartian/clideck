@@ -165,6 +165,52 @@ test('invalid create and restart sizes preserve the live session', async t => {
   await client.waitFor(msg => msg.type === 'output' && msg.id === created.id && msg.data.includes(marker));
 });
 
+test('repeated restart gives each active viewer exactly one fresh snapshot', async t => {
+  const box = new Sandbox();
+  const producer = new Client();
+  const first = new Client();
+  const second = new Client();
+  for (const client of [producer, first, second]) client.autoSubscribe = false;
+  t.after(async () => {
+    for (const client of [producer, first, second]) client.close();
+    await box.cleanup();
+  });
+  const port = await box.start();
+  for (const client of [producer, first, second]) client.port = port;
+  await producer.connect(); await producer.waitFor('config');
+  const created = await createShell(producer, box, 'restart-snapshots');
+  for (const viewer of [first, second]) {
+    await viewer.connect(); await viewer.waitFor('config');
+    viewer.subscribe(created.id, { replay: 'snapshot' });
+    await viewer.waitFor(msg => msg.type === 'session.subscribed' && msg.id === created.id);
+  }
+
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    for (const viewer of [first, second]) viewer.messages.length = 0;
+    producer.messages.length = 0;
+    producer.send({ type: 'session.restart', id: created.id, cols: 80, rows: 24 });
+    await producer.waitFor(msg => msg.type === 'session.restarted' && msg.id === created.id);
+    for (const viewer of [first, second]) {
+      await viewer.waitFor(msg => msg.type === 'session.restarted' && msg.id === created.id);
+      viewer.subscribe(created.id, { replay: 'snapshot' });
+    }
+    await Promise.all([first, second].map(viewer => viewer.waitFor(
+      msg => msg.type === 'session.subscribed' && msg.id === created.id,
+    )));
+    await settle(300);
+    for (const viewer of [first, second]) {
+      assert.equal(
+        viewer.messages.filter(msg => msg.type === 'session.snapshot' && msg.id === created.id).length,
+        1,
+      );
+      assert.equal(
+        viewer.messages.some(msg => msg.type === 'session.resyncRequired' && msg.id === created.id),
+        false,
+      );
+    }
+  }
+});
+
 test('headless capture owns DSR and DA replies while browser replies are discarded', async t => {
   const box = new Sandbox();
   const client = new Client();

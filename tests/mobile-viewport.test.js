@@ -181,7 +181,8 @@ test('mobile Select mode owns drag only while armed and uses xterm public select
   assert.match(selection, /term\.getSelection\(\)/);
   assert.match(clipboard, /map\(line => line\.trimEnd\(\)\)/);
   assert.match(selection, /copyTrimmedTerminalSelection\(text, writeText\)/);
-  assert.match(trimClip, /copyTrimmedTerminalSelection/);
+  assert.match(trimClip, /apiRef\.copyTrimmedTerminalSelection\(text\)/);
+  assert.doesNotMatch(trimClip, /from ['"]\/js\//);
   assert.match(touchScroll, /onTap\?\.\(id, term, screen, touch\)/);
   assert.match(terminalLocal, /onTap:[\s\S]{0,160}activateTerminalLinkAtPoint/);
   assert.match(terminalLocal, /new MouseEvent\('mousemove'/);

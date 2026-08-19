@@ -142,20 +142,121 @@ async function verifyTouchRendererLifecycle(page, browserName, primaryId, sessio
   if (initial.sessions !== sessionIds.length || initial.renderers !== 1 || initial.webgl > 1) {
     throw new Error(`${browserName} touch renderer budget failed: ${JSON.stringify(initial)}`);
   }
-  const alternate = sessionIds.find(id => id !== primaryId);
-  await page.evaluate(async id => {
-    const { select } = window.__clideckTest;
-    select(id);
-  }, alternate);
-  await waitFor(async () => page.evaluate(async id => {
-    const { state } = window.__clideckTest;
-    return !!state.terms.get(id)?.term
-      && [...state.terms.values()].filter(entry => entry.term).length === 1;
-  }, alternate), `${browserName} single renderer after switching`);
+  for (const sessionId of sessionIds.filter(id => id !== primaryId)) {
+    await page.evaluate(async id => {
+      const { select } = window.__clideckTest;
+      select(id);
+    }, sessionId);
+    await waitFor(async () => page.evaluate(async id => {
+      const { state } = window.__clideckTest;
+      return !!state.terms.get(id)?.term
+        && [...state.terms.values()].filter(entry => entry.term).length === 1;
+    }, sessionId), `${browserName} single renderer while switching ten sessions`);
+  }
   await page.evaluate(async id => {
     const { select } = window.__clideckTest;
     select(id);
   }, primaryId);
+  await waitFor(() => page.evaluate(id => {
+    const { state } = window.__clideckTest;
+    return !!state.terms.get(id)?.term
+      && [...state.terms.values()].filter(entry => entry.term).length === 1;
+  }, primaryId), `${browserName} primary renderer remount`);
+}
+
+async function verifyInactiveUnread(page, browserName, client, primaryId, inactiveId) {
+  const marker = `${browserName.toUpperCase()}_INACTIVE_${Date.now()}`;
+  const split = Math.floor(marker.length / 2);
+  client.messages.length = 0;
+  client.send({
+    type: 'input',
+    id: inactiveId,
+    data: `printf '%s%s\n' '${marker.slice(0, split)}' '${marker.slice(split)}'\r`,
+  });
+  await client.waitFor(
+    message => message.type === 'session.activity' && message.id === inactiveId,
+    { label: `${browserName} inactive activity` },
+  );
+  const unread = await waitFor(() => page.evaluate(id => {
+    const entry = window.__clideckTest.state.terms.get(id);
+    return entry?.unread && !entry.term && {
+      latest: entry.latestActivitySeq,
+      seen: entry.seenActivitySeq,
+    };
+  }, inactiveId), `${browserName} inactive unread state`);
+  if (!Number.isSafeInteger(unread.latest) || unread.latest === unread.seen) {
+    throw new Error(`${browserName} activity cursor did not advance unread state`);
+  }
+
+  await page.evaluate(id => window.__clideckTest.select(id), inactiveId);
+  const rendered = await waitFor(async () => {
+    const text = await terminalText(page, inactiveId);
+    return text.includes(marker) ? text : '';
+  }, `${browserName} inactive snapshot on selection`);
+  if (count(rendered, marker) !== 1) throw new Error(`${browserName} duplicated inactive output`);
+  const cleared = await page.evaluate(id => {
+    const entry = window.__clideckTest.state.terms.get(id);
+    return !entry.unread && entry.seenActivityGeneration === entry.latestActivityGeneration
+      && entry.seenActivitySeq === entry.latestActivitySeq;
+  }, inactiveId);
+  if (!cleared) throw new Error(`${browserName} selection did not clear unread activity`);
+  await page.evaluate(id => window.__clideckTest.select(id), primaryId);
+}
+
+async function setTranscriptQuery(page, query) {
+  await page.evaluate(value => {
+    const input = document.getElementById('search-input');
+    input.value = value;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  }, query);
+}
+
+async function verifyTranscriptQuery(page, browserName, sessionId, query, label) {
+  await setTranscriptQuery(page, query);
+  await waitFor(() => page.evaluate(({ id, value }) => {
+    const { state } = window.__clideckTest;
+    const row = document.querySelector(`.group[data-id="${id}"]`);
+    return state.transcriptCacheState === 'loaded'
+      && state.terms.get(id)?.searchText?.includes(value)
+      && row?.style.display !== 'none';
+  }, { id: sessionId, value: query }), `${browserName} ${label} transcript filter`);
+}
+
+async function verifyRestartSnapshot(page, browserName, client, sessionId) {
+  const before = await page.evaluate(id => window.__clideckPerfSnapshot().events
+    .filter(event => event.name === 'terminalSnapshotComplete' && event.id === id).length, sessionId);
+  client.messages.length = 0;
+  client.send({ type: 'session.restart', id: sessionId, cols: 80, rows: 24 });
+  const restarted = await client.waitFor(
+    message => message.type === 'session.restarted' && message.id === sessionId,
+    { label: `${browserName} restart acknowledgement` },
+  );
+  if (restarted.error) throw new Error(`${browserName} restart failed: ${restarted.error}`);
+  await waitFor(() => page.evaluate(({ id, countBefore }) => {
+    const events = window.__clideckPerfSnapshot().events;
+    const snapshots = events.filter(event => event.name === 'terminalSnapshotComplete' && event.id === id).length;
+    return snapshots === countBefore + 1 && window.__clideckTest.state.active === id;
+  }, { id: sessionId, countBefore: before }), `${browserName} one restart snapshot`);
+
+  client.messages.length = 0;
+  client.subscribe(sessionId, { replay: 'snapshot' });
+  await client.waitFor(
+    message => message.type === 'session.subscribed' && message.id === sessionId,
+    { label: `${browserName} producer restart subscription` },
+  );
+  const marker = `${browserName.toUpperCase()}_RESTARTED_${Date.now()}`;
+  await writeMarker(client, sessionId, marker);
+  const text = await waitFor(async () => {
+    const current = await terminalText(page, sessionId);
+    return current.includes(marker) ? current : '';
+  }, `${browserName} output after restart`);
+  if (count(text, marker) !== 1) throw new Error(`${browserName} duplicated output after restart`);
+  await new Promise(resolve => setTimeout(resolve, 200));
+  const after = await page.evaluate(id => window.__clideckPerfSnapshot().events
+    .filter(event => event.name === 'terminalSnapshotComplete' && event.id === id).length, sessionId);
+  if (after !== before + 1) {
+    throw new Error(`${browserName} restart used ${after - before} snapshots`);
+  }
 }
 
 async function verifyNarrowDesktopTouchUi(browser, baseUrl, browserName, sessionId, sessionIds, marker) {
@@ -1573,7 +1674,10 @@ async function run(browserName) {
       async () => (await terminalText(page, id)).includes(base),
       `${browserName} initial replay`,
     );
+    await verifyTranscriptQuery(page, browserName, id, base, 'initial');
+    await setTranscriptQuery(page, '');
     await verifyTouchRendererLifecycle(page, browserName, id, sessionIds);
+    await verifyInactiveUnread(page, browserName, client, id, sessionIds[1]);
     await verifyTerminalQueryExactlyOnce(client, id);
     await verifyTouchFirstDesktopOverride(page, browserName);
     await verifyBottomActionClearance(page, browserName);
@@ -1624,6 +1728,8 @@ async function run(browserName) {
     await waitFor(async () => !(await socketOpen(page)), `${browserName} socket disconnect`);
     const missed = `${browserName.toUpperCase()}_MISSED_${Date.now()}`;
     await writeMarker(client, id, missed);
+    await new Promise(resolve => setTimeout(resolve, 400));
+    await setTranscriptQuery(page, missed);
     await context.setOffline(false);
     const recovered = await waitFor(async () => {
       const text = await terminalText(page, id);
@@ -1631,6 +1737,8 @@ async function run(browserName) {
     }, `${browserName} offline recovery`);
     if (!recovered.includes(base)) throw new Error(`${browserName} lost existing scrollback`);
     if (count(recovered, missed) !== 1) throw new Error(`${browserName} duplicated recovered output`);
+    await verifyTranscriptQuery(page, browserName, id, missed, 'reconnected');
+    await setTranscriptQuery(page, '');
     const recoveryMs = await page.evaluate(() => {
       const events = window.__clideckPerfSnapshot().events;
       const opened = [...events].reverse().find(event => event.name === 'webSocketOpen');
@@ -1662,6 +1770,8 @@ async function run(browserName) {
       throw new Error(`${browserName} WebSocket did not recover`);
     }
 
+    await verifyRestartSnapshot(page, browserName, client, id);
+
     if (browserName === 'firefox') {
       // Close only the application socket. Firefox's Playwright offline
       // emulation may reload the page when network access is restored, which
@@ -1683,35 +1793,23 @@ async function run(browserName) {
       }
       const gapReport = await waitFor(() => page.evaluate(async ({ sessionId, marker }) => {
         const { state } = window.__clideckTest;
-        const banner = document.getElementById('pwa-update-banner');
-        const action = document.getElementById('pwa-update-action');
-        const dismiss = document.getElementById('pwa-update-dismiss');
-        const blocked = banner && !banner.hidden
-          && action?.textContent === 'Reload now'
-          && dismiss?.hidden
-          && document.body.classList.contains('protocol-incompatible')
-          && document.body.dataset.reloadRequired === 'true'
-          && state.protocolBlocked
-          && !state.ws;
-        if (!blocked) return null;
+        if (state.protocolBlocked || state.ws?.readyState !== WebSocket.OPEN) return null;
         const buffer = state.terms.get(sessionId)?.term?.buffer.active;
-        let markerRendered = false;
+        let markerCount = 0;
         for (let index = 0; buffer && index < buffer.length; index += 1) {
-          if (buffer.getLine(index)?.translateToString(true).includes(marker)) {
-            markerRendered = true;
-            break;
-          }
+          const line = buffer.getLine(index)?.translateToString(true);
+          if (line) markerCount += line.split(marker).length - 1;
         }
-        return { markerRendered };
-      }, { sessionId: id, marker: gapDone }), 'Firefox fail-closed buffer gap');
-      if (gapReport.markerRendered) throw new Error('Firefox rendered an unreconciled buffer gap');
+        return markerCount ? { markerCount } : null;
+      }, { sessionId: id, marker: gapDone }), 'Firefox snapshot recovery after buffer gap');
+      if (gapReport.markerCount !== 1) throw new Error('Firefox duplicated snapshot recovery output');
     }
     if (browserErrors.length) {
       throw new Error(`${browserName} browser errors: ${browserErrors.join(' | ')}`);
     }
 
     await context.close();
-    const gapCheck = browserName === 'firefox' ? ', fail-closed gap' : '';
+    const gapCheck = browserName === 'firefox' ? ', snapshot gap recovery' : '';
     const touchCheck = browserName === 'chromium' ? ', touch scrolling' : '';
     console.log(`${browserName}: ${renderer} renderer, composer auto-submit, mobile selection, recovery, scrollback${touchCheck}, lifecycle storm${gapCheck}, and protocol checks passed`);
   } finally {

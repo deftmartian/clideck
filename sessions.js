@@ -330,6 +330,7 @@ function spawnSession(id, cmd, parts, cwd, name, themeId, commandId, savedToken,
   if (preset?.bridge === 'opencode') opencodeBridge.watchSession(id, cwd);
 
   term.onData((data) => {
+    if (sessions.get(id) !== session) return;
     const startSeq = session.outputSeq;
     session.outputSeq += data.length;
     session.replayRing.append(data, startSeq);
@@ -673,9 +674,9 @@ function restart(msg, ws, cfg) {
   clearTimeout(s._captureTimer);
   clearActivityTimer(s);
   stream.clearSession(id);
+  sessions.delete(id);
   s.capture?.dispose();
   s.pty.kill();
-  sessions.delete(id);
 
   const err = spawnSession(id, cmd, parts, cwd, name, themeId, commandId, savedToken, projectId, size.cols, size.rows);
   if (err) {
@@ -698,9 +699,6 @@ function list() {
   return [...sessions].map(([id, s]) => ({
     id, name: s.name, themeId: s.themeId, commandId: s.commandId, presetId: s.presetId || 'shell', projectId: s.projectId, muted: !!s.muted,
     working: !!s.working,
-    outputGeneration: s.outputGeneration,
-    outputSeq: s.outputSeq,
-    bufferStartSeq: s.replayRing.startSeq,
     // Last preview text for sidebar display on reconnect
     lastPreview: s.lastPreview || '', lastActivityAt: s.lastActivityAt || null,
     menu: s._menuKey ? JSON.parse(s._menuKey) : undefined,

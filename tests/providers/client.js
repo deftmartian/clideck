@@ -7,8 +7,9 @@ const { stripAnsi } = require('../../ansi-utils');
 const { CLIENT_PROTOCOL_PARAM, CLIENT_PROTOCOL_VERSION } = require('../../protocol');
 
 class Client {
-  constructor(port) {
+  constructor(port, { perf = false } = {}) {
     this.port = port;
+    this.perf = perf;
     this.ws = null;
     this.messages = [];           // every message received, in order
     this.listeners = new Set();
@@ -42,6 +43,7 @@ class Client {
     return new Promise((resolve, reject) => {
       const url = new URL(`ws://127.0.0.1:${this.port}`);
       url.searchParams.set(CLIENT_PROTOCOL_PARAM, String(CLIENT_PROTOCOL_VERSION));
+      if (this.perf) url.searchParams.set('clideckPerf', '1');
       this.ws = new WebSocket(url);
       const timer = setTimeout(() => reject(new Error('ws connect timeout')), timeoutMs);
       this.ws.on('open', () => { clearTimeout(timer); resolve(); });
@@ -57,7 +59,7 @@ class Client {
     this.accounting.maximumFrameBytes = Math.max(this.accounting.maximumFrameBytes, bytes);
     let msg;
     try { msg = JSON.parse(raw); } catch { return; }
-    if ((msg.type === 'output' && msg.replay) || msg.type === 'session.history' || msg.type === 'session.snapshot') {
+    if ((msg.type === 'output' && msg.replay) || msg.type === 'session.snapshot') {
       this.accounting.snapshotReplayBytes += bytes;
     } else if (msg.type === 'output') {
       this.accounting.liveBytesBySession[msg.id] = (this.accounting.liveBytesBySession[msg.id] || 0) + bytes;
@@ -99,8 +101,8 @@ class Client {
         this.output.set(msg.id, msg.data || '');
         this.cursors.set(msg.id, { generation: msg.generation, seq: msg.atSeq });
       }
-    } else if (msg.type === 'output' || msg.type === 'session.history') {
-      const text = msg.data != null ? msg.data : (msg.text || '');
+    } else if (msg.type === 'output') {
+      const text = msg.data != null ? msg.data : '';
       this.output.set(msg.id, (this.output.get(msg.id) || '') + text);
       if (msg.generation && Number.isSafeInteger(msg.endSeq)) {
         this.cursors.set(msg.id, { generation: msg.generation, seq: msg.endSeq });

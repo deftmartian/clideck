@@ -1,8 +1,6 @@
 import {
-  commitTerminalHistory,
   commitTerminalReplay,
   noteTerminalLiveOutput,
-  planTerminalHistory,
   planTerminalReplay,
 } from './terminal-recovery.js';
 
@@ -33,19 +31,8 @@ export function createTerminalRecoveryClient({ requestResync }) {
     return output;
   }
 
-  function handleHistory(ws, entry, message, historyText) {
-    const recovery = entry
-      ? planTerminalHistory(entry, historyText, message)
-      : { status: 'current', data: '' };
-    if (entry) commitTerminalHistory(entry, recovery);
-    if (entry && recovery.data && !entry.queue(recovery.data, true)) {
-      entry.writeChunk(recovery.data, true);
-    }
-    requestResyncOnce(message.id, recovery);
-  }
-
   function handleSnapshot(entry, message) {
-    if (!entry?.term) return;
+    if (!entry?.term) return false;
     let snapshot = message;
     if (Number.isSafeInteger(message.parts) && message.parts > 1) {
       if (message.part === 0) {
@@ -66,10 +53,10 @@ export function createTerminalRecoveryClient({ requestResync }) {
         || message.part !== pending.data.length) {
         entry.pendingSnapshot = null;
         requestResync(message.id, 'snapshot-part-gap');
-        return;
+        return false;
       }
       pending.data.push(String(message.data || ''));
-      if (pending.data.length < pending.parts) return;
+      if (pending.data.length < pending.parts) return false;
       snapshot = { ...pending, data: pending.data.join('') };
       entry.pendingSnapshot = null;
     } else {
@@ -82,6 +69,7 @@ export function createTerminalRecoveryClient({ requestResync }) {
     entry.lastOutputSeq = snapshot.atSeq;
     const data = String(snapshot.data || '');
     if (data && !entry.queue(data, true)) entry.writeChunk(data, true);
+    return true;
   }
 
   function handleSubscribed(entry, message) {
@@ -92,5 +80,5 @@ export function createTerminalRecoveryClient({ requestResync }) {
     entry.lastOutputSeq = message.atSeq;
   }
 
-  return { handleHistory, handleOutput, handleSnapshot, handleSubscribed };
+  return { handleOutput, handleSnapshot, handleSubscribed };
 }

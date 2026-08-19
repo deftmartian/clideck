@@ -374,11 +374,7 @@ test('terminal gaps request a protocol snapshot without reloading the page', () 
   const connectionClient = read('public/js/connection-client.js');
   const recoveryClient = read('public/js/terminal-recovery-client.js');
 
-  assert.match(pwa, /export function requirePageReload\(message\)/);
-  assert.match(pwa, /showReloadReady\(message,\s*\{\s*required:\s*true\s*\}\)/);
-  assert.match(pwa, /dataset\.reloadRequired\s*===\s*['"]true['"]/);
-  assert.match(pwa, /if\s*\(required\)\s*document\.body\.dataset\.reloadRequired\s*=\s*['"]true['"]/);
-  assert.match(pwa, /if\s*\(!worker\s*\|\|\s*isReloadMandatory\(\)\)\s*return/);
+  assert.doesNotMatch(pwa, /requirePageReload|reloadRequired|isReloadMandatory/);
   assert.match(app, /createTerminalRecoveryClient\(\{/);
   assert.match(recoveryClient, /requestResync\(sessionId, recovery\.status\)/);
   assert.match(app, /function requestTerminalSnapshot\(id\)/);
@@ -387,108 +383,17 @@ test('terminal gaps request a protocol snapshot without reloading the page', () 
   assert.match(connectionClient, /state\.protocolBlocked\s*=\s*true/);
   assert.match(connectionClient, /if\s*\(connectionBlocked\s*\|\|\s*state\.protocolBlocked\)\s*return null/);
   assert.doesNotMatch(connectionClient, /state\.protocolBlocked\s*=\s*false/);
+  assert.doesNotMatch(connectionClient, /requireRecoveryReload/);
   assert.match(recoveryClient, /recovery\.status !== ['"]gap['"]/);
   assert.match(recoveryClient, /recovery\.status !== ['"]legacy-gap['"]/);
-});
-
-test('a mandatory reload cannot be downgraded by worker or version notifications', async () => {
-  const source = read('public/js/pwa.js');
-  const ids = [
-    'pwa-update-banner',
-    'pwa-update-message',
-    'pwa-update-action',
-    'pwa-update-dismiss',
-    'connection-banner',
-    'connection-message',
-    'connection-action',
-  ];
-  const elements = new Map(ids.map(id => [id, {
-    id,
-    hidden: false,
-    textContent: '',
-    disabled: false,
-    dataset: {},
-    addEventListener() {},
-  }]));
-  const classes = new Set();
-  const body = {
-    dataset: {},
-    classList: {
-      add: name => classes.add(name),
-      contains: name => classes.has(name),
-      toggle(name, force) {
-        if (force) classes.add(name);
-        else classes.delete(name);
-      },
-    },
-  };
-  const registration = {
-    waiting: { postMessage() {} },
-    addEventListener() {},
-    update: () => Promise.resolve(),
-  };
-  const descriptors = new Map();
-  const replaceGlobal = (name, value) => {
-    descriptors.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
-    Object.defineProperty(globalThis, name, {
-      configurable: true,
-      writable: true,
-      value,
-    });
-  };
-
-  replaceGlobal('document', {
-    body,
-    activeElement: { blur() {} },
-    getElementById: id => elements.get(id) || null,
-    addEventListener() {},
-  });
-  replaceGlobal('window', {
-    isSecureContext: true,
-    addEventListener() {},
-    dispatchEvent() {},
-    location: { reload() {}, assign() {} },
-  });
-  replaceGlobal('navigator', {
-    onLine: true,
-    serviceWorker: {
-      addEventListener() {},
-      register: () => Promise.resolve(registration),
-    },
-  });
-
-  try {
-    const moduleUrl = `data:text/javascript;base64,${Buffer.from(source).toString('base64')}#mandatory-${Date.now()}`;
-    const pwa = await import(moduleUrl);
-    pwa.requirePageReload('Terminal recovery requires a reload.');
-    pwa.registerPwa();
-    await new Promise(resolve => setImmediate(resolve));
-    pwa.noteServerVersion('1.32.0', 'initial-build');
-    pwa.noteServerVersion('1.32.0', 'replacement-build');
-    pwa.showConnectionState('connected');
-
-    assert.equal(elements.get('pwa-update-banner').hidden, false);
-    assert.equal(elements.get('pwa-update-message').textContent, 'Terminal recovery requires a reload.');
-    assert.equal(elements.get('pwa-update-action').textContent, 'Reload now');
-    assert.equal(elements.get('pwa-update-dismiss').hidden, true);
-    assert.equal(body.dataset.reloadRequired, 'true');
-    assert.equal(classes.has('protocol-incompatible'), true);
-  } finally {
-    for (const [name, descriptor] of descriptors) {
-      if (descriptor) Object.defineProperty(globalThis, name, descriptor);
-      else delete globalThis[name];
-    }
-  }
 });
 
 test('foreground reconnect uses protocol-v3 cursors and server snapshots', async () => {
   const source = read('public/js/terminal-recovery.js');
   const moduleUrl = `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;
   const {
-    commitTerminalHistory,
     commitTerminalReplay,
     noteTerminalLiveOutput,
-    planTerminalHistory,
     planTerminalReplay,
   } = await import(moduleUrl);
   const entry = {
@@ -541,36 +446,10 @@ test('foreground reconnect uses protocol-v3 cursors and server snapshots', async
   assert.equal(live.outputGeneration, 'generation-2');
   assert.equal(live.lastOutputSeq, 4);
 
-  const historyEntry = {};
-  const historyInitial = planTerminalHistory(
-    historyEntry,
-    'formatted transcript',
-    { snapshotId: 'snapshot-1' },
-  );
-  assert.equal(historyInitial.status, 'initial');
-  commitTerminalHistory(historyEntry, historyInitial);
-  assert.equal(
-    planTerminalHistory(historyEntry, 'formatted transcript', { snapshotId: 'snapshot-1' }).status,
-    'current',
-  );
-  assert.equal(
-    planTerminalHistory(historyEntry, 'changed transcript', { snapshotId: 'snapshot-2' }).status,
-    'gap',
-  );
-  assert.equal(
-    planTerminalHistory(
-      { replayInitialized: true },
-      'formatted history after raw terminal output',
-      { snapshotId: 'snapshot-after-restart' },
-    ).status,
-    'gap',
-    'history must not be appended to an already-rendered raw terminal',
-  );
-
   const app = read('public/js/app.js');
   const recoveryClient = read('public/js/terminal-recovery-client.js');
   assert.match(recoveryClient, /planTerminalReplay\(entry,\s*output,\s*message\)/);
-  assert.match(recoveryClient, /planTerminalHistory\(entry,\s*historyText,\s*message\)/);
+  assert.doesNotMatch(recoveryClient, /session\.history|planTerminalHistory|handleHistory/);
   assert.match(recoveryClient, /noteTerminalLiveOutput\(entry,\s*message\.data,\s*message\)/);
   assert.match(recoveryClient, /function handleSnapshot\(entry, message\)/);
   assert.match(recoveryClient, /entry\.term\.reset\(\)/);

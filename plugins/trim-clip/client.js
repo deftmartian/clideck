@@ -1,5 +1,3 @@
-import { copyTrimmedTerminalSelection } from '/js/terminal-clipboard.js';
-
 let enabled = true;
 let btnEl = null;
 let apiRef = null;
@@ -10,10 +8,7 @@ async function trimAndCopy() {
   const text = apiRef.getTerminalSelection();
   if (!text || !text.trim()) { apiRef.toast('Select text to copy & trim', { type: 'warn' }); return; }
   try {
-    const result = await copyTrimmedTerminalSelection(
-      text,
-      value => navigator.clipboard.writeText(value),
-    );
+    const result = await apiRef.copyTrimmedTerminalSelection(text);
     apiRef.toast(result.saved ? `Copied & trimmed ${result.saved} char${result.saved !== 1 ? 's' : ''}` : 'Copied', { type: 'success' });
   } catch {
     apiRef.toast('Clipboard access denied — allow it in browser site settings', { type: 'error' });

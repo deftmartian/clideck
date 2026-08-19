@@ -367,7 +367,9 @@ function onConnection(ws) {
         ws.send(JSON.stringify({ type: 'transcript.cache', cache: transcript.getCache() }));
         break;
       case 'transport.stats.request':
-        sendControl({ type: 'transport.stats', ...sessions.streamStats(ws) });
+        if (ws._clideckPerf === true) {
+          sendControl({ type: 'transport.stats', ...sessions.streamStats(ws) });
+        }
         break;
       case 'input':                sessions.input(msg, ws); break;
       case 'clipboard.image': {

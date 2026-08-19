@@ -60,6 +60,7 @@ export function createMobileComposer({
   let initialized = false;
   let toolsOpen = false;
   let pendingCommit = null;
+  let focusEpoch = 0;
   // Focus snapshot taken on control-button pointerdown, before Firefox moves
   // focus to the button: click handlers use it to preserve an open keyboard
   // without ever summoning a closed one.
@@ -185,7 +186,10 @@ export function createMobileComposer({
     // summon a closed one.
     if (getActiveId() === transaction.id && !entry?.mobileDirect
       && transaction.keyboardWasUp) {
-      requestAnimationFrame(() => focusWithoutScroll(textarea));
+      const scheduledAt = focusEpoch;
+      requestAnimationFrame(() => {
+        if (scheduledAt === focusEpoch) focusWithoutScroll(textarea);
+      });
     }
   }
 
@@ -319,6 +323,9 @@ export function createMobileComposer({
     refresh,
     syncTerminalInput,
     closeTools: () => setToolsOpen(false),
-    blurInput: () => elements().textarea?.blur(),
+    blurInput() {
+      focusEpoch += 1;
+      elements().textarea?.blur();
+    },
   };
 }

@@ -10,7 +10,7 @@ const pageReloadButton = document.getElementById('mobile-page-reload');
 let waitingWorker = null;
 let activationRequested = false;
 let activationTimer = null;
-let reloadRequired = false;
+let reloadReady = false;
 let connectionState = 'connecting';
 let connectionTimer = null;
 let initialServerVersion = null;
@@ -30,34 +30,22 @@ function setUpdateBannerVisible(visible) {
   updateBanner.hidden = !visible;
 }
 
-function isReloadMandatory() {
-  return document.body?.dataset.reloadRequired === 'true';
-}
-
-function showReloadReady(message, { required = false } = {}) {
-  if (required) document.body.dataset.reloadRequired = 'true';
-  if (isReloadMandatory() && !required) return;
-  reloadRequired = true;
+function showReloadReady(message) {
+  reloadReady = true;
   waitingWorker = null;
   if (updateMessage) updateMessage.textContent = message;
   if (updateAction) {
     updateAction.disabled = false;
     updateAction.textContent = 'Reload now';
   }
-  if (updateDismiss) updateDismiss.hidden = isReloadMandatory();
+  if (updateDismiss) updateDismiss.hidden = false;
   setUpdateBannerVisible(true);
 }
 
-export function requirePageReload(message) {
-  showReloadReady(message, { required: true });
-  document.body?.classList.add('protocol-incompatible');
-  document.activeElement?.blur?.();
-}
-
 function showWaitingWorker(worker) {
-  if (!worker || isReloadMandatory()) return;
+  if (!worker) return;
   waitingWorker = worker;
-  reloadRequired = false;
+  reloadReady = false;
   if (updateMessage) updateMessage.textContent = 'A CliDeck update is ready.';
   if (updateAction) {
     updateAction.disabled = false;
@@ -147,7 +135,7 @@ function renderConnectionBanner() {
 
 export function showConnectionState(state) {
   connectionState = state;
-  const interactionBlocked = state === 'incompatible' || isReloadMandatory();
+  const interactionBlocked = state === 'incompatible';
   document.body?.classList.toggle('protocol-incompatible', interactionBlocked);
   if (interactionBlocked) document.activeElement?.blur?.();
   clearTimeout(connectionTimer);
@@ -187,7 +175,7 @@ export async function diagnoseConnectionFailure() {
 }
 
 updateAction?.addEventListener('click', () => {
-  if (reloadRequired) {
+  if (reloadReady) {
     window.location.reload();
     return;
   }
@@ -207,7 +195,7 @@ updateAction?.addEventListener('click', () => {
 });
 
 updateDismiss?.addEventListener('click', () => {
-  if (!isReloadMandatory()) setUpdateBannerVisible(false);
+  setUpdateBannerVisible(false);
 });
 
 pageReloadButton?.addEventListener('click', () => {

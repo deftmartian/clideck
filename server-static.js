@@ -24,20 +24,58 @@ function isWithin(root, filePath) {
   return pathFromRoot === '' || (!pathFromRoot.startsWith(`..${sep}`) && pathFromRoot !== '..');
 }
 
-function representation(filePath, acceptEncoding = '') {
-  if (isWithin(BUILD_ROOT, filePath)) {
-    if (/\bbr\b/.test(acceptEncoding) && existsSync(`${filePath}.br`)) {
-      return { filePath: `${filePath}.br`, encoding: 'br' };
+function parseAcceptEncoding(header = '') {
+  const qualities = new Map();
+  for (const item of String(header).split(',')) {
+    const [rawName, ...parameters] = item.split(';');
+    const name = rawName.trim().toLowerCase();
+    if (!name) continue;
+    let quality = 1;
+    for (const parameter of parameters) {
+      const match = parameter.trim().match(/^q\s*=\s*(.+)$/i);
+      if (!match) continue;
+      const parsed = Number(match[1]);
+      quality = Number.isFinite(parsed) && parsed >= 0 && parsed <= 1 ? parsed : 0;
+      break;
     }
-    if (/\bgzip\b/.test(acceptEncoding) && existsSync(`${filePath}.gz`)) {
-      return { filePath: `${filePath}.gz`, encoding: 'gzip' };
+    qualities.set(name, Math.max(qualities.get(name) || 0, quality));
+  }
+  return qualities;
+}
+
+function representation(filePath, acceptEncoding = '') {
+  const qualities = parseAcceptEncoding(acceptEncoding);
+  const wildcard = qualities.get('*');
+  const qualityFor = encoding => qualities.has(encoding)
+    ? qualities.get(encoding)
+    : (wildcard ?? 0);
+  const identityAllowed = qualities.has('identity')
+    ? qualities.get('identity') > 0
+    : wildcard !== 0;
+  const identityQuality = qualities.has('identity')
+    ? qualities.get('identity')
+    : (qualities.size === 0 ? 1 : -1);
+  const candidates = [];
+  if (isWithin(BUILD_ROOT, filePath)) {
+    if (existsSync(`${filePath}.br`)) {
+      candidates.push({ filePath: `${filePath}.br`, encoding: 'br', quality: qualityFor('br'), priority: 3 });
+    }
+    if (existsSync(`${filePath}.gz`)) {
+      candidates.push({ filePath: `${filePath}.gz`, encoding: 'gzip', quality: qualityFor('gzip'), priority: 2 });
     }
   }
-  return { filePath, encoding: 'identity' };
+  if (identityAllowed) {
+    candidates.push({ filePath, encoding: 'identity', quality: identityQuality, priority: 1 });
+  }
+  const selected = candidates
+    .filter(candidate => candidate.encoding === 'identity' || candidate.quality > 0)
+    .sort((left, right) => right.quality - left.quality || right.priority - left.priority)[0];
+  return selected ? { filePath: selected.filePath, encoding: selected.encoding } : null;
 }
 
 function staticResponse(filePath, acceptEncoding) {
   const selected = representation(filePath, acceptEncoding);
+  if (!selected) return null;
   const data = readFileSync(selected.filePath);
   const immutable = isWithin(BUILD_ROOT, filePath);
   const headers = {
@@ -56,6 +94,10 @@ function servePluginFile(req, res, resolvePluginFile) {
   const pluginFile = resolvePluginFile(req.url);
   if (!pluginFile) {
     res.writeHead(404).end();
+    return;
+  }
+  if (!representation(pluginFile, req.headers['accept-encoding'] || '')) {
+    res.writeHead(406).end();
     return;
   }
   res.writeHead(200, {
@@ -91,7 +133,12 @@ function serveStatic(req, res, { resolvePluginFile }) {
     return;
   }
   try {
-    const { data, headers } = staticResponse(filePath, req.headers['accept-encoding'] || '');
+    const response = staticResponse(filePath, req.headers['accept-encoding'] || '');
+    if (!response) {
+      res.writeHead(406).end();
+      return;
+    }
+    const { data, headers } = response;
     if (req.headers['if-none-match'] === headers.ETag) {
       res.writeHead(304, headers);
       res.end();
@@ -104,4 +151,4 @@ function serveStatic(req, res, { resolvePluginFile }) {
   }
 }
 
-module.exports = { serveStatic, staticResponse };
+module.exports = { parseAcceptEncoding, representation, serveStatic, staticResponse };

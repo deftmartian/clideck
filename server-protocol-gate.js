@@ -8,6 +8,12 @@ const { CLIENT_BUILD_ID } = require('./client-build');
 function acceptClient(ws, req, { onConnection, version }) {
   const receivedProtocolVersion = clientProtocolVersionFromUrl(req.url);
   if (isClientProtocolCompatible(receivedProtocolVersion)) {
+    try {
+      ws._clideckPerf = new URL(String(req.url || '/'), 'http://clideck.local')
+        .searchParams.get('clideckPerf') === '1';
+    } catch {
+      ws._clideckPerf = false;
+    }
     onConnection(ws);
     return;
   }

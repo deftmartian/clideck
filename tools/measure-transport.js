@@ -8,7 +8,7 @@ const { existsSync } = require('fs');
 async function main() {
   const box = new Sandbox();
   const producer = new Client();
-  const reconnect = new Client();
+  const reconnect = new Client(undefined, { perf: true });
   try {
     const port = await box.start();
     producer.port = port;

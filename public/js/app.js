@@ -14,6 +14,7 @@ import { registerHotkey, unregisterHotkey, unregisterAllForPlugin } from './hotk
 import { renderPrompts } from './prompts.js';
 import { registerPwa } from './pwa.js';
 import { initClipboardClient } from './clipboard-client.js';
+import { copyTrimmedTerminalSelection } from './terminal-clipboard.js';
 import { initCompactNavigation } from './compact-navigation.js';
 import { createConnectionClient } from './connection-client.js';
 import { createTerminalRecoveryClient } from './terminal-recovery-client.js';
@@ -160,13 +161,15 @@ function connect() {
         break;
       case 'session.snapshot': {
         const entry = state.terms.get(msg.id);
-        terminalRecovery.handleSnapshot(entry, msg);
+        if (terminalRecovery.handleSnapshot(entry, msg)) {
+          notePerf('terminalSnapshotComplete', { id: msg.id });
+        }
         updatePreview(msg.id);
         break;
       }
       case 'session.subscribed': {
         terminalRecovery.handleSubscribed(state.terms.get(msg.id), msg);
-        notePerf('terminalSubscribed', { id: msg.id, mode: msg.mode });
+        notePerf('terminalSubscribed', { id: msg.id, mode: msg.mode, reason: msg.reason });
         if (!terminalTimingRecorded) {
           terminalTimingRecorded = true;
           timePerf('webSocketToTerminalMs', socketOpenedAt);
@@ -174,6 +177,7 @@ function connect() {
         break;
       }
       case 'session.resyncRequired':
+        notePerf('terminalResyncRequired', { id: msg.id, reason: msg.reason });
         requestTerminalSnapshot(msg.id);
         break;
       case 'closed':
@@ -1155,6 +1159,9 @@ async function loadPlugins(list) {
           addTerminalInputButton(opts) { return addTerminalInputAction(plugin.id, opts); },
           getActiveSessionId() { return state.active; },
           getTerminalSelection() { return state.terms.get(state.active)?.term?.getSelection() || ''; },
+          copyTrimmedTerminalSelection(text) {
+            return copyTrimmedTerminalSelection(text, value => navigator.clipboard.writeText(value));
+          },
           writeToSession(id, text) { trackTerminalInputData(id, text); send({ type: 'input', id, data: text }); },
           toast(message, opts) { return showToast(message, opts); },
           registerHotkey(combo, callback) { return registerHotkey(plugin.id, combo, callback); },

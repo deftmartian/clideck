@@ -2,9 +2,9 @@ import { state, send, discardQueuedSends, flushQueuedSends } from './state.js';
 import {
   diagnoseConnectionFailure,
   noteServerVersion,
-  requirePageReload,
   showConnectionState,
 } from './pwa.js';
+import { perfEnabled } from './perf.js';
 
 const CLIENT_PROTOCOL_VERSION = 3;
 const CLIENT_PROTOCOL_PARAM = 'clideckProtocol';
@@ -92,6 +92,7 @@ export function createConnectionClient({ connect }) {
     const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const url = new URL(`${wsProtocol}//${location.host}`);
     url.searchParams.set(CLIENT_PROTOCOL_PARAM, String(CLIENT_PROTOCOL_VERSION));
+    if (perfEnabled()) url.searchParams.set('clideckPerf', '1');
     const ws = new WebSocket(url);
     state.ws = ws;
     return ws;
@@ -191,10 +192,6 @@ export function createConnectionClient({ connect }) {
     handleError,
     openSocket,
     reconnect,
-    requireRecoveryReload(ws, message) {
-      stopUntilReload(ws, 'terminal recovery requires reload');
-      requirePageReload(message);
-    },
     setConnectionState,
     suspend,
   };

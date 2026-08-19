@@ -10,10 +10,6 @@ const BACKLOG_HIGH_WATER = 1024 * 1024;
 const BACKLOG_RECOVERY = 256 * 1024;
 const HEARTBEAT_MS = 25 * 1000;
 
-function bufferStart(session) {
-  return session.replayRing.startSeq;
-}
-
 function bufferedSlice(session, startSeq, endSeq = session.outputSeq) {
   return session.replayRing.slice(startSeq, endSeq);
 }
@@ -292,8 +288,15 @@ function createSessionStream({ clients, getSession, snapshot, applyResize }) {
       }
       if (state.nextSeq >= message.endSeq) continue;
       if (state.nextSeq < message.startSeq) {
-        requestResubscribe(ws, state, id, 'buffer-gap');
-        continue;
+        const session = getSession(id);
+        if (!session || !sendRingRange(
+          ws, state, session, id, state.nextSeq, message.startSeq, true,
+        )) {
+          if (state.phase !== 'backpressured' && state.phase !== 'awaiting-resubscribe') {
+            requestResubscribe(ws, state, id, 'buffer-gap');
+          }
+          continue;
+        }
       }
       const data = message.data.slice(state.nextSeq - message.startSeq);
       if (!data) continue;

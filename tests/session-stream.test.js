@@ -199,6 +199,30 @@ test('failed terminal sends do not advance the client cursor', async t => {
   assert.equal(f.stream._stateFor(ws).nextSeq, 0);
 });
 
+test('a recoverable network-batch gap replays from the ring without another snapshot', async t => {
+  const f = fixture();
+  t.after(() => f.stream.stop());
+  const session = f.add('a', 'abc', 'g1');
+  const ws = new FakeSocket();
+  f.stream.register(ws);
+  await f.stream.subscribe(ws, { id: 'a', replay: 'snapshot' });
+  const state = f.stream._stateFor(ws);
+  state.nextSeq = 0;
+  ws.messages.length = 0;
+
+  session.replayRing.append('D', session.outputSeq);
+  session.outputSeq += 1;
+  f.stream.queueOutput('a', 'D', 3, 4);
+  f.stream._flush('a');
+
+  assert.deepEqual(messages(ws, 'output').map(message => [message.data, !!message.replay]), [
+    ['abc', true],
+    ['D', false],
+  ]);
+  assert.equal(messages(ws, 'session.resyncRequired').length, 0);
+  assert.equal(state.nextSeq, 4);
+});
+
 test('large terminal output is emitted as UTF-8-safe bounded batches', async t => {
   const f = fixture();
   t.after(() => f.stream.stop());
