@@ -5,9 +5,10 @@ import {
   showConnectionState,
 } from './pwa.js';
 import { perfEnabled } from './perf.js';
+import lifecycle from '../../connection-lifecycle.js';
+import { CLIENT_PROTOCOL_PARAM, CLIENT_PROTOCOL_VERSION } from './protocol-version.js';
 
-const CLIENT_PROTOCOL_VERSION = 3;
-const CLIENT_PROTOCOL_PARAM = 'clideckProtocol';
+const { foregroundDisposition } = lifecycle;
 
 export function createConnectionClient({ connect }) {
   let reconnectTimer = null;
@@ -18,12 +19,18 @@ export function createConnectionClient({ connect }) {
   let consecutiveFailures = 0;
   let reconnectAttempt = 0;
   let diagnosticAttempt = 0;
+  let foregroundWatchdog = null;
   const retryDelays = [250, 500, 1000, 2000, 5000];
 
   function clearReconnectTimer() {
     if (reconnectTimer === null) return;
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
+  }
+
+  function clearForegroundWatchdog() {
+    clearTimeout(foregroundWatchdog);
+    foregroundWatchdog = null;
   }
 
   function setConnectionState(connectionState) {
@@ -63,6 +70,7 @@ export function createConnectionClient({ connect }) {
   }
 
   function stopUntilReload(ws, reason) {
+    clearForegroundWatchdog();
     connectionBlocked = true;
     state.protocolReady = false;
     state.protocolBlocked = true;
@@ -129,6 +137,7 @@ export function createConnectionClient({ connect }) {
     state.ws = null;
     state.protocolReady = false;
     state.transcriptCacheState = 'idle';
+    clearForegroundWatchdog();
     clearTimeout(stableTimer);
     consecutiveFailures += 1;
     setConnectionState(navigator.onLine ? 'reconnecting' : 'offline');
@@ -148,6 +157,7 @@ export function createConnectionClient({ connect }) {
 
   function suspend(reason) {
     clearReconnectTimer();
+    clearForegroundWatchdog();
     const ws = state.ws;
     state.ws = null;
     state.protocolReady = false;
@@ -160,14 +170,47 @@ export function createConnectionClient({ connect }) {
     try { ws.close(1000, reason); } catch {}
   }
 
-  function reconnect() {
+  function forceReconnect(reason = 'foreground recovery') {
     if (connectionBlocked || document.visibilityState === 'hidden') return;
     const now = Date.now();
     if (now - lastForegroundReconnectAt < 100) return;
     lastForegroundReconnectAt = now;
-    suspend('foreground resume');
+    suspend(reason);
     setConnectionState(navigator.onLine ? 'reconnecting' : 'offline');
     connect();
+  }
+
+  function resumeForeground() {
+    if (connectionBlocked) return 'blocked';
+    const disposition = foregroundDisposition({
+      hidden: document.visibilityState === 'hidden',
+      readyState: state.ws?.readyState ?? null,
+      protocolReady: state.protocolReady,
+    });
+    if (disposition === 'connect') {
+      setConnectionState(navigator.onLine ? 'reconnecting' : 'offline');
+      connect();
+    }
+    return disposition;
+  }
+
+  function watchForegroundResponse(ws = state.ws, timeoutMs = 2000) {
+    if (!ws || ws !== state.ws || ws.readyState !== WebSocket.OPEN) return false;
+    // The in-flight watchdog is the event-storm dedupe. A time throttle here
+    // can suppress a distinct hide/foreground cycle that follows a fast
+    // current-state response.
+    if (foregroundWatchdog !== null) return false;
+    foregroundWatchdog = setTimeout(() => {
+      foregroundWatchdog = null;
+      if (state.ws === ws && ws.readyState === WebSocket.OPEN) {
+        forceReconnect('foreground probe timeout');
+      }
+    }, timeoutMs);
+    return true;
+  }
+
+  function noteResponse(ws) {
+    if (ws === state.ws) clearForegroundWatchdog();
   }
 
   function flashSaveIndicator() {
@@ -190,9 +233,12 @@ export function createConnectionClient({ connect }) {
     flashSaveIndicator,
     handleClose,
     handleError,
+    forceReconnect,
+    noteResponse,
     openSocket,
-    reconnect,
+    resumeForeground,
     setConnectionState,
     suspend,
+    watchForegroundResponse,
   };
 }

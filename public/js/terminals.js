@@ -7,6 +7,7 @@ import { showToast } from './toast.js';
 import { createTerminalLocalIntegration } from './terminal-local.js';
 import { createTerminalRendererLifecycle } from './terminal-renderer.js';
 import { isTouchUiEnabled } from './touch-ui.js';
+import { writeClipboardText } from './terminal-clipboard.js';
 
 function isLightBg(themeId) {
   const bg = resolveTheme(themeId)?.background;
@@ -35,22 +36,6 @@ function formatTime(ts) {
 function updateTimeEl(el, ts) {
   el.textContent = formatTime(ts);
   el.classList.toggle('recent', isRecent(ts));
-}
-
-async function writeClipboardText(text) {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text);
-    return;
-  }
-  const ta = document.createElement('textarea');
-  ta.value = text;
-  ta.style.position = 'fixed';
-  ta.style.opacity = '0';
-  document.body.appendChild(ta);
-  ta.select();
-  const ok = document.execCommand('copy');
-  ta.remove();
-  if (!ok) throw new Error('Clipboard copy failed');
 }
 
 export async function copySessionName(id) {
@@ -368,7 +353,7 @@ async function copyTerminalSelection(sessionId) {
   const text = entry?.term?.getSelection() || '';
   if (!text) return;
   try {
-    await navigator.clipboard.writeText(text);
+    await writeClipboardText(text);
   } catch {
     showToast('Clipboard write failed.', { type: 'error' });
   }
@@ -628,6 +613,14 @@ export function addTerminal(id, name, themeId, commandId, projectId, muted, last
     stopBounce,
     outputGeneration: null,
     lastOutputSeq: null,
+    receivedSeq: null,
+    appliedSeq: null,
+    streamId: null,
+    syncTargetSeq: null,
+    syncMode: null,
+    syncCurrent: false,
+    unparsedBytes: 0,
+    writeQueueDepth: 0,
     replayInitialized: false,
     lastActivityAt: Date.now(),
     latestActivityGeneration: null,
@@ -732,9 +725,10 @@ export function suspendActiveTerminal({ disposeTouch = false } = {}) {
 
 export function resumeActiveTerminal() {
   const id = state.active;
-  if (!id || document.visibilityState === 'hidden') return;
+  if (!id || document.visibilityState === 'hidden') return false;
   const entry = mountRenderer(id);
-  if (entry?.fitted) subscribeRenderer(id);
+  if (entry?.fitted) return subscribeRenderer(id);
+  return false;
 }
 
 // --- Preview & status ---
@@ -968,6 +962,12 @@ export function restartComplete(id, msg) {
   }
   entry.outputGeneration = null;
   entry.lastOutputSeq = null;
+  entry.receivedSeq = null;
+  entry.appliedSeq = null;
+  entry.streamId = null;
+  entry.syncTargetSeq = null;
+  entry.syncMode = null;
+  entry.syncCurrent = false;
   entry.replayInitialized = false;
   entry.latestActivityGeneration = null;
   entry.latestActivitySeq = null;

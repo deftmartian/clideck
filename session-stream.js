@@ -6,30 +6,71 @@ const { normalizeTerminalSize } = require('./terminal-size');
 
 const BATCH_DELAY_MS = 16;
 const BATCH_MAX_BYTES = 32 * 1024;
+const APPLICATION_CREDIT_BYTES = 128 * 1024;
+const FAST_DELTA_BYTES = 64 * 1024;
+const MAX_DELTA_BYTES = 256 * 1024;
 const BACKLOG_HIGH_WATER = 1024 * 1024;
 const BACKLOG_RECOVERY = 256 * 1024;
+const ACK_STALL_MS = 30 * 1000;
 const HEARTBEAT_MS = 25 * 1000;
+const RECOVERY_BUDGET_MS = 300;
+const CONSUMPTION_SAFETY_FACTOR = 2;
+const LARGE_SNAPSHOT_RATIO = 0.5;
+const CONTROL_COMPRESSION_MIN_BYTES = 16 * 1024;
 
 function bufferedSlice(session, startSeq, endSeq = session.outputSeq) {
   return session.replayRing.slice(startSeq, endSeq);
+}
+
+function createMetrics() {
+  return {
+    maximumBacklog: 0,
+    maximumUnackedBytes: 0,
+    controlFrames: 0,
+    controlBytes: 0,
+    liveFrames: 0,
+    liveBytes: 0,
+    replayFrames: 0,
+    replayBytes: 0,
+    snapshotFrames: 0,
+    snapshotBytes: 0,
+    syncCurrent: 0,
+    syncDelta: 0,
+    syncSnapshot: 0,
+    snapshotCaptureMs: 0,
+    backpressurePauses: 0,
+    staleAcks: 0,
+    invalidAcks: 0,
+    forcedResyncs: 0,
+  };
 }
 
 function createSessionStream({ clients, getSession, snapshot, applyResize }) {
   const resizeOwners = new Map();
   let recoveryTimer = null;
   let heartbeatTimer = null;
+  let nextStreamId = 1;
 
   function stateFor(ws) {
     if (!ws._clideckStream) {
       ws._clideckStream = {
         sessionId: null,
         generation: null,
+        sentSeq: null,
         nextSeq: null,
+        ackedSeq: null,
         phase: 'idle',
         token: null,
+        streamId: 0,
         resizeOwner: false,
-        maximumBacklog: 0,
+        inFlight: [],
+        inFlightBytes: 0,
+        lastAckAt: Date.now(),
+        consumptionBytesPerMs: null,
+        syncTargetSeq: null,
+        snapshot: null,
         missedPongs: 0,
+        metrics: createMetrics(),
       };
     }
     return ws._clideckStream;
@@ -44,8 +85,8 @@ function createSessionStream({ clients, getSession, snapshot, applyResize }) {
   }
 
   function noteBacklog(ws, state, projected = Number(ws.bufferedAmount || 0)) {
-    state.maximumBacklog = Math.max(
-      state.maximumBacklog,
+    state.metrics.maximumBacklog = Math.max(
+      state.metrics.maximumBacklog,
       Number(ws.bufferedAmount || 0),
       projected,
     );
@@ -61,19 +102,40 @@ function createSessionStream({ clients, getSession, snapshot, applyResize }) {
     }
   }
 
-  function sendSerialized(ws, message, terminalFrame) {
+  function accountFrame(state, kind, bytes) {
+    if (kind === 'control') {
+      state.metrics.controlFrames += 1;
+      state.metrics.controlBytes += bytes;
+    } else if (kind === 'live') {
+      state.metrics.liveFrames += 1;
+      state.metrics.liveBytes += bytes;
+    } else if (kind === 'replay') {
+      state.metrics.replayFrames += 1;
+      state.metrics.replayBytes += bytes;
+    } else if (kind === 'snapshot') {
+      state.metrics.snapshotFrames += 1;
+      state.metrics.snapshotBytes += bytes;
+    }
+  }
+
+  function sendRaw(ws, raw, kind) {
     if (!ready(ws)) return false;
     const state = stateFor(ws);
-    const raw = JSON.stringify(message);
+    const bytes = Buffer.byteLength(raw);
     const projected = projectedBacklog(ws, raw);
     noteBacklog(ws, state, projected);
     if (projected > BACKLOG_HIGH_WATER) {
-      if (terminalFrame) state.phase = 'backpressured';
-      else terminateOverloaded(ws, state);
+      if (kind !== 'control') {
+        if (state.phase !== 'network-backpressured') state.metrics.backpressurePauses += 1;
+        state.phase = 'network-backpressured';
+      } else {
+        terminateOverloaded(ws, state);
+      }
       return false;
     }
     try {
-      ws.send(raw);
+      ws.send(raw, { compress: shouldCompressFrame(kind, bytes) });
+      accountFrame(state, kind, bytes);
       noteBacklog(ws, state);
       return true;
     } catch {
@@ -81,14 +143,12 @@ function createSessionStream({ clients, getSession, snapshot, applyResize }) {
     }
   }
 
-  function sendControl(ws, message) {
-    return sendSerialized(ws, message, false);
+  function sendSerialized(ws, message, kind = 'control') {
+    return sendRaw(ws, JSON.stringify(message), kind);
   }
 
-  function sendTerminal(ws, message) {
-    const state = stateFor(ws);
-    if (state.phase === 'backpressured' || state.phase === 'awaiting-resubscribe') return false;
-    return sendSerialized(ws, message, true);
+  function sendControl(ws, message) {
+    return sendSerialized(ws, message, 'control');
   }
 
   function releaseResize(ws, id = stateFor(ws).sessionId) {
@@ -96,15 +156,26 @@ function createSessionStream({ clients, getSession, snapshot, applyResize }) {
     stateFor(ws).resizeOwner = false;
   }
 
+  function resetDelivery(state) {
+    state.generation = null;
+    state.sentSeq = null;
+    state.nextSeq = null;
+    state.ackedSeq = null;
+    state.inFlight = [];
+    state.inFlightBytes = 0;
+    state.syncTargetSeq = null;
+    state.snapshot = null;
+  }
+
   function unsubscribe(ws, requestedId) {
     const state = stateFor(ws);
     if (requestedId && state.sessionId !== requestedId) return false;
     releaseResize(ws, state.sessionId);
     state.sessionId = null;
-    state.generation = null;
-    state.nextSeq = null;
     state.phase = 'idle';
     state.token = null;
+    state.streamId = 0;
+    resetDelivery(state);
     return true;
   }
 
@@ -131,104 +202,219 @@ function createSessionStream({ clients, getSession, snapshot, applyResize }) {
     return state.token === token && state.sessionId === id && ready(token.ws);
   }
 
+  function allocateStreamId() {
+    const id = nextStreamId;
+    nextStreamId = nextStreamId >= 0xffffffff ? 1 : nextStreamId + 1;
+    return id;
+  }
+
   function commitSubscription(ws, id, { claim, cols, rows }) {
     const state = stateFor(ws);
     releaseResize(ws, state.sessionId);
     state.sessionId = id;
-    state.generation = null;
-    state.nextSeq = null;
-    state.phase = 'snapshotting';
-    const token = { ws, value: crypto.randomUUID() };
-    state.token = token;
+    state.phase = 'planning';
+    state.token = { ws, value: crypto.randomUUID() };
+    state.streamId = allocateStreamId();
+    state.lastAckAt = Date.now();
+    resetDelivery(state);
     if (claim) {
       claimResize(ws, id);
       applyResize(id, cols, rows);
     }
-    return { state, token };
+    return { state, token: state.token };
   }
 
-  function sendRingRange(ws, state, session, id, startSeq, endSeq, replay) {
-    if (!session.replayRing.contains(startSeq, endSeq)) return false;
-    for (const segment of session.replayRing.segments(startSeq, endSeq, BATCH_MAX_BYTES)) {
-      const accepted = sendTerminal(ws, {
-        type: 'output', id, data: segment.data, replay,
-        generation: session.outputGeneration,
-        startSeq: segment.startSeq,
-        endSeq: segment.endSeq,
-      });
-      if (!accepted) return false;
-      state.nextSeq = segment.endSeq;
-    }
-    return true;
+  function noteInFlight(state, frame) {
+    state.inFlight.push(frame);
+    state.inFlightBytes += frame.bytes;
+    state.metrics.maximumUnackedBytes = Math.max(
+      state.metrics.maximumUnackedBytes,
+      state.inFlightBytes,
+    );
   }
 
-  function waitForDrain(ws, stillCurrent, timeoutMs = 5000) {
-    const deadline = Date.now() + timeoutMs;
-    return new Promise(resolve => {
-      const poll = () => {
-        if (!stillCurrent() || !ready(ws)) return resolve(false);
-        if (Number(ws.bufferedAmount || 0) <= BACKLOG_RECOVERY) return resolve(true);
-        if (Date.now() >= deadline) return resolve(false);
-        setTimeout(poll, 10);
-      };
-      poll();
+  function availableCredit(state) {
+    return Math.max(0, APPLICATION_CREDIT_BYTES - state.inFlightBytes);
+  }
+
+  function requestResubscribe(ws, state, id, reason) {
+    if (state.phase === 'awaiting-resubscribe') return false;
+    state.phase = 'awaiting-resubscribe';
+    state.metrics.forcedResyncs += 1;
+    sendControl(ws, { type: 'session.resyncRequired', id, reason });
+    return false;
+  }
+
+  function announceSync(ws, state, session, id, mode, targetSeq, detail = {}) {
+    state.syncTargetSeq = targetSeq;
+    state.metrics[`sync${mode[0].toUpperCase()}${mode.slice(1)}`] += 1;
+    sendControl(ws, {
+      type: 'session.sync',
+      id,
+      streamId: state.streamId,
+      generation: session.outputGeneration,
+      mode,
+      targetSeq,
+      ...detail,
+    });
+    return sendControl(ws, {
+      type: 'session.subscribed',
+      id,
+      streamId: state.streamId,
+      generation: session.outputGeneration,
+      atSeq: targetSeq,
+      mode,
+      ...(detail.reason ? { reason: detail.reason } : {}),
     });
   }
 
-  async function sendSnapshotFrames(ws, message, stillCurrent) {
-    const chunks = splitUtf8Chunks(message.data, BATCH_MAX_BYTES);
-    if (chunks.length <= 1) return sendTerminal(ws, message);
-    for (let part = 0; part < chunks.length; part += 1) {
-      if (!sendTerminal(ws, {
-        ...message,
-        data: chunks[part].data,
-        part,
-        parts: chunks.length,
-      })) return false;
-      if (Number(ws.bufferedAmount || 0) > BACKLOG_RECOVERY
-        && !await waitForDrain(ws, stillCurrent)) return false;
+  function sendRangeFrame(ws, state, id, segment, replay) {
+    if (segment.bytes > availableCredit(state)) return false;
+    const kind = replay ? 'replay' : 'live';
+    const accepted = sendSerialized(ws, {
+      type: 'output',
+      id,
+      streamId: state.streamId,
+      data: segment.data,
+      replay,
+      generation: state.generation,
+      startSeq: segment.startSeq,
+      endSeq: segment.endSeq,
+    }, kind);
+    if (!accepted) return false;
+    noteInFlight(state, {
+      kind: 'range',
+      bytes: segment.bytes,
+      startSeq: segment.startSeq,
+      endSeq: segment.endSeq,
+      sentAt: Date.now(),
+    });
+    state.sentSeq = segment.endSeq;
+    state.nextSeq = state.sentSeq;
+    return true;
+  }
+
+  function pumpRange(ws, state, session, endSeq = session.outputSeq, replay = false) {
+    if (!ready(ws) || state.phase !== 'streaming') return false;
+    if (!Number.isSafeInteger(state.sentSeq) || state.sentSeq >= endSeq) return true;
+    if (!session.replayRing.contains(state.sentSeq, endSeq)) {
+      return requestResubscribe(ws, state, state.sessionId, 'buffer-gap');
+    }
+    while (state.sentSeq < endSeq) {
+      const credit = availableCredit(state);
+      if (credit < 1) return true;
+      const maxBytes = Math.min(BATCH_MAX_BYTES, credit);
+      const rangeEnd = Number.isSafeInteger(state.syncTargetSeq)
+        && state.sentSeq < state.syncTargetSeq
+        ? Math.min(endSeq, state.syncTargetSeq)
+        : endSeq;
+      const iterator = session.replayRing.segments(state.sentSeq, rangeEnd, maxBytes);
+      const next = iterator.next();
+      if (next.done) break;
+      const isReplay = replay || state.sentSeq < state.syncTargetSeq;
+      if (!sendRangeFrame(ws, state, state.sessionId, next.value, isReplay)) return false;
     }
     return true;
   }
 
-  async function sendSnapshot(ws, state, token, id, reason) {
-    const session = getSession(id);
-    if (!session) return false;
-    let captured;
-    try {
-      captured = await snapshot(id, session.outputSeq);
-    } catch (error) {
-      if (isCurrent(state, token, id)) {
-        state.phase = 'awaiting-resubscribe';
-        sendControl(ws, { type: 'session.resyncRequired', id, reason: error.message || 'snapshot-failed' });
-      }
-      return false;
+  function pumpSnapshot(ws, state) {
+    const pending = state.snapshot;
+    if (!pending || state.phase !== 'snapshotting') return false;
+    while (pending.nextPart < pending.parts.length) {
+      const chunk = pending.parts[pending.nextPart];
+      if (chunk.bytes > availableCredit(state)) return true;
+      const part = pending.nextPart;
+      const accepted = sendSerialized(ws, {
+        type: 'session.snapshot',
+        id: state.sessionId,
+        streamId: state.streamId,
+        generation: state.generation,
+        atSeq: pending.atSeq,
+        cols: pending.cols,
+        rows: pending.rows,
+        data: chunk.data,
+        part,
+        parts: pending.parts.length,
+      }, 'snapshot');
+      if (!accepted) return false;
+      noteInFlight(state, {
+        kind: 'snapshot',
+        bytes: chunk.bytes,
+        part,
+        sentAt: Date.now(),
+      });
+      pending.nextPart += 1;
     }
-    if (!isCurrent(state, token, id)) return false;
-    session.outputGeneration = session.outputGeneration || crypto.randomUUID();
-    if (!await sendSnapshotFrames(ws, {
-      type: 'session.snapshot',
-      id,
-      generation: session.outputGeneration,
+    return true;
+  }
+
+  function beginCurrent(ws, state, session, id, targetSeq) {
+    state.generation = session.outputGeneration;
+    state.sentSeq = targetSeq;
+    state.nextSeq = targetSeq;
+    state.ackedSeq = targetSeq;
+    state.phase = 'streaming';
+    announceSync(ws, state, session, id, 'current', targetSeq, { deltaBytes: 0 });
+    return true;
+  }
+
+  function beginDelta(ws, state, session, id, cursorSeq, targetSeq, deltaBytes) {
+    state.generation = session.outputGeneration;
+    state.sentSeq = cursorSeq;
+    state.nextSeq = cursorSeq;
+    state.ackedSeq = cursorSeq;
+    state.phase = 'streaming';
+    announceSync(ws, state, session, id, 'delta', targetSeq, { deltaBytes });
+    return pumpRange(ws, state, session, session.outputSeq, true);
+  }
+
+  function beginSnapshot(ws, state, session, id, captured, reason, snapshotBytes, deltaBytes = null) {
+    const parts = splitUtf8Chunks(captured.data, BATCH_MAX_BYTES);
+    if (!parts.length) parts.push({ data: '', bytes: 0 });
+    state.generation = session.outputGeneration;
+    state.sentSeq = captured.atSeq;
+    state.nextSeq = captured.atSeq;
+    state.ackedSeq = null;
+    state.phase = 'snapshotting';
+    state.snapshot = {
+      parts,
+      nextPart: 0,
+      ackedPart: -1,
       atSeq: captured.atSeq,
-      data: captured.data,
       cols: captured.cols,
       rows: captured.rows,
-    }, () => isCurrent(state, token, id))) return false;
-    state.generation = session.outputGeneration;
-    state.nextSeq = captured.atSeq;
-    const current = session.outputSeq;
-    if (!session.replayRing.contains(state.nextSeq, current)) {
-      state.phase = 'awaiting-resubscribe';
-      sendControl(ws, { type: 'session.resyncRequired', id, reason: 'snapshot-catchup-gap' });
-      return false;
-    }
-    if (!sendRingRange(ws, state, session, id, state.nextSeq, current, true)) return false;
-    state.phase = 'streaming';
-    return sendControl(ws, {
-      type: 'session.subscribed', id, generation: session.outputGeneration,
-      atSeq: state.nextSeq, mode: 'snapshot', ...(reason ? { reason } : {}),
+    };
+    announceSync(ws, state, session, id, 'snapshot', captured.atSeq, {
+      reason,
+      snapshotBytes,
+      cols: captured.cols,
+      rows: captured.rows,
+      ...(Number.isFinite(deltaBytes) ? { deltaBytes } : {}),
     });
+    return pumpSnapshot(ws, state);
+  }
+
+  async function captureSnapshot(ws, state, token, id, atSeq, reason, deltaBytes = null) {
+    const started = Date.now();
+    let captured;
+    try {
+      captured = await snapshot(id, atSeq);
+    } catch (error) {
+      if (isCurrent(state, token, id)) {
+        requestResubscribe(ws, state, id, error.message || 'snapshot-failed');
+      }
+      return null;
+    }
+    const captureMs = Math.max(0, Date.now() - started);
+    state.metrics.snapshotCaptureMs += captureMs;
+    if (!isCurrent(state, token, id)) return null;
+    const session = getSession(id);
+    if (!session || captured.atSeq !== atSeq) {
+      requestResubscribe(ws, state, id, 'snapshot-sequence-mismatch');
+      return null;
+    }
+    const snapshotBytes = Buffer.byteLength(captured.data || '');
+    return { captured, session, reason, snapshotBytes, deltaBytes, captureMs };
   }
 
   async function subscribe(ws, message) {
@@ -249,59 +435,178 @@ function createSessionStream({ clients, getSession, snapshot, applyResize }) {
       cols: size.cols,
       rows: size.rows,
     });
-    const replay = message.replay === 'resume' ? 'resume' : 'snapshot';
+    session.outputGeneration = session.outputGeneration || crypto.randomUUID();
+    const targetSeq = session.outputSeq;
     const cursor = message.cursor;
-    if (replay !== 'resume'
-      || !cursor
-      || cursor.generation !== session.outputGeneration
-      || !Number.isSafeInteger(cursor.seq)) {
-      return sendSnapshot(ws, state, token, id, replay === 'resume' ? 'generation-changed' : undefined);
+    const wantsAuto = message.strategy === 'auto' || message.replay === 'resume';
+    const validCursor = wantsAuto
+      && cursor
+      && cursor.generation === session.outputGeneration
+      && Number.isSafeInteger(cursor.seq)
+      && session.replayRing.contains(cursor.seq, targetSeq);
+
+    if (!validCursor) {
+      const reason = wantsAuto
+        ? (cursor?.generation !== session.outputGeneration ? 'generation-changed' : 'buffer-gap')
+        : undefined;
+      const result = await captureSnapshot(ws, state, token, id, targetSeq, reason);
+      if (!result) return false;
+      return beginSnapshot(
+        ws, state, result.session, id, result.captured,
+        result.reason, result.snapshotBytes,
+      );
+    }
+    if (cursor.seq === targetSeq) return beginCurrent(ws, state, session, id, targetSeq);
+
+    const deltaBytes = session.replayRing.byteLengthBetween(cursor.seq, targetSeq);
+    if (deltaBytes <= FAST_DELTA_BYTES) {
+      return beginDelta(ws, state, session, id, cursor.seq, targetSeq, deltaBytes);
     }
 
-    const endSeq = session.outputSeq;
-    if (!session.replayRing.contains(cursor.seq, endSeq)) {
-      return sendSnapshot(ws, state, token, id, 'buffer-gap');
+    const result = await captureSnapshot(
+      ws, state, token, id, targetSeq,
+      deltaBytes > MAX_DELTA_BYTES ? 'large-delta' : 'snapshot-cheaper',
+      deltaBytes,
+    );
+    if (!result) return false;
+    let snapshotWins = deltaBytes > MAX_DELTA_BYTES
+      ? result.snapshotBytes < deltaBytes
+      : result.snapshotBytes <= deltaBytes * 0.75;
+    if (state.consumptionBytesPerMs > 0) {
+      // Per-frame ACK samples can overstate sustained drain rate because later
+      // credit-window turns also pay scheduling and network latency. Apply a
+      // conservative safety factor before using the EWMA for a larger gap.
+      const deltaDrainMs = deltaBytes / state.consumptionBytesPerMs
+        * CONSUMPTION_SAFETY_FACTOR;
+      const snapshotDrainMs = result.captureMs
+        + result.snapshotBytes / state.consumptionBytesPerMs
+          * CONSUMPTION_SAFETY_FACTOR;
+      snapshotWins = deltaDrainMs > RECOVERY_BUDGET_MS
+        ? snapshotDrainMs <= deltaDrainMs * 0.75
+        : deltaBytes > MAX_DELTA_BYTES
+          && result.snapshotBytes <= deltaBytes * LARGE_SNAPSHOT_RATIO;
     }
-    if (!isCurrent(state, token, id)) return false;
-    state.generation = session.outputGeneration;
-    state.nextSeq = cursor.seq;
-    state.phase = 'streaming';
-    if (!sendRingRange(ws, state, session, id, cursor.seq, endSeq, true)) return false;
-    return sendControl(ws, {
-      type: 'session.subscribed', id, generation: session.outputGeneration,
-      atSeq: state.nextSeq, mode: cursor.seq === endSeq ? 'current' : 'delta',
-    });
+    if (snapshotWins) {
+      return beginSnapshot(
+        ws, state, result.session, id, result.captured,
+        result.reason, result.snapshotBytes, deltaBytes,
+      );
+    }
+    if (!result.session.replayRing.contains(cursor.seq, targetSeq)) {
+      return beginSnapshot(
+        ws, state, result.session, id, result.captured,
+        'buffer-gap', result.snapshotBytes, deltaBytes,
+      );
+    }
+    return beginDelta(ws, state, result.session, id, cursor.seq, targetSeq, deltaBytes);
   }
 
-  function requestResubscribe(ws, state, id, reason) {
-    state.phase = 'awaiting-resubscribe';
-    sendControl(ws, { type: 'session.resyncRequired', id, reason });
+  function freeRangeCredit(state, seq) {
+    let bytes = 0;
+    let oldest = null;
+    const retained = [];
+    for (const frame of state.inFlight) {
+      if (frame.kind === 'range' && frame.endSeq <= seq) {
+        bytes += frame.bytes;
+        oldest = oldest === null ? frame.sentAt : Math.min(oldest, frame.sentAt);
+      } else {
+        retained.push(frame);
+      }
+    }
+    state.inFlight = retained;
+    state.inFlightBytes = Math.max(0, state.inFlightBytes - bytes);
+    return { bytes, oldest };
   }
 
-  function deliverOutput(id, message) {
+  function freeSnapshotCredit(state, part) {
+    let bytes = 0;
+    let oldest = null;
+    const retained = [];
+    for (const frame of state.inFlight) {
+      if (frame.kind === 'snapshot' && frame.part <= part) {
+        bytes += frame.bytes;
+        oldest = oldest === null ? frame.sentAt : Math.min(oldest, frame.sentAt);
+      } else {
+        retained.push(frame);
+      }
+    }
+    state.inFlight = retained;
+    state.inFlightBytes = Math.max(0, state.inFlightBytes - bytes);
+    return { bytes, oldest };
+  }
+
+  function noteConsumption(state, bytes, oldest) {
+    state.lastAckAt = Date.now();
+    if (!bytes || oldest === null) return;
+    const elapsed = Math.max(1, state.lastAckAt - oldest);
+    const rate = bytes / elapsed;
+    state.consumptionBytesPerMs = state.consumptionBytesPerMs === null
+      ? rate
+      : state.consumptionBytesPerMs * 0.8 + rate * 0.2;
+  }
+
+  function acknowledge(ws, message) {
+    const state = stateFor(ws);
+    if (Number(message.streamId) !== state.streamId
+      || String(message.id || '') !== state.sessionId
+      || String(message.generation || '') !== state.generation) {
+      state.metrics.staleAcks += 1;
+      return false;
+    }
+    const session = getSession(state.sessionId);
+    if (!session) return false;
+
+    if (state.phase === 'snapshotting') {
+      const part = Number(message.part);
+      const pending = state.snapshot;
+      if (!pending || !Number.isSafeInteger(part)
+        || part < pending.ackedPart || part >= pending.nextPart) {
+        state.metrics.invalidAcks += 1;
+        return false;
+      }
+      pending.ackedPart = part;
+      const released = freeSnapshotCredit(state, part);
+      noteConsumption(state, released.bytes, released.oldest);
+      if (part === pending.parts.length - 1) {
+        state.ackedSeq = pending.atSeq;
+        state.snapshot = null;
+        state.phase = 'streaming';
+        return pumpRange(ws, state, session, session.outputSeq, false);
+      }
+      return pumpSnapshot(ws, state);
+    }
+
+    if (state.phase !== 'streaming') return false;
+    const seq = Number(message.seq);
+    if (!Number.isSafeInteger(seq) || seq < state.ackedSeq || seq > state.sentSeq) {
+      state.metrics.invalidAcks += 1;
+      if (Number.isSafeInteger(seq) && seq > state.sentSeq) {
+        requestResubscribe(ws, state, state.sessionId, 'invalid-ack');
+      }
+      return false;
+    }
+    if (seq === state.ackedSeq) return true;
+    if (!state.inFlight.some(frame => frame.kind === 'range' && frame.endSeq === seq)) {
+      state.metrics.invalidAcks += 1;
+      return false;
+    }
+    const released = freeRangeCredit(state, seq);
+    state.ackedSeq = seq;
+    noteConsumption(state, released.bytes, released.oldest);
+    return pumpRange(ws, state, session, session.outputSeq, false);
+  }
+
+  function deliverOutput(id) {
+    const session = getSession(id);
+    if (!session) return;
     for (const ws of clients) {
       const state = stateFor(ws);
       if (state.sessionId !== id || state.phase !== 'streaming') continue;
-      if (state.generation !== message.generation || !Number.isSafeInteger(state.nextSeq)) {
+      if (state.generation !== session.outputGeneration || !Number.isSafeInteger(state.sentSeq)) {
         requestResubscribe(ws, state, id, 'generation-changed');
         continue;
       }
-      if (state.nextSeq >= message.endSeq) continue;
-      if (state.nextSeq < message.startSeq) {
-        const session = getSession(id);
-        if (!session || !sendRingRange(
-          ws, state, session, id, state.nextSeq, message.startSeq, true,
-        )) {
-          if (state.phase !== 'backpressured' && state.phase !== 'awaiting-resubscribe') {
-            requestResubscribe(ws, state, id, 'buffer-gap');
-          }
-          continue;
-        }
-      }
-      const data = message.data.slice(state.nextSeq - message.startSeq);
-      if (!data) continue;
-      const startSeq = state.nextSeq;
-      if (sendTerminal(ws, { ...message, data, startSeq })) state.nextSeq = message.endSeq;
+      pumpRange(ws, state, session, session.outputSeq, false);
     }
   }
 
@@ -310,11 +615,7 @@ function createSessionStream({ clients, getSession, snapshot, applyResize }) {
     if (!batch) return;
     clearTimeout(batch.timer);
     session._networkBatch = null;
-    deliverOutput(id, {
-      type: 'output', id, data: batch.data,
-      generation: session.outputGeneration,
-      startSeq: batch.startSeq, endSeq: batch.endSeq,
-    });
+    deliverOutput(id);
   }
 
   function queueSegment(session, id, segment, startSeq, endSeq) {
@@ -322,12 +623,11 @@ function createSessionStream({ clients, getSession, snapshot, applyResize }) {
     if (!batch || batch.endSeq !== startSeq || batch.bytes + segment.bytes > BATCH_MAX_BYTES) {
       if (batch) flush(session, id);
       batch = session._networkBatch = {
-        data: '', bytes: 0, startSeq, endSeq: startSeq, timer: null,
+        bytes: 0, startSeq, endSeq: startSeq, timer: null,
       };
       batch.timer = setTimeout(() => flush(session, id), BATCH_DELAY_MS);
       batch.timer.unref?.();
     }
-    batch.data += segment.data;
     batch.bytes += segment.bytes;
     batch.endSeq = endSeq;
     if (batch.bytes >= BATCH_MAX_BYTES) flush(session, id);
@@ -370,12 +670,20 @@ function createSessionStream({ clients, getSession, snapshot, applyResize }) {
   function start() {
     if (!recoveryTimer) {
       recoveryTimer = setInterval(() => {
+        const now = Date.now();
         for (const ws of clients) {
           const state = stateFor(ws);
-          if (state.phase !== 'backpressured' || !ready(ws)
-            || Number(ws.bufferedAmount || 0) > BACKLOG_RECOVERY) continue;
-          state.phase = 'awaiting-resubscribe';
-          sendControl(ws, { type: 'session.resyncRequired', id: state.sessionId, reason: 'backpressure' });
+          if (state.phase === 'network-backpressured'
+            && ready(ws)
+            && Number(ws.bufferedAmount || 0) <= BACKLOG_RECOVERY) {
+            requestResubscribe(ws, state, state.sessionId, 'backpressure');
+            continue;
+          }
+          if ((state.phase === 'streaming' || state.phase === 'snapshotting')
+            && state.inFlightBytes > 0
+            && now - state.lastAckAt >= ACK_STALL_MS) {
+            requestResubscribe(ws, state, state.sessionId, 'ack-stall');
+          }
         }
       }, 100);
       recoveryTimer.unref?.();
@@ -405,6 +713,7 @@ function createSessionStream({ clients, getSession, snapshot, applyResize }) {
   }
 
   return {
+    acknowledge,
     claimResize,
     clearSession,
     queueOutput,
@@ -413,7 +722,13 @@ function createSessionStream({ clients, getSession, snapshot, applyResize }) {
     sendControl,
     stats: ws => {
       const state = stateFor(ws);
-      return { maximumBacklog: state.maximumBacklog, phase: state.phase };
+      return {
+        ...state.metrics,
+        currentUnackedBytes: state.inFlightBytes,
+        consumptionBytesPerSecond: Number.isFinite(state.consumptionBytesPerMs)
+          ? Math.round(state.consumptionBytesPerMs * 1000)
+          : 0,
+      };
     },
     start,
     stop,
@@ -426,12 +741,25 @@ function createSessionStream({ clients, getSession, snapshot, applyResize }) {
   };
 }
 
+function shouldCompressFrame(kind, bytes) {
+  return kind === 'replay'
+    || kind === 'snapshot'
+    || (kind === 'control' && bytes >= CONTROL_COMPRESSION_MIN_BYTES);
+}
+
 module.exports = {
+  ACK_STALL_MS,
+  APPLICATION_CREDIT_BYTES,
   BACKLOG_HIGH_WATER,
   BACKLOG_RECOVERY,
   BATCH_DELAY_MS,
   BATCH_MAX_BYTES,
+  CONTROL_COMPRESSION_MIN_BYTES,
+  FAST_DELTA_BYTES,
   HEARTBEAT_MS,
+  MAX_DELTA_BYTES,
+  RECOVERY_BUDGET_MS,
   bufferedSlice,
   createSessionStream,
+  shouldCompressFrame,
 };

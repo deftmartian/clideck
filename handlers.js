@@ -9,9 +9,9 @@ const presets = JSON.parse(readFileSync(join(__dirname, 'agent-presets.json'), '
 const { listDirs, binName, defaultShell } = require('./utils');
 const { presetForCommand: findPresetForCommand } = require('./preset-utils');
 const { PORT, localUrl } = require('./runtime');
-const { saveClipboardImage, bracketedPaste } = require('./clipboard-images');
 const { CLIENT_PROTOCOL_VERSION } = require('./protocol');
 const { CLIENT_BUILD_ID } = require('./client-build');
+const { TERMINAL_INPUT_MAX_BYTES } = require('./transport-limits');
 const grokHooks = require('./grok-hooks');
 for (const p of presets) if (p.presetId === 'shell') p.command = defaultShell;
 function isPresetEnabled(preset) {
@@ -363,6 +363,7 @@ function onConnection(ws) {
       case 'session.restart': console.log('[handler] session.restart', msg.id); sessions.restart(msg, ws, cfg); break;
       case 'session.subscribe':    sessions.subscribe(ws, msg); break;
       case 'session.unsubscribe':  sessions.unsubscribe(ws, msg.id); break;
+      case 'output.ack':           sessions.acknowledge(ws, msg); break;
       case 'transcript.cache.request':
         ws.send(JSON.stringify({ type: 'transcript.cache', cache: transcript.getCache() }));
         break;
@@ -371,23 +372,13 @@ function onConnection(ws) {
           sendControl({ type: 'transport.stats', ...sessions.streamStats(ws) });
         }
         break;
-      case 'input':                sessions.input(msg, ws); break;
-      case 'clipboard.image': {
-        const result = sessions.getSessions().has(String(msg.id || ''))
-          ? saveClipboardImage(msg)
-          : { success: false, error: 'No active session selected for image paste.' };
-        if (!result.success) {
-          ws.send(JSON.stringify({ type: 'clipboard.image.error', id: msg.id, error: result.error }));
+      case 'input':
+        if (Buffer.byteLength(String(msg.data || '')) > TERMINAL_INPUT_MAX_BYTES) {
+          sendControl({ type: 'error', message: 'Terminal input exceeds the 512 KiB safety limit.' });
           break;
         }
-        // Codex treats a pasted image path as an image attachment. Bracketed
-        // paste keeps this on the same path as ordinary terminal paste.
-        sessions.input({ id: msg.id, data: bracketedPaste(result.path) }, ws);
-        ws.send(JSON.stringify({
-          type: 'clipboard.image.saved', id: msg.id, path: result.path, bytes: result.bytes,
-        }));
+        sessions.input(msg, ws);
         break;
-      }
       case 'session.statusReport':
         if (sessions.getSessions().has(msg.id)) {
           sessions.broadcast({ type: 'session.status', id: msg.id, working: !!msg.working, source: 'client' });

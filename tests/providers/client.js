@@ -82,6 +82,13 @@ class Client {
         this.subscribe(msg.list[0].id, { replay: 'snapshot' });
       }
     }
+    else if (msg.type === 'session.sync') {
+      this.subscriptionId = msg.id;
+      this.streamId = msg.streamId;
+      if (msg.mode === 'current') {
+        this.cursors.set(msg.id, { generation: msg.generation, seq: msg.targetSeq });
+      }
+    }
     else if (msg.type === 'created') {
       if (this.autoSubscribe) this.subscribe(msg.id, { replay: 'snapshot' });
     }
@@ -101,15 +108,23 @@ class Client {
         this.output.set(msg.id, msg.data || '');
         this.cursors.set(msg.id, { generation: msg.generation, seq: msg.atSeq });
       }
+      this.send({
+        type: 'output.ack', id: msg.id, streamId: msg.streamId,
+        generation: msg.generation, seq: msg.part === msg.parts - 1 ? msg.atSeq : null,
+        part: msg.part,
+      });
     } else if (msg.type === 'output') {
       const text = msg.data != null ? msg.data : '';
       this.output.set(msg.id, (this.output.get(msg.id) || '') + text);
       if (msg.generation && Number.isSafeInteger(msg.endSeq)) {
         this.cursors.set(msg.id, { generation: msg.generation, seq: msg.endSeq });
+        this.send({
+          type: 'output.ack', id: msg.id, streamId: msg.streamId,
+          generation: msg.generation, seq: msg.endSeq,
+        });
       }
     } else if (msg.type === 'session.subscribed') {
       this.subscriptionId = msg.id;
-      this.cursors.set(msg.id, { generation: msg.generation, seq: msg.atSeq });
     } else if (msg.type === 'session.resyncRequired' && this.autoSubscribe && msg.id) {
       this.subscribe(msg.id, { replay: 'snapshot' });
     } else if (msg.type === 'session.status') {
@@ -126,6 +141,7 @@ class Client {
     this.subscriptionId = id;
     this.send({
       type: 'session.subscribe', id, replay,
+      strategy: replay === 'resume' ? 'auto' : 'snapshot',
       ...(replay === 'resume' && cursor ? { cursor } : {}),
       claimResize, cols, rows,
     });

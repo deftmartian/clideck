@@ -1,10 +1,13 @@
+'use strict';
+
 const {
   chmodSync,
+  createWriteStream,
   mkdirSync,
   readdirSync,
+  renameSync,
   statSync,
   unlinkSync,
-  writeFileSync,
 } = require('fs');
 const { join } = require('path');
 const crypto = require('crypto');
@@ -20,7 +23,11 @@ const IMAGE_MIME_EXT = new Map([
   ['image/webp', 'webp'],
   ['image/gif', 'gif'],
 ]);
-const MANAGED_IMAGE = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-[a-zA-Z0-9-]{1,8}(?:-[0-9a-f]{8})?\.(?:png|jpg|webp|gif)$/;
+const MANAGED_IMAGE = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-[a-zA-Z0-9-]{1,8}-[0-9a-f]{8}\.(?:png|jpg|webp|gif)$/;
+
+function normalizeImageMime(value) {
+  return String(value || '').toLowerCase().split(';')[0].trim();
+}
 
 function looksLikeImage(buf, mime) {
   if (!Buffer.isBuffer(buf) || buf.length < 6) return false;
@@ -51,6 +58,7 @@ function createClipboardImageStore(options = {}) {
   const maxImageBytes = options.maxImageBytes ?? DEFAULT_MAX_IMAGE_BYTES;
   const maxTotalBytes = options.maxTotalBytes ?? DEFAULT_MAX_TOTAL_BYTES;
   const maxAgeMs = options.maxAgeMs ?? DEFAULT_MAX_AGE_MS;
+  let commitTail = Promise.resolve();
 
   function ensureDirectory() {
     mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -90,56 +98,130 @@ function createClipboardImageStore(options = {}) {
     return total + incomingBytes <= maxTotalBytes;
   }
 
-  function save(msg) {
-    const id = String(msg.id || '');
-    const mime = String(msg.mime || '').toLowerCase().split(';')[0];
-    const ext = IMAGE_MIME_EXT.get(mime);
-    if (!ext) return { success: false, error: `Unsupported clipboard image type: ${mime || 'unknown'}.` };
-
-    const base64 = String(msg.data || '')
-      .replace(/^data:image\/[a-z0-9.+-]+;base64,/i, '')
-      .replace(/\s/g, '');
-    if (!base64 || !/^[A-Za-z0-9+/]+={0,2}$/.test(base64)) {
-      return { success: false, error: 'Clipboard image data was not valid base64.' };
-    }
-
-    const buf = Buffer.from(base64, 'base64');
-    if (!buf.length) return { success: false, error: 'Clipboard image was empty.' };
-    if (buf.length > maxImageBytes) {
-      return {
-        success: false,
-        error: `Clipboard image is too large (${Math.ceil(buf.length / 1024 / 1024)} MB).`,
-      };
-    }
-    if (!looksLikeImage(buf, mime)) {
-      return { success: false, error: `Clipboard data did not match ${mime}.` };
-    }
-
-    try {
-      if (!prune(buf.length)) {
-        return { success: false, error: 'Clipboard image storage is full.' };
-      }
-      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const sessionPart = id.replace(/[^a-zA-Z0-9-]/g, '').slice(0, 8) || 'session';
-      const nonce = crypto.randomUUID().slice(0, 8);
-      const filePath = join(directory, `${stamp}-${sessionPart}-${nonce}.${ext}`);
-      writeFileSync(filePath, buf, { mode: 0o600 });
-      return { success: true, path: filePath, bytes: buf.length };
-    } catch (error) {
-      return {
-        success: false,
-        error: `Clipboard image could not be stored: ${error.message || 'filesystem error'}`,
-      };
-    }
+  function withCommitLock(task) {
+    const result = commitTail.then(task, task);
+    commitTail = result.then(() => {}, () => {});
+    return result;
   }
 
-  return { save, prune };
+  function saveRequest(req, { id, mime, contentLength }) {
+    const normalizedMime = normalizeImageMime(mime);
+    const ext = IMAGE_MIME_EXT.get(normalizedMime);
+    if (!ext) {
+      req.resume?.();
+      return Promise.resolve({
+        success: false,
+        status: 415,
+        error: `Unsupported clipboard image type: ${normalizedMime || 'unknown'}.`,
+      });
+    }
+    if (Number.isFinite(contentLength) && contentLength > maxImageBytes) {
+      req.resume?.();
+      return Promise.resolve({ success: false, status: 413, error: 'Clipboard image is too large.' });
+    }
+
+    ensureDirectory();
+    const tempPath = join(directory, `.upload-${crypto.randomUUID()}.tmp`);
+    const output = createWriteStream(tempPath, { flags: 'wx', mode: 0o600 });
+    let bytes = 0;
+    let prefix = Buffer.alloc(0);
+    let complete = false;
+
+    return new Promise(resolve => {
+      function removeTemp() {
+        try { unlinkSync(tempPath); } catch {}
+      }
+
+      function finish(result, { drain = false } = {}) {
+        if (complete) return;
+        complete = true;
+        if (drain) req.resume?.();
+        try { output.destroy(); } catch {}
+        removeTemp();
+        resolve(result);
+      }
+
+      req.on('aborted', () => finish({ success: false, aborted: true, status: 499 }));
+      req.on('error', error => finish({
+        success: false,
+        status: 400,
+        error: `Clipboard image upload failed: ${error.message || 'request error'}`,
+      }));
+      output.on('error', error => finish({
+        success: false,
+        status: 500,
+        error: `Clipboard image could not be stored: ${error.message || 'filesystem error'}`,
+      }, { drain: true }));
+      output.on('drain', () => req.resume?.());
+      req.on('data', chunk => {
+        if (complete) return;
+        const data = Buffer.from(chunk);
+        bytes += data.length;
+        if (bytes > maxImageBytes) {
+          req.pause?.();
+          finish({ success: false, status: 413, error: 'Clipboard image is too large.' }, { drain: true });
+          return;
+        }
+        if (prefix.length < 12) prefix = Buffer.concat([prefix, data.subarray(0, 12 - prefix.length)]);
+        if (!output.write(data)) req.pause?.();
+      });
+      req.on('end', () => {
+        if (!complete) output.end();
+      });
+      output.on('finish', async () => {
+        if (complete) return;
+        if (!bytes) {
+          finish({ success: false, status: 400, error: 'Clipboard image was empty.' });
+          return;
+        }
+        if (Number.isFinite(contentLength) && bytes !== contentLength) {
+          finish({ success: false, status: 400, error: 'Clipboard image length did not match Content-Length.' });
+          return;
+        }
+        if (!looksLikeImage(prefix, normalizedMime)) {
+          finish({
+            success: false,
+            status: 415,
+            error: `Clipboard data did not match ${normalizedMime}.`,
+          });
+          return;
+        }
+        const committed = await withCommitLock(() => {
+          if (!prune(bytes)) return null;
+          const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+          const sessionPart = String(id || '').replace(/[^a-zA-Z0-9-]/g, '').slice(0, 8) || 'session';
+          const nonce = crypto.randomUUID().slice(0, 8);
+          const path = join(directory, `${stamp}-${sessionPart}-${nonce}.${ext}`);
+          renameSync(tempPath, path);
+          chmodSync(path, 0o600);
+          return path;
+        }).catch(error => ({ error }));
+        if (!committed) {
+          finish({ success: false, status: 507, error: 'Clipboard image storage is full.' });
+          return;
+        }
+        if (committed.error) {
+          finish({
+            success: false,
+            status: 500,
+            error: `Clipboard image could not be stored: ${committed.error.message || 'filesystem error'}`,
+          });
+          return;
+        }
+        complete = true;
+        resolve({ success: true, path: committed, bytes });
+      });
+    });
+  }
+
+  return { directory, maxImageBytes, prune, saveRequest };
 }
 
-const defaultStore = createClipboardImageStore();
-
 module.exports = {
+  DEFAULT_MAX_IMAGE_BYTES,
+  IMAGE_MIME_EXT,
   bracketedPaste,
   createClipboardImageStore,
-  saveClipboardImage: defaultStore.save,
+  looksLikeImage,
+  normalizeImageMime,
 };

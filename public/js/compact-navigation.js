@@ -1,7 +1,7 @@
 import { state } from './state.js';
 import { TOUCH_FIRST_MEDIA } from './touch-ui.js';
 
-export function initCompactNavigation({ reconnect, suspend, setConnectionState, onHidden, onVisible }) {
+export function initCompactNavigation({ foreground, suspend, setConnectionState, onHidden }) {
   const compactLayoutQuery = window.matchMedia(`(max-width: 960px), ${TOUCH_FIRST_MEDIA}`);
   const close = () => document.body.classList.remove('mobile-nav-open');
 
@@ -12,19 +12,15 @@ export function initCompactNavigation({ reconnect, suspend, setConnectionState, 
   document.getElementById('mobile-sidebar-backdrop').addEventListener('click', close);
   compactLayoutQuery.addEventListener('change', event => { if (!event.matches) close(); });
 
-  let backgroundedAt = 0;
   let windowBlurredAt = 0;
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') {
-      backgroundedAt = Date.now();
       onHidden?.();
       return;
     }
     close();
     windowBlurredAt = 0;
-    if (!backgroundedAt || Date.now() - backgroundedAt >= 1000) reconnect();
-    onVisible?.();
-    backgroundedAt = 0;
+    foreground?.();
   });
   window.addEventListener('blur', () => {
     if (document.visibilityState === 'visible') windowBlurredAt = Date.now();
@@ -39,22 +35,22 @@ export function initCompactNavigation({ reconnect, suspend, setConnectionState, 
       && Date.now() - blurredAt >= 1000
       && (!state.ws || state.ws.readyState !== WebSocket.OPEN)
     ) {
-      reconnect();
+      foreground?.();
     }
   });
   window.addEventListener('pageshow', event => {
     close();
-    if (event.persisted) reconnect();
+    if (event.persisted) foreground?.();
   });
   window.addEventListener('online', () => {
     setConnectionState('reconnecting');
-    reconnect();
+    foreground?.();
   });
   window.addEventListener('offline', () => {
     suspend('browser offline');
     setConnectionState('offline');
   });
-  window.addEventListener('clideck:retry-connection', reconnect);
+  window.addEventListener('clideck:retry-connection', () => foreground?.());
   if (screen.orientation?.addEventListener) {
     screen.orientation.addEventListener('change', close);
   } else {

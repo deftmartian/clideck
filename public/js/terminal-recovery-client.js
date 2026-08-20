@@ -1,84 +1,224 @@
-import {
-  commitTerminalReplay,
-  noteTerminalLiveOutput,
-  planTerminalReplay,
-} from './terminal-recovery.js';
+import { countPerf, maxPerf, notePerf } from './perf.js';
 
-export function createTerminalRecoveryClient({ requestResync }) {
+function byteLength(value) {
+  return new TextEncoder().encode(String(value || '')).byteLength;
+}
+
+function sequenceMetadata(message, data) {
+  const generation = String(message?.generation || '');
+  const startSeq = Number(message?.startSeq);
+  const endSeq = Number(message?.endSeq);
+  if (!generation
+    || !Number.isSafeInteger(startSeq)
+    || !Number.isSafeInteger(endSeq)
+    || startSeq < 0
+    || endSeq < startSeq
+    || endSeq - startSeq !== String(data || '').length) return null;
+  return { generation, startSeq, endSeq };
+}
+
+export function createTerminalRecoveryClient({ requestResync, sendAck, onCurrent }) {
   const warnedSessions = new Set();
 
-  function requestResyncOnce(sessionId, recovery) {
-    if (
-      (recovery.status !== 'gap' && recovery.status !== 'legacy-gap')
-      || warnedSessions.has(sessionId)
-    ) return;
+  function requestResyncOnce(sessionId, reason) {
+    if (warnedSessions.has(sessionId)) return;
     warnedSessions.add(sessionId);
-    requestResync(sessionId, recovery.status);
+    requestResync(sessionId, reason);
+  }
+
+  function flushAck(entry) {
+    if (!entry?.pendingAck) return;
+    const payload = entry.pendingAck;
+    entry.pendingAck = null;
+    if (entry.ackRaf) cancelAnimationFrame(entry.ackRaf);
+    entry.ackRaf = null;
+    sendAck(payload);
+  }
+
+  function scheduleAck(entry, payload, immediate = false) {
+    entry.pendingAck = payload;
+    if (immediate) {
+      flushAck(entry);
+      return;
+    }
+    if (entry.ackRaf) return;
+    entry.ackRaf = requestAnimationFrame(() => {
+      entry.ackRaf = null;
+      flushAck(entry);
+    });
+  }
+
+  function maybeCurrent(entry) {
+    if (!entry
+      || entry.syncCurrent
+      || !Number.isSafeInteger(entry.syncTargetSeq)
+      || !Number.isSafeInteger(entry.appliedSeq)
+      || entry.appliedSeq < entry.syncTargetSeq) return false;
+    entry.syncCurrent = true;
+    notePerf('terminalParseComplete', {
+      id: entry.id,
+      mode: entry.syncMode,
+      streamId: entry.streamId,
+    });
+    onCurrent?.(entry);
+    return true;
+  }
+
+  function noteQueued(entry, data) {
+    const bytes = byteLength(data);
+    entry.unparsedBytes = (entry.unparsedBytes || 0) + bytes;
+    entry.writeQueueDepth = (entry.writeQueueDepth || 0) + 1;
+    countPerf('terminalBytesReceived', bytes);
+    maxPerf('maximumUnparsedBytes', entry.unparsedBytes);
+    maxPerf('maximumWriteQueueDepth', entry.writeQueueDepth);
+    return bytes;
+  }
+
+  function write(entry, data, replay, callback) {
+    const bytes = noteQueued(entry, data);
+    const complete = () => {
+      entry.unparsedBytes = Math.max(0, (entry.unparsedBytes || 0) - bytes);
+      entry.writeQueueDepth = Math.max(0, (entry.writeQueueDepth || 0) - 1);
+      countPerf('terminalBytesApplied', bytes);
+      callback();
+    };
+    if (!data) {
+      complete();
+      return;
+    }
+    if (!entry.queue(data, replay, complete)) entry.writeChunk(data, replay, complete);
+  }
+
+  function handleSync(entry, message) {
+    if (!entry || !Number.isSafeInteger(message.streamId)
+      || !Number.isSafeInteger(message.targetSeq)) return false;
+    warnedSessions.delete(message.id);
+    entry.id = message.id;
+    entry.streamId = message.streamId;
+    entry.outputGeneration = message.generation;
+    entry.syncTargetSeq = message.targetSeq;
+    entry.syncMode = message.mode;
+    entry.syncCurrent = false;
+    entry.pendingSnapshot = null;
+    countPerf(`terminalSyncMode.${message.mode || 'unknown'}`);
+    if (Number.isFinite(message.deltaBytes)) countPerf('deltaBytes', message.deltaBytes);
+    if (Number.isFinite(message.snapshotBytes)) countPerf('snapshotBytes', message.snapshotBytes);
+    notePerf('terminalSyncStarted', {
+      id: message.id,
+      mode: message.mode,
+      streamId: message.streamId,
+    });
+    return maybeCurrent(entry);
   }
 
   function handleOutput(ws, entry, message) {
-    let output = message.data;
-    if (message.replay && entry) {
-      const recovery = planTerminalReplay(entry, output, message);
-      output = recovery.data;
-      commitTerminalReplay(entry, recovery);
-      requestResyncOnce(message.id, recovery);
+    if (!entry?.term || message.streamId !== entry.streamId) return '';
+    const incoming = String(message.data || '');
+    const sequence = sequenceMetadata(message, incoming);
+    if (!sequence || sequence.generation !== entry.outputGeneration) {
+      requestResyncOnce(message.id, 'output-metadata-gap');
+      return '';
     }
-    if (entry?.term && output && !entry.queue(output, !!message.replay)) {
-      entry.writeChunk(output, !!message.replay);
+    const cursor = Number.isSafeInteger(entry.receivedSeq)
+      ? entry.receivedSeq
+      : (Number.isSafeInteger(entry.appliedSeq) ? entry.appliedSeq : sequence.startSeq);
+    if (cursor < sequence.startSeq || cursor > sequence.endSeq) {
+      requestResyncOnce(message.id, 'output-sequence-gap');
+      return '';
     }
-    if (entry && !message.replay) noteTerminalLiveOutput(entry, message.data, message);
+    if (cursor === sequence.endSeq) return '';
+    const output = incoming.slice(cursor - sequence.startSeq);
+    entry.receivedSeq = sequence.endSeq;
+    const streamId = entry.streamId;
+    write(entry, output, !!message.replay, () => {
+      if (entry.streamId !== streamId || entry.outputGeneration !== sequence.generation) return;
+      entry.appliedSeq = sequence.endSeq;
+      entry.lastOutputSeq = sequence.endSeq;
+      entry.replayInitialized = true;
+      const reachesTarget = Number.isSafeInteger(entry.syncTargetSeq)
+        && entry.appliedSeq >= entry.syncTargetSeq;
+      scheduleAck(entry, {
+        type: 'output.ack',
+        streamId,
+        id: message.id,
+        generation: sequence.generation,
+        seq: sequence.endSeq,
+      }, reachesTarget);
+      maybeCurrent(entry);
+    });
     return output;
   }
 
   function handleSnapshot(entry, message) {
-    if (!entry?.term) return false;
-    let snapshot = message;
-    if (Number.isSafeInteger(message.parts) && message.parts > 1) {
-      if (message.part === 0) {
-        entry.pendingSnapshot = {
-          generation: message.generation,
-          atSeq: message.atSeq,
-          cols: message.cols,
-          rows: message.rows,
-          parts: message.parts,
-          data: [],
-        };
-      }
-      const pending = entry.pendingSnapshot;
-      if (!pending
-        || pending.generation !== message.generation
-        || pending.atSeq !== message.atSeq
-        || pending.parts !== message.parts
-        || message.part !== pending.data.length) {
-        entry.pendingSnapshot = null;
-        requestResync(message.id, 'snapshot-part-gap');
-        return false;
-      }
-      pending.data.push(String(message.data || ''));
-      if (pending.data.length < pending.parts) return false;
-      snapshot = { ...pending, data: pending.data.join('') };
-      entry.pendingSnapshot = null;
-    } else {
-      entry.pendingSnapshot = null;
+    if (!entry?.term || message.streamId !== entry.streamId
+      || message.generation !== entry.outputGeneration) return false;
+    const part = Number(message.part);
+    const parts = Number(message.parts);
+    if (!Number.isSafeInteger(part) || !Number.isSafeInteger(parts)
+      || parts < 1 || part < 0 || part >= parts) {
+      requestResyncOnce(message.id, 'snapshot-part-gap');
+      return false;
     }
-    warnedSessions.delete(message.id);
-    try { entry.term.reset(); } catch {}
-    entry.replayInitialized = true;
-    entry.outputGeneration = snapshot.generation;
-    entry.lastOutputSeq = snapshot.atSeq;
-    const data = String(snapshot.data || '');
-    if (data && !entry.queue(data, true)) entry.writeChunk(data, true);
-    return true;
+    if (part === 0) {
+      try { entry.term.reset(); } catch {}
+      entry.pendingSnapshot = {
+        streamId: message.streamId,
+        generation: message.generation,
+        atSeq: message.atSeq,
+        parts,
+        nextPart: 0,
+        appliedPart: -1,
+      };
+      entry.receivedSeq = null;
+      entry.appliedSeq = null;
+      entry.lastOutputSeq = null;
+    }
+    const pending = entry.pendingSnapshot;
+    if (!pending
+      || pending.streamId !== message.streamId
+      || pending.generation !== message.generation
+      || pending.atSeq !== message.atSeq
+      || pending.parts !== parts
+      || part !== pending.nextPart) {
+      entry.pendingSnapshot = null;
+      requestResyncOnce(message.id, 'snapshot-part-gap');
+      return false;
+    }
+    pending.nextPart += 1;
+    const data = String(message.data || '');
+    const streamId = entry.streamId;
+    write(entry, data, true, () => {
+      if (entry.streamId !== streamId || entry.pendingSnapshot !== pending) return;
+      pending.appliedPart = part;
+      const final = part === parts - 1;
+      if (final) {
+        entry.receivedSeq = message.atSeq;
+        entry.appliedSeq = message.atSeq;
+        entry.lastOutputSeq = message.atSeq;
+        entry.replayInitialized = true;
+      }
+      scheduleAck(entry, {
+        type: 'output.ack',
+        streamId,
+        id: message.id,
+        generation: message.generation,
+        seq: final ? message.atSeq : null,
+        part,
+      }, final);
+      if (final) {
+        entry.pendingSnapshot = null;
+        notePerf('terminalSnapshotComplete', { id: message.id, streamId });
+        maybeCurrent(entry);
+      }
+    });
+    return part === parts - 1;
   }
 
   function handleSubscribed(entry, message) {
-    if (!entry) return;
+    if (!entry || message.streamId !== entry.streamId) return false;
     warnedSessions.delete(message.id);
-    entry.replayInitialized = true;
-    entry.outputGeneration = message.generation;
-    entry.lastOutputSeq = message.atSeq;
+    return maybeCurrent(entry);
   }
 
-  return { handleOutput, handleSnapshot, handleSubscribed };
+  return { handleOutput, handleSnapshot, handleSubscribed, handleSync };
 }

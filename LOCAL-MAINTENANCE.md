@@ -9,8 +9,8 @@ objective is to keep the fork's behavior while making each divergence either a
 narrow upstream fix, a bounded feature series, configurable provider policy,
 or explicitly fork-only documentation.
 
-Against that upstream commit, the branch changes 112 paths: 38 modified
-upstream paths, 73 added paths, and one deleted generated asset. New modules,
+Against that upstream commit, the current protocol-v4 worktree changes 132
+paths: 40 modified upstream paths, 91 added paths, and one deleted generated asset. New modules,
 tests, and build assets account for most of the growth. The merge-sensitive
 core files remain adapter entry points rather than owners of transport,
 renderer, capture, static-delivery, or local-policy implementations.
@@ -28,8 +28,9 @@ renderer, capture, static-delivery, or local-policy implementations.
 | `server-static.js` | `tools/build-client.js`, `public/build/` | deterministic ESM bundling, lazy WebGL, compressed representations, immutable hashes, and build identity |
 | upstream spawn/ask helpers | `session-ask.js`, `session-spawn.js`, `clideck-spawn-cli.js` | existing-session protection, bounded worker creation, prompt validation, and worktree setup |
 
-The upstream copies of `http-util.js` and `public/js/hotkeys.js` are now
-byte-for-byte unchanged. `session-ask.js` retains a narrow local policy that
+The upstream copy of `http-util.js` remains byte-for-byte unchanged.
+`public/js/hotkeys.js` has one clipboard-fallback integration change.
+`session-ask.js` retains a narrow local policy that
 prevents agents from interrupting user-owned sessions and exposes the shared
 answer-wait helper used by bounded spawned workers. The current upstream merge
 to `da845b0` applied cleanly. An earlier isolation merge conflicted in
@@ -135,6 +136,38 @@ The production audit reported zero vulnerabilities. Live phone testing of the
 deployed archived build was good so far; the refactored candidate remains
 subject to the exact post-upgrade phone checklist after a future deployment.
 
+## Protocol v4 refinement (2026-08-20)
+
+Protocol v4 retains the single control/terminal WebSocket introduced by v3 but
+stops replacing a healthy socket on foreground return. Hidden tabs unsubscribe
+from terminal bytes while retaining control metadata. Visibility return reuses
+the socket and treats the subscription response as a two-second liveness probe.
+Subscriptions now choose current, delta, or snapshot from the browser's last
+xterm-applied cursor. Each stream has an identity; browser-parse ACKs release a
+128 KiB application credit window independently of the 1 MiB network emergency
+bound. The server uses the observed consumption rate to refine the initial
+64/256 KiB adaptive synchronization thresholds.
+
+Clipboard images moved from base64 WebSocket JSON to a same-origin raw HTTP
+endpoint with 25 MiB per-image, two-upload concurrency, 256 MiB total-store,
+30-day retention, private modes, magic validation, atomic commit, and abort
+cleanup. The remaining WebSocket inbound limit is 1 MiB and terminal input is
+limited to 512 KiB. The binary terminal-frame candidate failed its frozen
+small-interactive gate, so production stays on JSON. Compression is selective:
+snapshot/replay and control frames at least 16 KiB opt in; live terminal output
+does not.
+
+Bundled plugins are refreshed by content even when their manifest version did
+not change, and client imports carry a content-derived revision query. This
+repairs upgraded installations whose persisted Trim Clip client predates the
+current package and prevents the F8/scissors module from remaining stale.
+
+The final design, limits, benchmarks, cache contract, and real-device matrix
+are in `docs/transport-v4.md`. Isolated five-sample Chromium/Firefox profiles
+clear the latency budgets. A five-minute hidden desktop run returned in 30 ms
+with zero terminal bytes and zero new handshakes. Peak unacknowledged terminal
+data was exactly 128 KiB, and stale/invalid ACKs and forced resyncs were zero.
+
 ## Conflict surface
 
 Changed lines are additions plus deletions against the stated upstream commit.
@@ -166,28 +199,30 @@ surface after extracting renderer and capture coordination:
 
 | Upstream-owned hotspot | Changed lines | Hunks | Extracted owner |
 | --- | ---: | ---: | --- |
-| `public/js/app.js` | 209 | 29 | connection, recovery, clipboard, and compact-navigation clients |
-| `public/js/terminals.js` | 384 | 32 | terminal-local and terminal-renderer modules |
-| `server.js` | 63 | 14 | HTTP, static-delivery, and protocol-gate modules |
+| `public/js/app.js` | 253 | 33 | connection, recovery, clipboard, and compact-navigation clients |
+| `public/js/terminals.js` | 418 | 34 | terminal-local and terminal-renderer modules |
+| `server.js` | 90 | 17 | HTTP, static-delivery, and protocol-gate modules |
 | `config.js` | 21 | 7 | config-local provider policy |
-| `handlers.js` | 153 | 14 | protocol, build, clipboard, and Grok adapters |
-| `sessions.js` | 257 | 46 | server-capture, session-capture, and session-stream modules |
-| **Total** | **1,087** | **142** | |
+| `handlers.js` | 144 | 12 | protocol, build, clipboard, and Grok adapters |
+| `sessions.js` | 258 | 46 | server-capture, session-capture, and session-stream modules |
+| **Total** | **1,184** | **149** | |
 
-The larger total is expected because protocol v3 is a substantial cross-stack
+The larger total is expected because protocol v4 is a substantial cross-stack
 feature, not because the earlier isolation regressed. The implementation-heavy
-owners are new fork files: `public/js/terminal-local.js` (297 lines),
-`public/js/terminal-renderer.js` (185), `server-capture.js` (257),
-`session-capture.js` (151), and `session-stream.js` (437). Treat the transport
+owners are new fork files: `public/js/terminal-local.js` (313 lines),
+`public/js/terminal-renderer.js` (190), `server-capture.js` (257),
+`session-capture.js` (151), `session-stream.js` (765), and
+`public/js/terminal-recovery-client.js` (224). Treat the transport
 stack as an upstream design/feature series, never as one opportunistic bug-fix
 PR.
 
-## Current divergence classification
+## Divergence classification
 
-This is the exhaustive inventory against upstream `da845b0`. Each of the 112
-divergent paths appears exactly once; mixed files are assigned by their dominant
-remaining responsibility. Regenerate the inventory and metrics after every
-upstream merge.
+The base inventory records the 112-path protocol-v3 candidate. The following
+20-path protocol-v4 addition completes the current 132-path inventory against
+upstream `da845b0`. Mixed files are assigned by their dominant remaining
+responsibility. Regenerate both blocks and the metrics after every upstream
+merge.
 
 - **Narrow upstreamable fix** is generic and independently reviewable.
 - **Configurable provider policy** should remain data/environment gated unless
@@ -206,6 +241,25 @@ upstream merge.
 | Plugin/module candidate (6) | `clipboard-images.js`<br>`plugins/trim-clip/clideck-plugin.json`<br>`plugins/trim-clip/client.js`<br>`public/js/clipboard-client.js`<br>`public/js/terminal-clipboard.js`<br>`tests/clipboard-images.test.js` | Keep optional clipboard behavior behind the existing plugin/module seams; upstream the smallest missing seam before the feature. |
 | Fork-only maintenance and evidence (5) | `.npmignore`<br>`LOCAL-MAINTENANCE.md`<br>`README.md`<br>`docs/mobile-transport-baseline.md`<br>`docs/mobile-transport-repair.md` | Describe the fork branch, its provenance, measured budgets, and release gates. These paths are not upstream PR candidates. |
 <!-- divergence-inventory:end -->
+
+### Protocol-v4 and newly exposed additions (20)
+
+- **Upstream feature series (11):** `connection-lifecycle.js`,
+  `origin-policy.js`, `public/js/protocol-version.js`,
+  `tests/connection-lifecycle.test.js`,
+  `tests/terminal-frame-candidate.test.js`,
+  `tests/terminal-recovery-client.test.js`, `tests/websocket-limits.test.js`,
+  `tools/benchmark-terminal-codec.js`,
+  `tools/benchmark-websocket-compression.js`,
+  `tools/terminal-frame-candidate.js`, and `transport-limits.js`.
+- **Plugin/module candidate (5):** `clipboard-image-http.js`,
+  `plugin-loader.js`, `public/js/hotkeys.js`,
+  `tests/bundled-plugin-sync.test.js`, and
+  `tests/clipboard-image-http.test.js`.
+- **Fork-only evidence (4):** `docs/transport-v4.md`,
+  `docs/transport-v4-baseline.md`,
+  `docs/transport-v4-binary-gate.md`, and
+  `docs/transport-v4-compression.md`.
 
 ## Public branch hygiene
 

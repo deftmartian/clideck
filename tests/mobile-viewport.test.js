@@ -170,6 +170,7 @@ test('mobile Select mode owns drag only while armed and uses xterm public select
   const clipboard = read('public/js/terminal-clipboard.js');
   const touchScroll = read('public/js/mobile-touch-scroll.js');
   const trimClip = read('plugins/trim-clip/client.js');
+  const app = read('public/js/app.js');
 
   assert.match(index, /id="mobile-selection-toggle"[^>]*aria-pressed="false"/);
   assert.match(index, /id="mobile-selection-actions"[^>]*aria-hidden="true"/);
@@ -183,9 +184,13 @@ test('mobile Select mode owns drag only while armed and uses xterm public select
   assert.match(selection, /removeEventListener\('touchmove', onTouchMove, touchOptions\)/);
   assert.match(selection, /term\.getSelection\(\)/);
   assert.match(clipboard, /map\(line => line\.trimEnd\(\)\)/);
+  assert.match(clipboard, /if \(!clipboard\?\.writeText\)/);
+  assert.match(clipboard, /documentRef\.execCommand\('copy'\)/);
   assert.match(selection, /copyTrimmedTerminalSelection\(text, writeText\)/);
   assert.match(trimClip, /apiRef\.copyTrimmedTerminalSelection\(text\)/);
   assert.doesNotMatch(trimClip, /from ['"]\/js\//);
+  assert.match(app, /client\.js\?v=\$\{revision\}/);
+  assert.match(app, /loadedPlugins\.delete\(plugin\.id\)/);
   assert.match(touchScroll, /onTap\?\.\(id, term, screen, touch\)/);
   assert.match(terminalLocal, /onTap:[\s\S]{0,160}activateTerminalLinkAtPoint/);
   assert.match(terminalLocal, /new MouseEvent\('mousemove'/);

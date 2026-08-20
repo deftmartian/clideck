@@ -712,6 +712,7 @@ module.exports = {
   unregisterClient: stream.unregister,
   subscribe: stream.subscribe,
   unsubscribe: stream.unsubscribe,
+  acknowledge: stream.acknowledge,
   claimResize: stream.claimResize,
   sendControl: stream.sendControl,
   streamStats: stream.stats,

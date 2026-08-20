@@ -10,7 +10,45 @@ const transcript = require('./transcript');
 const PLUGINS_DIR = join(DATA_DIR, 'plugins');
 mkdirSync(PLUGINS_DIR, { recursive: true });
 
-// Seed bundled plugins — copy if missing, update if bundled version is newer
+function installInputHash(dir) {
+  const hash = createHash('sha256');
+  for (const file of ['package.json', 'package-lock.json']) {
+    try { hash.update(readFileSync(join(dir, file))); } catch {}
+  }
+  return hash.digest('hex');
+}
+
+function bundledFiles(dir, relative = '') {
+  const files = [];
+  for (const entry of readdirSync(join(dir, relative), { withFileTypes: true })) {
+    if (entry.name === 'node_modules') continue;
+    const child = join(relative, entry.name);
+    if (entry.isDirectory()) files.push(...bundledFiles(dir, child));
+    else if (entry.isFile()) files.push(child);
+  }
+  return files.sort();
+}
+
+function bundledFilesMatch(source, target) {
+  return bundledFiles(source).every(file => {
+    const installed = join(target, file);
+    if (!existsSync(installed)) return false;
+    try { return readFileSync(join(source, file)).equals(readFileSync(installed)); }
+    catch { return false; }
+  });
+}
+
+function clientRevision(dir) {
+  try {
+    return createHash('sha256').update(readFileSync(join(dir, 'client.js'))).digest('hex').slice(0, 16);
+  } catch {
+    return '';
+  }
+}
+
+// Bundled plugin files are app-owned. Their persisted copies are runtime caches
+// (settings live in config.json), so refresh managed files whenever package
+// contents change—even if a release accidentally retained the same version.
 const BUNDLED_DIR = join(__dirname, 'plugins');
 const depsChanged = new Set(); // plugins whose install inputs changed — need reinstall
 if (existsSync(BUNDLED_DIR)) {
@@ -22,27 +60,26 @@ if (existsSync(BUNDLED_DIR)) {
       console.log(`[plugin] seeded ${entry.name}`);
     } else {
       try {
-        const bundledManifest = JSON.parse(readFileSync(join(BUNDLED_DIR, entry.name, 'clideck-plugin.json'), 'utf8'));
+        const source = join(BUNDLED_DIR, entry.name);
+        const bundledManifest = JSON.parse(readFileSync(join(source, 'clideck-plugin.json'), 'utf8'));
         const installedManifestFile = existsSync(join(target, 'clideck-plugin.json')) ? join(target, 'clideck-plugin.json') : join(target, 'termix-plugin.json');
-        const installedManifest = JSON.parse(readFileSync(installedManifestFile, 'utf8'));
-        if (bundledManifest.version !== installedManifest.version) {
-          // Check if install inputs changed before copying
-          let needsReinstall = false;
-          if (bundledManifest.install) {
-            const installHash = (dir) => {
-              const h = createHash('sha256');
-              for (const f of ['package.json', 'package-lock.json']) {
-                try { h.update(readFileSync(join(dir, f))); } catch {}
-              }
-              return h.digest('hex');
-            };
-            needsReinstall = installHash(target) !== installHash(join(BUNDLED_DIR, entry.name));
-          }
-          cpSync(join(BUNDLED_DIR, entry.name), target, { recursive: true });
+        let installedVersion = 'unknown';
+        try {
+          installedVersion = JSON.parse(readFileSync(installedManifestFile, 'utf8')).version || installedVersion;
+        } catch {}
+        if (!bundledFilesMatch(source, target)) {
+          const needsReinstall = !!bundledManifest.install
+            && installInputHash(target) !== installInputHash(source);
+          cpSync(source, target, { recursive: true });
           if (needsReinstall) depsChanged.add(bundledManifest.id || entry.name);
-          console.log(`[plugin] updated ${entry.name} ${installedManifest.version} → ${bundledManifest.version}`);
+          const versionChange = installedVersion === bundledManifest.version
+            ? `refreshed ${bundledManifest.version}`
+            : `updated ${installedVersion} → ${bundledManifest.version}`;
+          console.log(`[plugin] ${versionChange} ${entry.name}`);
         }
-      } catch {}
+      } catch (error) {
+        console.error(`[plugin] could not refresh bundled ${entry.name}: ${error.message}`);
+      }
     }
   }
 }
@@ -464,6 +501,7 @@ function getInfo() {
     actions: p.actions,
     capabilities: capabilitiesFor(p.manifest.id),
     hasClient: existsSync(join(p.dir, 'client.js')),
+    clientRevision: clientRevision(p.dir),
     bundled: BUNDLED_IDS.has(p.manifest.id),
     installed: true,
   }));
@@ -487,7 +525,10 @@ function getInfo() {
 }
 
 function resolveFile(urlPath) {
-  const m = urlPath.match(/^\/plugins\/([^/]+)\/(.+)$/);
+  let pathname;
+  try { pathname = new URL(urlPath, 'http://clideck.local').pathname; }
+  catch { return null; }
+  const m = pathname.match(/^\/plugins\/([^/]+)\/(.+)$/);
   if (!m) return null;
   const [, id, rest] = m;
   const plugin = plugins.get(id);

@@ -14,7 +14,7 @@ import { registerHotkey, unregisterHotkey, unregisterAllForPlugin } from './hotk
 import { renderPrompts } from './prompts.js';
 import { registerPwa } from './pwa.js';
 import { initClipboardClient } from './clipboard-client.js';
-import { copyTrimmedTerminalSelection } from './terminal-clipboard.js';
+import { copyTrimmedTerminalSelection, writeClipboardText } from './terminal-clipboard.js';
 import { initCompactNavigation } from './compact-navigation.js';
 import { createConnectionClient } from './connection-client.js';
 import { createTerminalRecoveryClient } from './terminal-recovery-client.js';
@@ -49,34 +49,74 @@ function playAskDispatchSound(msg) {
 }
 
 const connectionClient = createConnectionClient({ connect: () => connect() });
+let latestSocketOpenedAt = performance.now();
+let foregroundResumeStartedAt = null;
 const {
   flashSaveIndicator,
-  reconnect: reconnectForegroundSocket,
+  forceReconnect: reconnectForegroundSocket,
+  noteResponse: noteSocketResponse,
+  resumeForeground: resumeForegroundSocket,
   setConnectionState: setServerConnectionState,
   suspend: suspendSocket,
+  watchForegroundResponse,
 } = connectionClient;
+
+function foregroundTerminal() {
+  foregroundResumeStartedAt = performance.now();
+  notePerf('foregroundResumeStarted');
+  const disposition = resumeForegroundSocket();
+  if (disposition === 'reuse') {
+    notePerf('socketReused');
+    if (watchForegroundResponse() && !resumeActiveTerminal()) noteSocketResponse(state.ws);
+  } else if (disposition === 'connect') {
+    notePerf('socketReconnectRequired');
+  }
+}
 function requestTerminalSnapshot(id) {
   const entry = state.terms.get(id);
   if (state.active !== id || !entry?.term || document.visibilityState === 'hidden') return false;
   return send({
-    type: 'session.subscribe', id, replay: 'snapshot', claimResize: true,
+    type: 'session.subscribe', id, strategy: 'snapshot', claimResize: true,
     cols: entry.term.cols, rows: entry.term.rows,
   });
 }
 const terminalRecovery = createTerminalRecoveryClient({
   requestResync: requestTerminalSnapshot,
+  sendAck: message => send(message),
+  onCurrent: entry => {
+    const parsedAt = performance.now();
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      // Animation-frame callbacks run before the frame is rendered. Move the
+      // marker to the next task so any xterm/WebGL paint work for this frame is
+      // complete before the terminal is declared current.
+      setTimeout(() => {
+        notePerf('terminalCurrentPainted', {
+          id: entry.id,
+          mode: entry.syncMode,
+          streamId: entry.streamId,
+        });
+        timePerf('webSocketToTerminalMs', latestSocketOpenedAt);
+        if (Number.isFinite(foregroundResumeStartedAt)) {
+          timePerf('foregroundToCurrentMs', foregroundResumeStartedAt);
+          foregroundResumeStartedAt = null;
+        }
+        countPerf('terminalPaintDelayMs', performance.now() - parsedAt);
+      }, 0);
+    }));
+  },
 });
 
 function connect() {
   const connectStartedAt = performance.now();
   let socketOpenedAt = connectStartedAt;
-  let terminalTimingRecorded = false;
   const ws = connectionClient.openSocket();
   if (!ws) return;
 
   ws.onopen = () => {
     socketOpenedAt = performance.now();
+    latestSocketOpenedAt = socketOpenedAt;
     notePerf('webSocketOpen');
+    countPerf('healthySocketOpenCount');
   };
 
   ws.onmessage = ({ data }) => {
@@ -84,6 +124,7 @@ function connect() {
     countPerf('wsFramesReceived');
     countPerf('wsBytesReceived', typeof data === 'string' ? data.length : (data?.byteLength || 0));
     const msg = JSON.parse(data);
+    noteSocketResponse(ws);
     switch (msg.type) {
       case 'config': {
         const firstConfigForSocket = connectionClient.acceptServerConfig(ws, msg.config);
@@ -156,24 +197,22 @@ function connect() {
         updatePreview(msg.id);
         break;
       }
+      case 'session.sync': {
+        terminalRecovery.handleSync(state.terms.get(msg.id), msg);
+        break;
+      }
       case 'session.activity':
         noteSessionActivity(msg.id, msg);
         break;
       case 'session.snapshot': {
         const entry = state.terms.get(msg.id);
-        if (terminalRecovery.handleSnapshot(entry, msg)) {
-          notePerf('terminalSnapshotComplete', { id: msg.id });
-        }
+        terminalRecovery.handleSnapshot(entry, msg);
         updatePreview(msg.id);
         break;
       }
       case 'session.subscribed': {
         terminalRecovery.handleSubscribed(state.terms.get(msg.id), msg);
         notePerf('terminalSubscribed', { id: msg.id, mode: msg.mode, reason: msg.reason });
-        if (!terminalTimingRecorded) {
-          terminalTimingRecorded = true;
-          timePerf('webSocketToTerminalMs', socketOpenedAt);
-        }
         break;
       }
       case 'session.resyncRequired':
@@ -437,12 +476,6 @@ function connect() {
           finishRemotePreflight();
         }
         break;
-      case 'clipboard.image.saved':
-        showToast('Image attached to session.', { type: 'success', title: 'Image Paste', duration: 2200 });
-        break;
-      case 'clipboard.image.error':
-        showToast(msg.error || 'Image paste failed.', { type: 'error', title: 'Image Paste', duration: 5000 });
-        break;
       default:
         if (msg.type?.startsWith('plugin.')) dispatchPluginMessage(msg);
         break;
@@ -454,11 +487,10 @@ function connect() {
 }
 
 const closeMobileSidebar = initCompactNavigation({
-  reconnect: reconnectForegroundSocket,
+  foreground: foregroundTerminal,
   suspend: suspendSocket,
   setConnectionState: setServerConnectionState,
-  onHidden: () => suspendActiveTerminal({ disposeTouch: true }),
-  onVisible: resumeActiveTerminal,
+  onHidden: () => suspendActiveTerminal(),
 });
 document.addEventListener('clideck:terminal-visibility', event => {
   if (event.detail?.visible) resumeActiveTerminal();
@@ -1149,7 +1181,8 @@ async function loadPlugins(list) {
     if (!plugin.hasClient || loadedPlugins.has(plugin.id)) continue;
     loadedPlugins.add(plugin.id);
     try {
-      const mod = await import(`/plugins/${plugin.id}/client.js`);
+      const revision = encodeURIComponent(plugin.clientRevision || plugin.version || 'unversioned');
+      const mod = await import(`/plugins/${plugin.id}/client.js?v=${revision}`);
       if (typeof mod.init === 'function') {
         mod.init({
           pluginId: plugin.id,
@@ -1160,7 +1193,7 @@ async function loadPlugins(list) {
           getActiveSessionId() { return state.active; },
           getTerminalSelection() { return state.terms.get(state.active)?.term?.getSelection() || ''; },
           copyTrimmedTerminalSelection(text) {
-            return copyTrimmedTerminalSelection(text, value => navigator.clipboard.writeText(value));
+            return copyTrimmedTerminalSelection(text, writeClipboardText);
           },
           writeToSession(id, text) { trackTerminalInputData(id, text); send({ type: 'input', id, data: text }); },
           toast(message, opts) { return showToast(message, opts); },
@@ -1168,7 +1201,10 @@ async function loadPlugins(list) {
           unregisterHotkey(combo) { unregisterHotkey(plugin.id, combo); },
         });
       }
-    } catch (e) { console.error(`[plugin:${plugin.id}] client load failed:`, e); }
+    } catch (e) {
+      loadedPlugins.delete(plugin.id);
+      console.error(`[plugin:${plugin.id}] client load failed:`, e);
+    }
   }
 }
 
@@ -1578,14 +1614,14 @@ document.getElementById('remote-close').addEventListener('click', closeRemoteMod
 document.getElementById('remote-error-dismiss').addEventListener('click', closeRemoteModal);
 
 document.getElementById('remote-copy').addEventListener('click', () => {
-  navigator.clipboard.writeText(document.getElementById('remote-url-box').textContent).then(() => {
+  writeClipboardText(document.getElementById('remote-url-box').textContent).then(() => {
     const btn = document.getElementById('remote-copy');
     btn.textContent = 'copied!';
     setTimeout(() => { btn.textContent = 'copy the link'; }, 1500);
   });
 });
 document.getElementById('remote-url-box').addEventListener('click', () => {
-  navigator.clipboard.writeText(document.getElementById('remote-url-box').textContent);
+  writeClipboardText(document.getElementById('remote-url-box').textContent).catch(() => {});
 });
 
 function doRemoteDisconnect() {

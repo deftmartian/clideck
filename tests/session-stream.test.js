@@ -2,14 +2,17 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('events');
 const {
+  APPLICATION_CREDIT_BYTES,
   BACKLOG_HIGH_WATER,
   BATCH_MAX_BYTES,
+  CONTROL_COMPRESSION_MIN_BYTES,
   createSessionStream,
+  shouldCompressFrame,
 } = require('../session-stream');
 const { ReplayRing } = require('../replay-ring');
 
 class FakeSocket extends EventEmitter {
-  constructor() {
+  constructor({ autoAck = true } = {}) {
     super();
     this.readyState = 1;
     this.bufferedAmount = 0;
@@ -17,6 +20,8 @@ class FakeSocket extends EventEmitter {
     this.rawFrames = [];
     this.closeCode = null;
     this.failNextSend = false;
+    this.autoAck = autoAck;
+    this.acknowledge = null;
   }
   send(raw) {
     if (this.failNextSend) {
@@ -24,7 +29,16 @@ class FakeSocket extends EventEmitter {
       throw new Error('send refused');
     }
     this.rawFrames.push(raw);
-    this.messages.push(JSON.parse(raw));
+    const message = JSON.parse(raw);
+    this.messages.push(message);
+    if (this.autoAck && this.acknowledge
+      && (message.type === 'output' || message.type === 'session.snapshot')) {
+      queueMicrotask(() => this.acknowledge({
+        type: 'output.ack', id: message.id, streamId: message.streamId,
+        generation: message.generation, seq: message.type === 'output' ? message.endSeq : message.atSeq,
+        ...(message.type === 'session.snapshot' ? { part: message.part } : {}),
+      }));
+    }
   }
   close(code) { this.closeCode = code; this.readyState = 3; }
   ping() {}
@@ -53,6 +67,11 @@ function fixture() {
     snapshot: id => captures.get(id)(),
     applyResize: (id, cols, rows) => resizes.push({ id, cols, rows }),
   });
+  const register = stream.register;
+  stream.register = ws => {
+    ws.acknowledge = message => stream.acknowledge(ws, message);
+    register(ws);
+  };
   stream.start();
   return { add, captures, clients, resizes, sessions, stream };
 }
@@ -131,6 +150,8 @@ test('resume current, delta, generation changes, and buffer gaps use one recover
 
   await f.stream.subscribe(ws, { id: 'a', replay: 'resume', cursor: { generation: 'g1', seq: 6 } });
   assert.equal(messages(ws, 'session.subscribed').at(-1).mode, 'current');
+  assert.equal(messages(ws, 'output').length, 0);
+  assert.equal(messages(ws, 'session.snapshot').length, 0);
   ws.messages.length = 0;
   await f.stream.subscribe(ws, { id: 'a', replay: 'resume', cursor: { generation: 'g1', seq: 3 } });
   assert.equal(messages(ws, 'output')[0].data, 'def');
@@ -147,6 +168,92 @@ test('resume current, delta, generation changes, and buffer gaps use one recover
   await f.stream.subscribe(ws, { id: 'a', replay: 'resume', cursor: { generation: 'g1', seq: 1 } });
   assert.equal(messages(ws, 'session.snapshot').length, 1);
   assert.equal(messages(ws, 'session.subscribed')[0].reason, 'buffer-gap');
+});
+
+test('adaptive synchronization chooses snapshots only when materially cheaper', async t => {
+  const f = fixture();
+  t.after(() => f.stream.stop());
+  const middle = 'm'.repeat(100 * 1024);
+  const session = f.add('a', middle, 'g1');
+  const ws = new FakeSocket();
+  f.stream.register(ws);
+
+  f.captures.set('a', async () => ({ data: 's'.repeat(70 * 1024), atSeq: session.outputSeq, cols: 80, rows: 24 }));
+  await f.stream.subscribe(ws, {
+    id: 'a', strategy: 'auto', cursor: { generation: 'g1', seq: 0 },
+  });
+  assert.equal(messages(ws, 'session.subscribed').at(-1).mode, 'snapshot');
+
+  f.captures.set('a', async () => ({ data: 's'.repeat(80 * 1024), atSeq: session.outputSeq, cols: 80, rows: 24 }));
+  ws.messages.length = 0;
+  await f.stream.subscribe(ws, {
+    id: 'a', strategy: 'auto', cursor: { generation: 'g1', seq: 0 },
+  });
+  assert.equal(messages(ws, 'session.subscribed').at(-1).mode, 'delta');
+  assert.equal(messages(ws, 'output').map(message => message.data).join(''), middle);
+
+  const large = 'l'.repeat(300 * 1024);
+  session.replayRing = new ReplayRing(2 * 1024 * 1024);
+  session.replayRing.append(large, 0);
+  session.outputSeq = large.length;
+  f.captures.set('a', async () => ({ data: 's'.repeat(310 * 1024), atSeq: session.outputSeq, cols: 80, rows: 24 }));
+  ws.messages.length = 0;
+  await f.stream.subscribe(ws, {
+    id: 'a', strategy: 'auto', cursor: { generation: 'g1', seq: 0 },
+  });
+  assert.equal(messages(ws, 'session.subscribed').at(-1).mode, 'delta');
+
+  f.captures.set('a', async () => ({ data: 's'.repeat(100 * 1024), atSeq: session.outputSeq, cols: 80, rows: 24 }));
+  f.stream._stateFor(ws).consumptionBytesPerMs = null;
+  ws.messages.length = 0;
+  await f.stream.subscribe(ws, {
+    id: 'a', strategy: 'auto', cursor: { generation: 'g1', seq: 0 },
+  });
+  assert.equal(messages(ws, 'session.subscribed').at(-1).mode, 'snapshot');
+
+  // The sustained-rate estimate is deliberately conservative: a middling
+  // per-frame ACK rate must not bless a large delta that will miss the 300 ms
+  // recovery budget, while a genuinely fast consumer can retain scrollback.
+  f.stream._stateFor(ws).consumptionBytesPerMs = 1.5 * 1024;
+  ws.messages.length = 0;
+  await f.stream.subscribe(ws, {
+    id: 'a', strategy: 'auto', cursor: { generation: 'g1', seq: 0 },
+  });
+  assert.equal(messages(ws, 'session.subscribed').at(-1).mode, 'snapshot');
+
+  f.captures.set('a', async () => ({
+    data: 's'.repeat(180 * 1024), atSeq: session.outputSeq, cols: 80, rows: 24,
+  }));
+  f.stream._stateFor(ws).consumptionBytesPerMs = 10 * 1024;
+  ws.messages.length = 0;
+  await f.stream.subscribe(ws, {
+    id: 'a', strategy: 'auto', cursor: { generation: 'g1', seq: 0 },
+  });
+  assert.equal(messages(ws, 'session.subscribed').at(-1).mode, 'delta');
+});
+
+test('output produced during snapshot capture follows the snapshot exactly once', async t => {
+  const f = fixture();
+  t.after(() => f.stream.stop());
+  const session = f.add('a', 'before', 'g1');
+  let release;
+  f.captures.set('a', () => new Promise(resolve => { release = resolve; }));
+  const ws = new FakeSocket();
+  f.stream.register(ws);
+  const pending = f.stream.subscribe(ws, { id: 'a', strategy: 'snapshot' });
+  await Promise.resolve();
+  session.replayRing.append('after', session.outputSeq);
+  session.outputSeq += 5;
+  f.stream.queueOutput('a', 'after', 6, 11);
+  f.stream._flush('a');
+  release({ data: 'snapshot-before', atSeq: 6, cols: 80, rows: 24 });
+  await pending;
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(messages(ws, 'session.snapshot').map(message => message.data).join(''), 'snapshot-before');
+  assert.deepEqual(messages(ws, 'output').map(message => [message.data, message.replay]), [
+    ['after', false],
+  ]);
 });
 
 test('rapid switching discards a stale snapshot and never overlaps replay with live output', async t => {
@@ -207,6 +314,7 @@ test('a recoverable network-batch gap replays from the ring without another snap
   f.stream.register(ws);
   await f.stream.subscribe(ws, { id: 'a', replay: 'snapshot' });
   const state = f.stream._stateFor(ws);
+  state.sentSeq = 0;
   state.nextSeq = 0;
   ws.messages.length = 0;
 
@@ -241,6 +349,114 @@ test('large terminal output is emitted as UTF-8-safe bounded batches', async t =
   assert.equal(output.map(item => item.data).join(''), data);
   assert.ok(output.every(item => Buffer.byteLength(item.data) <= BATCH_MAX_BYTES));
   assert.ok(output.every(item => !item.data.startsWith('\ude00') && !item.data.endsWith('\ud83d')));
+});
+
+test('withheld acknowledgements stop at application credit while control remains usable', async t => {
+  const f = fixture();
+  t.after(() => f.stream.stop());
+  const session = f.add('a');
+  const ws = new FakeSocket({ autoAck: false });
+  f.stream.register(ws);
+  await f.stream.subscribe(ws, {
+    id: 'a', strategy: 'auto', cursor: { generation: session.outputGeneration, seq: 0 },
+  });
+  ws.messages.length = 0;
+  const data = 'x'.repeat(APPLICATION_CREDIT_BYTES * 2);
+  session.replayRing.append(data, 0);
+  session.outputSeq = data.length;
+  f.stream.queueOutput('a', data, 0, data.length);
+  f.stream._flush('a');
+
+  const delivered = messages(ws, 'output').reduce(
+    (total, message) => total + Buffer.byteLength(message.data), 0,
+  );
+  assert.equal(delivered, APPLICATION_CREDIT_BYTES);
+  assert.equal(f.stream._stateFor(ws).inFlightBytes, APPLICATION_CREDIT_BYTES);
+  assert.equal(f.stream.sendControl(ws, { type: 'control.probe' }), true);
+  assert.equal(messages(ws, 'control.probe').length, 1);
+});
+
+test('a cumulative acknowledgement resumes pumping and stale stream acknowledgements are ignored', async t => {
+  const f = fixture();
+  t.after(() => f.stream.stop());
+  const session = f.add('a');
+  const ws = new FakeSocket({ autoAck: false });
+  f.stream.register(ws);
+  await f.stream.subscribe(ws, {
+    id: 'a', strategy: 'auto', cursor: { generation: session.outputGeneration, seq: 0 },
+  });
+  const firstStreamId = f.stream._stateFor(ws).streamId;
+  ws.messages.length = 0;
+  const data = 'x'.repeat(APPLICATION_CREDIT_BYTES * 2);
+  session.replayRing.append(data, 0);
+  session.outputSeq = data.length;
+  f.stream.queueOutput('a', data, 0, data.length);
+  f.stream._flush('a');
+  const firstWindow = messages(ws, 'output');
+  const last = firstWindow.at(-1);
+  assert.equal(f.stream.acknowledge(ws, {
+    type: 'output.ack', id: 'a', streamId: firstStreamId,
+    generation: session.outputGeneration, seq: last.endSeq,
+  }), true);
+  assert.ok(messages(ws, 'output').at(-1).endSeq > last.endSeq);
+
+  await f.stream.subscribe(ws, {
+    id: 'a', strategy: 'auto', cursor: { generation: session.outputGeneration, seq: session.outputSeq },
+  });
+  const state = f.stream._stateFor(ws);
+  assert.notEqual(state.streamId, firstStreamId);
+  assert.equal(f.stream.acknowledge(ws, {
+    type: 'output.ack', id: 'a', streamId: firstStreamId,
+    generation: session.outputGeneration, seq: last.endSeq,
+  }), false);
+  assert.equal(state.metrics.staleAcks, 1);
+  assert.equal(state.ackedSeq, session.outputSeq);
+});
+
+test('ring rollover during a stalled client requests exactly one bounded resynchronization', async t => {
+  const f = fixture();
+  t.after(() => f.stream.stop());
+  const session = f.add('a');
+  session.replayRing = new ReplayRing(64);
+  const ws = new FakeSocket({ autoAck: false });
+  f.stream.register(ws);
+  await f.stream.subscribe(ws, {
+    id: 'a', strategy: 'auto', cursor: { generation: session.outputGeneration, seq: 0 },
+  });
+  ws.messages.length = 0;
+
+  session.replayRing.append('a'.repeat(64), 0);
+  session.outputSeq = 64;
+  f.stream.queueOutput('a', 'a'.repeat(64), 0, 64);
+  f.stream._flush('a');
+  session.replayRing.append('b'.repeat(65), 64);
+  session.outputSeq = 129;
+  f.stream.queueOutput('a', 'b'.repeat(65), 64, 129);
+  f.stream._flush('a');
+  f.stream._flush('a');
+
+  assert.equal(messages(ws, 'session.resyncRequired').length, 1);
+  assert.equal(messages(ws, 'session.resyncRequired')[0].reason, 'buffer-gap');
+  assert.equal(f.stream._stateFor(ws).phase, 'awaiting-resubscribe');
+});
+
+test('transport statistics expose numeric diagnostics only', () => {
+  const f = fixture();
+  try {
+    const ws = new FakeSocket();
+    f.stream.register(ws);
+    assert.ok(Object.values(f.stream.stats(ws)).every(Number.isFinite));
+  } finally {
+    f.stream.stop();
+  }
+});
+
+test('compression is selective for recovery and large control frames', () => {
+  assert.equal(shouldCompressFrame('live', BATCH_MAX_BYTES), false);
+  assert.equal(shouldCompressFrame('replay', BATCH_MAX_BYTES), true);
+  assert.equal(shouldCompressFrame('snapshot', BATCH_MAX_BYTES), true);
+  assert.equal(shouldCompressFrame('control', CONTROL_COMPRESSION_MIN_BYTES - 1), false);
+  assert.equal(shouldCompressFrame('control', CONTROL_COMPRESSION_MIN_BYTES), true);
 });
 
 test('a control frame crossing high water closes with 1013', async t => {

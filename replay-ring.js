@@ -121,6 +121,25 @@ class ReplayRing {
     return parts.length === 1 ? parts[0] : parts.join('');
   }
 
+  byteLengthBetween(startSeq, endSeq = this.endSeq) {
+    if (!this.contains(startSeq, endSeq)) return null;
+    if (startSeq === endSeq) return 0;
+    let bytes = 0;
+    for (let index = this.head; index < this.chunks.length; index += 1) {
+      const chunk = this.chunks[index];
+      if (chunk.endSeq <= startSeq) continue;
+      if (chunk.startSeq >= endSeq) break;
+      if (startSeq <= chunk.startSeq && chunk.endSeq <= endSeq) {
+        bytes += chunk.bytes;
+        continue;
+      }
+      const from = Math.max(startSeq, chunk.startSeq) - chunk.startSeq;
+      const to = Math.min(endSeq, chunk.endSeq) - chunk.startSeq;
+      bytes += Buffer.byteLength(chunk.data.slice(from, to));
+    }
+    return bytes;
+  }
+
   suffix(maxCodeUnits) {
     const start = Math.max(this.startSeq, this.endSeq - Math.max(0, Number(maxCodeUnits) || 0));
     return this.slice(start, this.endSeq) || '';
@@ -128,6 +147,10 @@ class ReplayRing {
 
   *segments(startSeq, endSeq = this.endSeq, maxBytes = this.maxBytes) {
     if (!this.contains(startSeq, endSeq)) return;
+    let pending = '';
+    let pendingBytes = 0;
+    let pendingStart = startSeq;
+    let pendingEnd = startSeq;
     for (let index = this.head; index < this.chunks.length; index += 1) {
       const chunk = this.chunks[index];
       if (chunk.endSeq <= startSeq) continue;
@@ -138,9 +161,40 @@ class ReplayRing {
       let segmentStart = chunk.startSeq + from;
       for (const segment of splitUtf8Chunks(selected, maxBytes)) {
         const segmentEnd = segmentStart + segment.data.length;
-        yield { ...segment, startSeq: segmentStart, endSeq: segmentEnd };
+        if (pendingBytes && pendingBytes + segment.bytes > maxBytes) {
+          yield {
+            data: pending,
+            bytes: pendingBytes,
+            startSeq: pendingStart,
+            endSeq: pendingEnd,
+          };
+          pending = '';
+          pendingBytes = 0;
+        }
+        if (!pendingBytes) pendingStart = segmentStart;
+        pending += segment.data;
+        pendingBytes += segment.bytes;
+        pendingEnd = segmentEnd;
+        if (pendingBytes === maxBytes) {
+          yield {
+            data: pending,
+            bytes: pendingBytes,
+            startSeq: pendingStart,
+            endSeq: pendingEnd,
+          };
+          pending = '';
+          pendingBytes = 0;
+        }
         segmentStart = segmentEnd;
       }
+    }
+    if (pendingBytes) {
+      yield {
+        data: pending,
+        bytes: pendingBytes,
+        startSeq: pendingStart,
+        endSeq: pendingEnd,
+      };
     }
   }
 }

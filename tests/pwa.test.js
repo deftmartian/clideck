@@ -283,14 +283,15 @@ test('protocol compatibility gates queued mutations until server config arrives'
   const state = read('public/js/state.js');
   const app = read('public/js/app.js');
   const connectionClient = read('public/js/connection-client.js');
+  const protocolVersion = read('public/js/protocol-version.js');
 
   assert.match(CLIENT_BUILD_ID, /^[a-f0-9]{16}$/);
   assert.equal(calculateClientBuildId(), CLIENT_BUILD_ID);
   const serverProtocol = Number(protocol.match(/CLIENT_PROTOCOL_VERSION\s*=\s*(\d+)/)?.[1]);
-  const clientProtocol = Number(connectionClient.match(/CLIENT_PROTOCOL_VERSION\s*=\s*(\d+)/)?.[1]);
+  const clientProtocol = Number(protocolVersion.match(/CLIENT_PROTOCOL_VERSION\s*=\s*(\d+)/)?.[1]);
   assert.equal(clientProtocol, serverProtocol, 'client and server protocol constants must move together');
   assert.equal(serverProtocol, CLIENT_PROTOCOL_VERSION);
-  assert.equal(serverProtocol, 3, 'subscription recovery requires protocol v3');
+  assert.equal(serverProtocol, 4, 'parse-aware subscription recovery requires protocol v4');
   assert.equal(clientProtocolVersionFromUrl(`/?${CLIENT_PROTOCOL_PARAM}=2`), 2);
   assert.equal(clientProtocolVersionFromUrl(`/?${CLIENT_PROTOCOL_PARAM}=1`), 1);
   assert.equal(clientProtocolVersionFromUrl('/'), undefined);
@@ -376,84 +377,36 @@ test('terminal gaps request a protocol snapshot without reloading the page', () 
 
   assert.doesNotMatch(pwa, /requirePageReload|reloadRequired|isReloadMandatory/);
   assert.match(app, /createTerminalRecoveryClient\(\{/);
-  assert.match(recoveryClient, /requestResync\(sessionId, recovery\.status\)/);
+  assert.match(recoveryClient, /requestResyncOnce\(message\.id, ['"]output-metadata-gap['"]\)/);
+  assert.match(recoveryClient, /requestResyncOnce\(message\.id, ['"]output-sequence-gap['"]\)/);
   assert.match(app, /function requestTerminalSnapshot\(id\)/);
-  assert.match(app, /replay:\s*['"]snapshot['"]/);
+  assert.match(app, /strategy:\s*['"]snapshot['"]/);
   assert.doesNotMatch(recoveryClient, /requireReload/);
   assert.match(connectionClient, /state\.protocolBlocked\s*=\s*true/);
   assert.match(connectionClient, /if\s*\(connectionBlocked\s*\|\|\s*state\.protocolBlocked\)\s*return null/);
   assert.doesNotMatch(connectionClient, /state\.protocolBlocked\s*=\s*false/);
   assert.doesNotMatch(connectionClient, /requireRecoveryReload/);
-  assert.match(recoveryClient, /recovery\.status !== ['"]gap['"]/);
-  assert.match(recoveryClient, /recovery\.status !== ['"]legacy-gap['"]/);
+  assert.match(recoveryClient, /warnedSessions\.has\(sessionId\)/);
 });
 
-test('foreground reconnect uses protocol-v3 cursors and server snapshots', async () => {
-  const source = read('public/js/terminal-recovery.js');
-  const moduleUrl = `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;
-  const {
-    commitTerminalReplay,
-    noteTerminalLiveOutput,
-    planTerminalReplay,
-  } = await import(moduleUrl);
-  const entry = {
-    replayInitialized: true,
-    outputGeneration: 'generation-1',
-    lastOutputSeq: 2 * 1024 * 1024,
-    scrolledUp: true,
-  };
-  const replay = 'A'.repeat(2 * 1024 * 1024);
-  const missed = 'A';
-  const meta = {
-    generation: 'generation-1',
-    startSeq: 1,
-    endSeq: replay.length + 1,
-  };
-
-  const delta = planTerminalReplay(entry, replay, meta);
-  assert.deepEqual(delta, {
-    status: 'delta',
-    data: missed,
-    nextGeneration: 'generation-1',
-    nextSeq: replay.length + 1,
-  });
-  commitTerminalReplay(entry, delta);
-  assert.equal(entry.lastOutputSeq, replay.length + 1);
-  assert.equal(entry.scrolledUp, true, 'recovery must not move a user reading scrollback');
-
-  const current = planTerminalReplay(entry, replay, meta);
-  assert.equal(current.status, 'current');
-  assert.equal(current.data, '');
-
-  const gap = planTerminalReplay(entry, replay, {
-    ...meta,
-    startSeq: entry.lastOutputSeq + 1,
-    endSeq: entry.lastOutputSeq + 1 + replay.length,
-  });
-  assert.equal(gap.status, 'gap');
-  assert.equal(gap.data, '', 'a server-buffer gap must preserve the local terminal');
-
-  const legacyFresh = {};
-  const initial = planTerminalReplay(legacyFresh, 'legacy replay');
-  assert.equal(initial.status, 'initial');
-  commitTerminalReplay(legacyFresh, initial);
-  assert.equal(planTerminalReplay(legacyFresh, 'legacy replay').status, 'legacy-gap');
-
-  const live = {};
-  noteTerminalLiveOutput(live, 'same', {
-    generation: 'generation-2', startSeq: 0, endSeq: 4,
-  });
-  assert.equal(live.outputGeneration, 'generation-2');
-  assert.equal(live.lastOutputSeq, 4);
-
+test('foreground recovery uses protocol-v4 applied cursors and bounded snapshots', () => {
   const app = read('public/js/app.js');
   const recoveryClient = read('public/js/terminal-recovery-client.js');
-  assert.match(recoveryClient, /planTerminalReplay\(entry,\s*output,\s*message\)/);
+  const renderer = read('public/js/terminal-renderer.js');
+  assert.match(renderer, /Number\.isSafeInteger\(entry\.appliedSeq\)/);
+  assert.match(renderer, /entry\.receivedSeq\s*===\s*entry\.appliedSeq/);
+  assert.match(renderer, /seq:\s*entry\.appliedSeq/);
+  assert.match(recoveryClient, /entry\.receivedSeq\s*=\s*sequence\.endSeq/);
+  assert.match(recoveryClient, /entry\.appliedSeq\s*=\s*sequence\.endSeq/);
+  assert.match(recoveryClient, /type:\s*['"]output\.ack['"]/);
+  assert.match(recoveryClient, /message\.streamId\s*!==\s*entry\.streamId/);
   assert.doesNotMatch(recoveryClient, /session\.history|planTerminalHistory|handleHistory/);
-  assert.match(recoveryClient, /noteTerminalLiveOutput\(entry,\s*message\.data,\s*message\)/);
   assert.match(recoveryClient, /function handleSnapshot\(entry, message\)/);
   assert.match(recoveryClient, /entry\.term\.reset\(\)/);
+  assert.match(recoveryClient, /entry\.syncTargetSeq/);
+  assert.match(recoveryClient, /entry\.appliedSeq\s*>=\s*entry\.syncTargetSeq/);
   assert.match(app, /terminalRecovery\.handleOutput\(ws, entry, msg\)/);
+  assert.match(app, /terminalRecovery\.handleSync\(state\.terms\.get\(msg\.id\), msg\)/);
   assert.match(app, /terminalRecovery\.handleSnapshot\(entry, msg\)/);
   assert.match(app, /terminalRecovery\.handleSubscribed\(state\.terms\.get\(msg\.id\), msg\)/);
   assert.match(app, /case ['"]session\.resyncRequired['"]/);
@@ -467,6 +420,7 @@ test('foreground reconnect uses protocol-v3 cursors and server snapshots', async
 });
 
 test('foreground recovery has a guarded focus fallback and repaints the terminal surface', () => {
+  const app = read('public/js/app.js');
   const compactNavigation = read('public/js/compact-navigation.js');
   const terminalLocal = read('public/js/terminal-local.js');
 
@@ -474,10 +428,14 @@ test('foreground recovery has a guarded focus fallback and repaints the terminal
   assert.match(compactNavigation, /window\.addEventListener\(['"]focus['"]/);
   assert.match(
     compactNavigation,
-    /Date\.now\(\)\s*-\s*blurredAt\s*>=\s*1000[\s\S]{0,160}readyState\s*!==\s*WebSocket\.OPEN[\s\S]{0,120}reconnect\(\)/,
+    /Date\.now\(\)\s*-\s*blurredAt\s*>=\s*1000[\s\S]{0,160}readyState\s*!==\s*WebSocket\.OPEN[\s\S]{0,120}foreground\?\.\(\)/,
   );
-  assert.match(terminalLocal, /function recoverActiveTerminalSurface\(\)/);
-  assert.match(terminalLocal, /clearTextureAtlas/);
+  assert.doesNotMatch(compactNavigation, /visibilitychange[\s\S]{0,320}\breconnect\(/);
+  assert.match(app, /onHidden:\s*\(\)\s*=>\s*suspendActiveTerminal\(\)/);
+  assert.match(terminalLocal, /function recoverActiveTerminalSurface\(\{ resetAtlas = false \} = \{\}\)/);
+  assert.match(terminalLocal, /if \(resetAtlas\)[\s\S]{0,100}clearTextureAtlas/);
+  assert.match(terminalLocal, /if \(resetAtlas\)[\s\S]{0,180}\.refresh\(0,/);
+  assert.match(terminalLocal, /resetAtlas:\s*!!event\.persisted/);
   assert.match(terminalLocal, /\.refresh\(0,\s*Math\.max\(0,\s*entry\.term\.rows\s*-\s*1\)\)/);
   assert.match(
     terminalLocal,

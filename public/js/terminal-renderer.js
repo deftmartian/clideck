@@ -26,12 +26,15 @@ export function createTerminalRendererLifecycle({
   function subscribeRenderer(id, { snapshot = false } = {}) {
     const entry = state.terms.get(id);
     if (!entry?.term || document.visibilityState === 'hidden') return false;
-    const hasCursor = !snapshot && entry.outputGeneration && Number.isSafeInteger(entry.lastOutputSeq);
+    const hasCursor = !snapshot
+      && entry.outputGeneration
+      && Number.isSafeInteger(entry.appliedSeq)
+      && entry.receivedSeq === entry.appliedSeq;
     return send({
       type: 'session.subscribe',
       id,
-      replay: hasCursor ? 'resume' : 'snapshot',
-      ...(hasCursor ? { cursor: { generation: entry.outputGeneration, seq: entry.lastOutputSeq } } : {}),
+      strategy: hasCursor ? 'auto' : 'snapshot',
+      ...(hasCursor ? { cursor: { generation: entry.outputGeneration, seq: entry.appliedSeq } } : {}),
       claimResize: true,
       cols: entry.term.cols,
       rows: entry.term.rows,
@@ -116,10 +119,12 @@ export function createTerminalRendererLifecycle({
     term.open(el);
     const refreshJumpLatest = terminalLocal.attachTerminal(id, term, el, shouldShowJumpLatest);
     let replayWrites = 0;
-    const writeChunk = (data, replay = false) => {
-      if (!replay) { term.write(data); return; }
-      replayWrites += 1;
-      term.write(data, () => { replayWrites -= 1; });
+    const writeChunk = (data, replay = false, onComplete) => {
+      if (replay) replayWrites += 1;
+      term.write(data, () => {
+        if (replay) replayWrites -= 1;
+        onComplete?.();
+      });
     };
     attachToTerminal(term, entry.presetId, () => replayWrites > 0);
     const onContextMenu = (event) => {
@@ -140,8 +145,8 @@ export function createTerminalRendererLifecycle({
       term, fit, el, requestFit,
       cancelFitRaf: () => fitController.cancel(),
       onContextMenu,
-      queue(data, replay = false) {
-        if (!fitted) { pending.push({ data, replay }); return true; }
+      queue(data, replay = false, onComplete) {
+        if (!fitted) { pending.push({ data, replay, onComplete }); return true; }
         return false;
       },
       writeChunk,
@@ -154,7 +159,7 @@ export function createTerminalRendererLifecycle({
         fit.fit();
         countPerf('terminalFits');
         entry.fitted = true;
-        for (const chunk of pending) writeChunk(chunk.data, chunk.replay);
+        for (const chunk of pending) writeChunk(chunk.data, chunk.replay, chunk.onComplete);
         pending = null;
         refreshJumpLatest();
         subscribeRenderer(id, { snapshot: true });

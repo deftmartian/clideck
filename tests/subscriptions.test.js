@@ -183,7 +183,12 @@ test('repeated restart gives each active viewer exactly one fresh snapshot', asy
     await viewer.connect(); await viewer.waitFor('config');
     viewer.subscribe(created.id, { replay: 'snapshot' });
     await viewer.waitFor(msg => msg.type === 'session.subscribed' && msg.id === created.id);
+    await viewer.waitFor(msg => msg.type === 'session.snapshot'
+      && msg.id === created.id && msg.part === msg.parts - 1);
   }
+  // `session.subscribed` announces the recovery plan before its payload. Drain
+  // both initial snapshots so a restart assertion cannot count an older part.
+  await settle();
 
   for (let attempt = 0; attempt < 8; attempt += 1) {
     for (const viewer of [first, second]) viewer.messages.length = 0;
@@ -199,10 +204,15 @@ test('repeated restart gives each active viewer exactly one fresh snapshot', asy
     )));
     await settle(300);
     for (const viewer of [first, second]) {
-      assert.equal(
-        viewer.messages.filter(msg => msg.type === 'session.snapshot' && msg.id === created.id).length,
-        1,
+      const snapshots = viewer.messages.filter(
+        msg => msg.type === 'session.snapshot' && msg.id === created.id,
       );
+      assert.ok(snapshots.length >= 1);
+      assert.deepEqual(snapshots.map(msg => msg.part), snapshots.map((_, index) => index));
+      assert.ok(snapshots.every(msg => msg.parts === snapshots.length));
+      assert.equal(viewer.messages.filter(
+        msg => msg.type === 'session.sync' && msg.id === created.id && msg.mode === 'snapshot',
+      ).length, 1);
       assert.equal(
         viewer.messages.some(msg => msg.type === 'session.resyncRequired' && msg.id === created.id),
         false,

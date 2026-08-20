@@ -6,6 +6,9 @@ import { countPerf, notePerf } from './perf.js';
 import { createMobileComposer, loadStoredDraft } from './mobile-composer.js';
 import { createMobileSelection } from './mobile-selection.js';
 import { createMobileTouchScroll } from './mobile-touch-scroll.js';
+import transportLimits from '../../transport-limits.js';
+
+const { TERMINAL_INPUT_MAX_BYTES } = transportLimits;
 
 const JUMP_LATEST_THRESHOLD_ROWS = 3;
 const JUMP_LATEST_VISIBLE_CLASS = 'is-visible';
@@ -72,11 +75,20 @@ export function createTerminalLocalIntegration({
   writeClipboardText,
 }) {
   let mobileSelection;
+  function sendBoundedInput(id, data) {
+    if (new TextEncoder().encode(String(data || '')).byteLength > TERMINAL_INPUT_MAX_BYTES) {
+      showToast('Terminal paste is larger than the 512 KiB safety limit.', {
+        title: 'Paste too large', type: 'error', duration: 5000,
+      });
+      return false;
+    }
+    return send({ type: 'input', id, data });
+  }
   const mobileComposer = createMobileComposer({
     getActiveId: () => state.active,
     getEntry: id => state.terms.get(id),
     getEntries: () => state.terms.values(),
-    sendInput: (id, data) => send({ type: 'input', id, data }),
+    sendInput: sendBoundedInput,
     onControlInput: trackInput,
     onDraftChange: refreshInputActions,
     onCommitted: () => {
@@ -89,7 +101,7 @@ export function createTerminalLocalIntegration({
   });
   const mobileTouchScroll = createMobileTouchScroll({
     isSelectionActive: () => mobileSelection.isActive(),
-    sendInput: (id, data) => send({ type: 'input', id, data }),
+    sendInput: sendBoundedInput,
     onDragClaim: () => mobileComposer.blurInput(),
     onTap: (_id, term, screen, touch) => activateTerminalLinkAtPoint(term, screen, touch),
     onLongPress: () => mobileSelection.activate(),
@@ -113,18 +125,22 @@ export function createTerminalLocalIntegration({
     }),
   });
 
-  function recoverActiveTerminalSurface() {
+  function recoverActiveTerminalSurface({ resetAtlas = false } = {}) {
     syncViewport();
     requestAnimationFrame(() => {
       const entry = state.active ? state.terms.get(state.active) : null;
       if (!entry?.term) return;
-      try { entry.term.clearTextureAtlas?.(); } catch {}
-      try { entry.term.refresh(0, Math.max(0, entry.term.rows - 1)); } catch {}
+      if (resetAtlas) {
+        try { entry.term.clearTextureAtlas?.(); } catch {}
+        try { entry.term.refresh(0, Math.max(0, entry.term.rows - 1)); } catch {}
+      }
       entry.requestFit?.();
     });
   }
 
-  window.addEventListener('pageshow', recoverActiveTerminalSurface, { passive: true });
+  window.addEventListener('pageshow', event => {
+    recoverActiveTerminalSurface({ resetAtlas: !!event.persisted });
+  }, { passive: true });
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') recoverActiveTerminalSurface();
   });
@@ -156,7 +172,7 @@ export function createTerminalLocalIntegration({
     if (mobileComposer.ownsInput(entry)) return;
     trackInput(id, data);
     countWheelReports(id, data);
-    send({ type: 'input', id, data });
+    sendBoundedInput(id, data);
   }
 
   function createJumpLatestButton(id, term) {

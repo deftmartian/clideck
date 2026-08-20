@@ -7,6 +7,9 @@ const { updateClaudeSessionToken } = require('./claude-session');
 const { handleLocalHttp } = require('./server-http-local');
 const { acceptClient } = require('./server-protocol-gate');
 const { serveStatic } = require('./server-static');
+const { createOriginPolicy } = require('./origin-policy');
+const { ROUTE: CLIPBOARD_IMAGE_ROUTE, createClipboardImageUploadHandler } = require('./clipboard-image-http');
+const { WEBSOCKET_MAX_PAYLOAD_BYTES } = require('./transport-limits');
 
 function terminalLink(url, text = url) {
   return `\u001B]8;;${url}\u0007${text}\u001B]8;;\u0007`;
@@ -76,6 +79,8 @@ require('./opencode-bridge').init(sessions.broadcast, sessions.getSessions);
 require('./pi-bridge').init(sessions.broadcast, sessions.getSessions, sessions.capture);
 const config = require('./config');
 plugins.init(sessions.broadcast, sessions.getSessions, () => require('./handlers').getConfig(), (cfg) => config.save(cfg), sessions.input, sessions.createProgrammatic, sessions.close);
+const originPolicy = createOriginPolicy({ port: PORT, host: HOST });
+const clipboardImageUploads = createClipboardImageUploadHandler({ sessions, originPolicy });
 
 const geminiMenuPoll = new Map();
 
@@ -266,6 +271,11 @@ const server = http.createServer((req, res) => {
     version: currentVersion,
   })) return;
 
+  if (req.method === 'POST' && CLIPBOARD_IMAGE_ROUTE.test(String(req.url || ''))) {
+    clipboardImageUploads.handle(req, res);
+    return;
+  }
+
   // DEBUG: log any POST (agents might use /v1/traces, /v1/metrics, or other paths)
   if (req.method === 'POST') {
     // console.log(`OTLP: received POST ${req.url} (not handled)`);
@@ -275,29 +285,16 @@ const server = http.createServer((req, res) => {
   serveStatic(req, res, { resolvePluginFile: url => plugins.resolveFile(url) });
 });
 
-const allowedOrigins = new Set([
-  `http://localhost:${PORT}`, `http://127.0.0.1:${PORT}`,
-  `http://[::1]:${PORT}`, `http://${HOST}:${PORT}`,
-]);
-function isAllowedWsOrigin(origin, hostHeader) {
-  if (!origin) return true; // non-browser clients
-  try {
-    const originUrl = new URL(origin);
-    if (originUrl.host === hostHeader) return true;
-    return allowedOrigins.has(origin);
-  } catch {
-    return false;
-  }
-}
 const wss = new WebSocketServer({
   server,
+  maxPayload: WEBSOCKET_MAX_PAYLOAD_BYTES,
   perMessageDeflate: {
     threshold: 1024,
     clientNoContextTakeover: true,
     serverNoContextTakeover: true,
   },
   verifyClient: ({ req }) => {
-    return isAllowedWsOrigin(req.headers.origin, req.headers.host);
+    return originPolicy.allows(req.headers.origin, req.headers.host, { allowMissing: true });
   },
 });
 wss.on('connection', (ws, req) => acceptClient(ws, req, {

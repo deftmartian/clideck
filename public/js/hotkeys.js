@@ -2,6 +2,7 @@
 // Plugins register shortcuts via registerHotkey(combo, callback).
 
 import { handleTerminalKey } from './prompts.js';
+import { writeClipboardText } from './terminal-clipboard.js';
 
 const registry = new Map(); // normalized combo → { pluginId, callback }
 const MAX_OSC52_BYTES = 512 * 1024;
@@ -125,7 +126,7 @@ export function attachToTerminal(term, presetId, isReplaying) {
       && e.code === 'KeyC'
       && term.hasSelection()) {
       e.preventDefault();
-      navigator.clipboard?.writeText(term.getSelection()).catch(() => {});
+      writeClipboardText(term.getSelection()).catch(() => {});
       return false;
     }
 

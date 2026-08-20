@@ -1,5 +1,6 @@
-import { state, send } from './state.js';
+import { state } from './state.js';
 import { showToast } from './toast.js';
+import { CLIENT_PROTOCOL_VERSION } from './protocol-version.js';
 
 const MAX_CLIPBOARD_IMAGE_BYTES = 25 * 1024 * 1024;
 const ATTACH_MAX_DIMENSION = 2048;
@@ -10,34 +11,31 @@ function clipboardImageItems(event) {
     .filter(item => item.kind === 'file' && /^image\//i.test(item.type || ''));
 }
 
-function readFileAsDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ''));
-    reader.onerror = () => reject(reader.error || new Error('Failed to read clipboard image.'));
-    reader.readAsDataURL(file);
-  });
-}
-
 async function sendImageFile(file, sessionId, mimeFallback = 'image/png') {
   if (!file) throw new Error('Image was not available as a file.');
   if (file.size > MAX_CLIPBOARD_IMAGE_BYTES) {
     throw new Error(`Image is too large (${Math.ceil(file.size / 1024 / 1024)} MB).`);
   }
-  const dataUrl = await readFileAsDataUrl(file);
-  const comma = dataUrl.indexOf(',');
-  if (comma < 0) throw new Error('Image could not be encoded.');
-  if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+  if (!state.protocolReady) {
     throw new Error('CliDeck reconnected before the image was ready. Attach it again.');
   }
-  const sent = send({
-    type: 'clipboard.image',
-    id: sessionId,
-    mime: file.type || mimeFallback,
-    name: file.name || '',
-    data: dataUrl.slice(comma + 1),
+  const response = await fetch(`/api/session/${encodeURIComponent(sessionId)}/clipboard-image`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': file.type || mimeFallback,
+      'X-CliDeck-Protocol': String(CLIENT_PROTOCOL_VERSION),
+    },
+    body: file,
+    credentials: 'same-origin',
+    cache: 'no-store',
   });
-  if (!sent) throw new Error('Image could not be sent.');
+  let result = null;
+  try { result = await response.json(); } catch {}
+  if (!response.ok) throw new Error(result?.error || `Image upload failed (${response.status}).`);
+  showToast('Image attached to session.', {
+    type: 'success', title: 'Image Paste', duration: 2200,
+  });
+  return result;
 }
 
 async function handleClipboardImagePaste(event) {
@@ -47,7 +45,7 @@ async function handleClipboardImagePaste(event) {
   event.stopPropagation();
 
   const sessionId = state.active;
-  if (!sessionId || !state.ws || state.ws.readyState !== WebSocket.OPEN) {
+  if (!sessionId || !state.protocolReady) {
     showToast('No active session is ready for image paste.', {
       type: 'error', title: 'Image Paste', duration: 4000,
     });
@@ -89,7 +87,7 @@ async function downscaleImageFile(file) {
 
 async function handleComposerAttach(files) {
   const sessionId = state.active;
-  if (!sessionId || !state.ws || state.ws.readyState !== WebSocket.OPEN) {
+  if (!sessionId || !state.protocolReady) {
     showToast('No active session is ready for image attach.', {
       type: 'error', title: 'Image Attach', duration: 4000,
     });

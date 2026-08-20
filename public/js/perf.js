@@ -21,6 +21,11 @@ export function countPerf(name, amount = 1) {
   addCounter(name, amount);
 }
 
+export function maxPerf(name, value) {
+  if (!enabled || !Number.isFinite(Number(value))) return;
+  counters[name] = Math.max(counters[name] || 0, Number(value));
+}
+
 export function timePerf(name, started) {
   if (!enabled) return;
   timings[name] = Math.max(0, performance.now() - Number(started || 0));
@@ -36,6 +41,8 @@ if (enabled) {
       for (const entry of list.getEntries()) {
         addCounter('longTasks');
         addCounter('longTaskDurationMs', entry.duration);
+        maxPerf('maximumLongTaskMs', entry.duration);
+        notePerf('browserLongTask', { startedAt: entry.startTime, durationMs: entry.duration });
       }
     });
     observer.observe({ type: 'longtask', buffered: true });
@@ -44,14 +51,17 @@ if (enabled) {
   Object.defineProperty(window, '__clideckPerfSnapshot', {
     configurable: true,
     value() {
+      const measuredAt = performance.now();
       const resources = performance.getEntriesByType('resource');
-      const terminalUsableAt = events.find(item => item.name === 'terminalSubscribed')?.at;
+      const terminalUsableAt = events.find(item => item.name === 'terminalCurrentPainted')?.at;
       const criticalResources = Number.isFinite(terminalUsableAt)
         ? resources.filter(item => item.responseEnd <= terminalUsableAt)
         : [];
+      const criticalNetworkResources = criticalResources.filter(item => item.transferSize > 0);
       return {
         enabled: true,
-        elapsedMs: performance.now() - startedAt,
+        measuredAt,
+        elapsedMs: measuredAt - startedAt,
         counters: { ...counters },
         renderers: {
           current: document.querySelectorAll('.term-wrap').length,
@@ -68,8 +78,12 @@ if (enabled) {
         },
         criticalResources: {
           count: criticalResources.length,
+          networkCount: criticalNetworkResources.length,
           transferBytes: criticalResources.reduce((total, item) => total + (item.transferSize || 0), 0),
           encodedBytes: criticalResources.reduce((total, item) => total + (item.encodedBodySize || 0), 0),
+          networkEncodedBytes: criticalNetworkResources.reduce(
+            (total, item) => total + (item.encodedBodySize || 0), 0,
+          ),
           decodedBytes: criticalResources.reduce((total, item) => total + (item.decodedBodySize || 0), 0),
           terminalUsableAt,
           items: criticalResources.map(item => ({

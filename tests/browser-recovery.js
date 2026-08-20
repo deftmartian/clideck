@@ -94,6 +94,130 @@ async function verifyTerminalQueryExactlyOnce(client, sessionId) {
   await waitForOutput(client, sessionId, 'QUERY_REPLY_COUNT_1', 'one terminal query reply');
 }
 
+async function verifyClipboardActionsAfterCurrent(page, context, browserName, sessionId, marker) {
+  if (browserName === 'chromium') {
+    await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  }
+  await waitFor(
+    async () => (await page.locator('.plugin-btn[title="Trim & Copy"]').count()) === 1,
+    `${browserName} Trim Clip plugin`,
+  );
+  const selectMarker = () => page.evaluate(({ id, value }) => {
+    const { state } = window.__clideckTest;
+    const term = state.terms.get(id)?.term;
+    const buffer = term?.buffer.active;
+    if (!term || !buffer) return '';
+    for (let index = 0; index < buffer.length; index += 1) {
+      const line = buffer.getLine(index)?.translateToString(true) || '';
+      const column = line.indexOf(value);
+      if (column < 0) continue;
+      term.select(column, index, value.length);
+      term.focus();
+      return term.getSelection();
+    }
+    return '';
+  }, { id: sessionId, value: marker });
+
+  const selected = await selectMarker();
+  if (selected !== marker) throw new Error(`${browserName} could not select current terminal output`);
+  await page.evaluate(() => navigator.clipboard.writeText('F8_SENTINEL'));
+  await page.keyboard.press('F8');
+  await waitFor(
+    async () => (await page.evaluate(() => navigator.clipboard.readText())) === marker,
+    `${browserName} F8 Trim Clip after current`,
+  );
+
+  await selectMarker();
+  await page.evaluate(() => navigator.clipboard.writeText('CTRL_C_SENTINEL'));
+  await page.keyboard.press('Control+KeyC');
+  await waitFor(
+    async () => (await page.evaluate(() => navigator.clipboard.readText())) === marker,
+    `${browserName} Ctrl+C selection copy after current`,
+  );
+
+  await selectMarker();
+  await page.locator('.term-wrap.active').dispatchEvent('contextmenu', {
+    button: 2, clientX: 40, clientY: 40,
+  });
+  const copy = page.locator('.menu-action[data-action="copy"]');
+  await waitFor(async () => copy.isVisible(), `${browserName} terminal context copy`);
+  await page.evaluate(() => navigator.clipboard.writeText('CONTEXT_SENTINEL'));
+  await copy.click();
+  await waitFor(
+    async () => (await page.evaluate(() => navigator.clipboard.readText())) === marker,
+    `${browserName} context-menu copy after current`,
+  );
+}
+
+async function verifyClipboardFallbackWithoutApi(page, browserName, sessionId, marker) {
+  await page.evaluate(() => {
+    globalThis.__clideckOriginalClipboard = navigator.clipboard;
+    globalThis.__clideckFallbackCopy = { count: 0, value: '' };
+    document.addEventListener('copy', () => {
+      globalThis.__clideckFallbackCopy = {
+        count: globalThis.__clideckFallbackCopy.count + 1,
+        value: document.activeElement?.value || '',
+      };
+    }, true);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: undefined,
+    });
+  });
+  const selectMarker = () => page.evaluate(({ id, value }) => {
+    const { state } = window.__clideckTest;
+    const term = state.terms.get(id)?.term;
+    const buffer = term?.buffer.active;
+    if (!term || !buffer) return '';
+    for (let index = 0; index < buffer.length; index += 1) {
+      const line = buffer.getLine(index)?.translateToString(true) || '';
+      const column = line.indexOf(value);
+      if (column < 0) continue;
+      term.select(column, index, value.length);
+      term.focus();
+      return term.getSelection();
+    }
+    return '';
+  }, { id: sessionId, value: marker });
+  const copyCount = () => page.evaluate(() => globalThis.__clideckFallbackCopy.count);
+  const expectCopy = async (before, label) => waitFor(async () => {
+    const result = await page.evaluate(() => globalThis.__clideckFallbackCopy);
+    return result.count === before + 1 && result.value === marker;
+  }, `${browserName} ${label} without Clipboard API`);
+
+  await selectMarker();
+  let before = await copyCount();
+  await page.keyboard.press('F8');
+  await expectCopy(before, 'F8 Trim Clip');
+
+  await selectMarker();
+  before = await copyCount();
+  await page.locator('.plugin-btn[title="Trim & Copy"]').click();
+  await expectCopy(before, 'toolbar Trim Clip');
+
+  await selectMarker();
+  before = await copyCount();
+  await page.keyboard.press('Control+KeyC');
+  await expectCopy(before, 'Ctrl+C selection copy');
+
+  await selectMarker();
+  await page.locator('.term-wrap.active').dispatchEvent('contextmenu', {
+    button: 2, clientX: 40, clientY: 40,
+  });
+  const copy = page.locator('.menu-action[data-action="copy"]');
+  await waitFor(async () => copy.isVisible(), `${browserName} fallback terminal context copy`);
+  before = await copyCount();
+  await copy.click();
+  await expectCopy(before, 'context-menu copy');
+
+  await page.evaluate(() => {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: globalThis.__clideckOriginalClipboard,
+    });
+  });
+}
+
 // An attached image is bracket-pasted into the shell as a bare path. Its echo
 // can still be arriving when the next command is typed, so settle, clear the
 // line, and prove the prompt is clean before moving on.
@@ -266,6 +390,22 @@ async function verifyNarrowDesktopTouchUi(browser, baseUrl, browserName, session
     hasTouch: false,
   });
   const page = await context.newPage();
+  if (browserName === 'firefox') {
+    // Playwright does not expose clipboard-read/write permissions for Firefox.
+    // Keep the real Chromium integration check, and give Firefox a deterministic
+    // Clipboard API so its keyboard/menu wiring and selected payload are still
+    // exercised end to end.
+    await page.addInitScript(() => {
+      let value = '';
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: {
+          readText: async () => value,
+          writeText: async text => { value = String(text); },
+        },
+      });
+    });
+  }
   const errors = [];
   page.on('console', message => {
     if (message.type() === 'error') errors.push(message.text());
@@ -282,6 +422,8 @@ async function verifyNarrowDesktopTouchUi(browser, baseUrl, browserName, session
       async () => (await terminalText(page, sessionId)).includes(marker),
       `${browserName} narrow-desktop replay`,
     );
+    await verifyClipboardActionsAfterCurrent(page, context, browserName, sessionId, marker);
+    await verifyClipboardFallbackWithoutApi(page, browserName, sessionId, marker);
     const initial = await touchUiState(page);
     if (
       initial.capability
@@ -1704,16 +1846,50 @@ async function run(browserName) {
       // paths on the line if their echo lands late.
       client.send({ type: 'input', id, data: '\u0003' });
       await writeMarker(client, id, `CHROMIUM_PRE_FREEZE_${Date.now()}`);
+      const lifecycleBefore = await page.evaluate(() => {
+        const snapshot = window.__clideckPerfSnapshot();
+        return {
+          opens: snapshot.counters.healthySocketOpenCount || 0,
+          syncs: snapshot.counters.terminalSyncStarted || 0,
+        };
+      });
+      await page.evaluate(() => {
+        globalThis.__clideckVisibilityState = 'hidden';
+        Object.defineProperty(document, 'visibilityState', {
+          configurable: true,
+          get: () => globalThis.__clideckVisibilityState,
+        });
+        document.dispatchEvent(new Event('visibilitychange'));
+      });
+      await new Promise(resolve => setTimeout(resolve, 100));
       await cdp.send('Page.setWebLifecycleState', { state: 'frozen' });
       const frozen = `CHROMIUM_FROZEN_${Date.now()}`;
       await writeMarker(client, id, frozen);
       await cdp.send('Page.setWebLifecycleState', { state: 'active' });
+      await page.evaluate(() => {
+        globalThis.__clideckVisibilityState = 'visible';
+        document.dispatchEvent(new Event('visibilitychange'));
+      });
       const recovered = await waitFor(async () => {
         const text = await terminalText(page, id);
         return text.includes(frozen) ? text : '';
       }, 'Chromium frozen-page recovery');
       if (count(recovered, frozen) !== 1) {
         throw new Error('Chromium frozen output was duplicated');
+      }
+      const lifecycleAfter = await page.evaluate(() => {
+        const snapshot = window.__clideckPerfSnapshot();
+        return {
+          opens: snapshot.counters.healthySocketOpenCount || 0,
+          syncs: snapshot.counters.terminalSyncStarted || 0,
+          recentSyncs: snapshot.events.filter(event => event.name === 'terminalSyncStarted').slice(-4),
+        };
+      });
+      if (lifecycleAfter.opens !== lifecycleBefore.opens) {
+        throw new Error('Chromium healthy foreground return opened another WebSocket');
+      }
+      if (lifecycleAfter.syncs !== lifecycleBefore.syncs + 1) {
+        throw new Error(`Chromium foreground storm made ${lifecycleAfter.syncs - lifecycleBefore.syncs} subscriptions: ${JSON.stringify(lifecycleAfter.recentSyncs)}`);
       }
     } else {
       await verifyMobileSelection(page, browserName, client, id);
@@ -1742,9 +1918,9 @@ async function run(browserName) {
     const recoveryMs = await page.evaluate(() => {
       const events = window.__clideckPerfSnapshot().events;
       const opened = [...events].reverse().find(event => event.name === 'webSocketOpen');
-      const subscribed = opened && events.find(event =>
-        event.name === 'terminalSubscribed' && event.at >= opened.at);
-      return subscribed ? subscribed.at - opened.at : null;
+      const painted = opened && events.find(event =>
+        event.name === 'terminalCurrentPainted' && event.at >= opened.at);
+      return painted ? painted.at - opened.at : null;
     });
     if (!Number.isFinite(recoveryMs) || recoveryMs > 500) {
       throw new Error(`${browserName} foreground terminal recovery used ${recoveryMs}ms after WebSocket open`);

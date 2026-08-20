@@ -24,6 +24,26 @@ test('replay ring finds current cursors and returns bounded suffixes without a f
   assert.equal(ring.slice(10), null);
 });
 
+test('replay ring measures UTF-8 range bytes without joining the range', () => {
+  const ring = new ReplayRing(1024);
+  ring.append('ab🙂cd', 0);
+  assert.equal(ring.byteLengthBetween(0, 6), 8);
+  assert.equal(ring.byteLengthBetween(2, 4), 4);
+  assert.equal(ring.byteLengthBetween(4, 6), 2);
+  assert.equal(ring.byteLengthBetween(7, 8), null);
+});
+
+test('replay ring coalesces adjacent source chunks into bounded network segments', () => {
+  const ring = new ReplayRing(1024);
+  ring.append('ab', 0);
+  ring.append('cd', 2);
+  ring.append('\u{1f642}e', 4);
+  assert.deepEqual([...ring.segments(0, 7, 5)], [
+    { data: 'abcd', bytes: 4, startSeq: 0, endSeq: 4 },
+    { data: '\u{1f642}e', bytes: 5, startSeq: 4, endSeq: 7 },
+  ]);
+});
+
 test('replay ring reports gaps after byte-cap trimming', () => {
   const ring = new ReplayRing(5);
   ring.append('abcdef', 0);
