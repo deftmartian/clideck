@@ -602,6 +602,7 @@ export function addTerminal(id, name, themeId, commandId, projectId, muted, last
     ro: null,
     fitted: false,
     requestFit: null,
+    reconcileRenderer: null,
     cancelFitRaf: null,
     onContextMenu: null,
     inputLength: 0,

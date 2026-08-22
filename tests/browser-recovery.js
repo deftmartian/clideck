@@ -1365,6 +1365,36 @@ async function verifyAcceleratedRenderer(page, browserName) {
   return result.renderer;
 }
 
+async function verifyStableRendererReconciliation(page, browserName, sessionId) {
+  const result = await page.evaluate(async id => {
+    const entry = window.__clideckTest.state.terms.get(id);
+    const term = entry?.term;
+    if (!entry?.reconcileRenderer || !term) return null;
+    const originalResize = term.resize;
+    let resizeCalls = 0;
+    term.resize = function (...args) {
+      resizeCalls += 1;
+      return originalResize.apply(this, args);
+    };
+    term.select(0, term.buffer.active.viewportY, 1);
+    const selectionBefore = term.getSelection();
+    entry.reconcileRenderer();
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const report = {
+      resizeCalls,
+      selectionBefore,
+      selectionAfter: term.getSelection(),
+    };
+    term.resize = originalResize;
+    term.clearSelection();
+    return report;
+  }, sessionId);
+  if (!result || result.resizeCalls !== 0 || !result.selectionBefore
+    || result.selectionAfter !== result.selectionBefore) {
+    throw new Error(`${browserName} stable renderer reconciliation reflowed selection: ${JSON.stringify(result)}`);
+  }
+}
+
 async function dispatchTouchDrag(page, cdp) {
   const box = await page.locator('.term-wrap.active .xterm-screen').boundingBox();
   if (!box) throw new Error('Chromium terminal has no touch target');
@@ -1932,6 +1962,7 @@ async function run(browserName) {
     await verifyBottomActionClearance(page, browserName);
     await verifyVisualViewportHeight(page, browserName, id);
     const renderer = await verifyAcceleratedRenderer(page, browserName);
+    await verifyStableRendererReconciliation(page, browserName, id);
     await verifyMobileReloadControl(page, browserName, id, base);
     await verifyMobileComposer(page, browserName, client, id);
 

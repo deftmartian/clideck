@@ -224,7 +224,12 @@ export function createTerminalLocalIntegration({
     const scheduleRenderer = globalThis.requestIdleCallback
       ? callback => requestIdleCallback(callback, { timeout: 250 })
       : callback => setTimeout(callback, 0);
-    scheduleRenderer(() => enableAcceleratedRenderer(term, element));
+    scheduleRenderer(async () => {
+      await enableAcceleratedRenderer(term, element);
+      const entry = state.terms.get(id);
+      if (entry?.term !== term || !element.isConnected) return;
+      entry.reconcileRenderer?.();
+    });
 
     const button = createJumpLatestButton(id, term);
     element.appendChild(button);
@@ -247,11 +252,18 @@ export function createTerminalLocalIntegration({
   function createFitController(id, term, fit) {
     let frame = 0;
     let resizeTimer = 0;
-    function fitPreservingScrollback() {
+    let repaintWhenStable = false;
+    function isCurrentActiveTerminal() {
       const entry = state.terms.get(id);
-      if (state.active !== id || !entry?.el?.classList.contains('active') || !entry.el.offsetWidth) return;
+      return state.active === id
+        && entry?.term === term
+        && entry.el?.classList.contains('active')
+        && entry.el.offsetWidth;
+    }
+    function fitPreservingScrollback() {
+      if (!isCurrentActiveTerminal()) return false;
       const dimensions = fit.proposeDimensions();
-      if (!dimensions || (dimensions.cols === term.cols && dimensions.rows === term.rows)) return;
+      if (!dimensions || (dimensions.cols === term.cols && dimensions.rows === term.rows)) return false;
       const oldBuffer = term.buffer.active;
       const distanceFromBottom = Math.max(0, oldBuffer.baseY - oldBuffer.viewportY);
       fit.fit();
@@ -268,11 +280,27 @@ export function createTerminalLocalIntegration({
         if (state.active !== id || current?.term !== term || term.cols !== cols || term.rows !== rows) return;
         send({ type: 'resize', id, cols, rows });
       }, 120);
+      return true;
+    }
+    function scheduleFit({ repaint = false } = {}) {
+      repaintWhenStable ||= repaint;
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        const shouldRepaint = repaintWhenStable;
+        repaintWhenStable = false;
+        const resized = fitPreservingScrollback();
+        if (!resized && shouldRepaint && isCurrentActiveTerminal()) {
+          try { term.refresh(0, Math.max(0, term.rows - 1)); } catch {}
+        }
+      });
     }
     return {
       request() {
-        if (frame) return;
-        frame = requestAnimationFrame(() => { frame = 0; fitPreservingScrollback(); });
+        scheduleFit();
+      },
+      reconcileRenderer() {
+        scheduleFit({ repaint: true });
       },
       cancel() {
         if (frame) {
@@ -281,6 +309,7 @@ export function createTerminalLocalIntegration({
         }
         clearTimeout(resizeTimer);
         resizeTimer = 0;
+        repaintWhenStable = false;
       },
     };
   }

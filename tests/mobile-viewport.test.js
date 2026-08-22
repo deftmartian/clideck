@@ -77,6 +77,11 @@ test('terminal loads the installed xterm beta line with accelerated rendering an
   assert.match(terminalLocal, /import\('@xterm\/addon-webgl'\)/);
   assert.match(terminalLocal, /onContextLoss\(\(\) => \{[\s\S]{0,100}addon\.dispose\(\)/);
   assert.match(terminalLocal, /catch \{[\s\S]{0,60}addon\?\.dispose\(\)/);
+  assert.match(terminalLocal, /entry\?\.term !== term \|\| !element\.isConnected/);
+  assert.match(terminalLocal, /entry\.reconcileRenderer\?\.\(\)/);
+  assert.match(terminalLocal, /reconcileRenderer\(\)[\s\S]{0,80}scheduleFit\(\{ repaint: true \}\)/);
+  assert.doesNotMatch(terminalLocal, /kickStartupSize|NUDGE_COLS|NUDGE_ROWS/);
+  assert.doesNotMatch(renderer, /kickStartupSize/);
 });
 
 test('mobile composer owns predictive text until an explicit coherent send', () => {

@@ -58,7 +58,7 @@ export function createTerminalRendererLifecycle({
     }
     Object.assign(entry, {
       term: null, fit: null, el: null, ro: null, fitted: false,
-      requestFit: null, cancelFitRaf: null, onContextMenu: null,
+      requestFit: null, reconcileRenderer: null, cancelFitRaf: null, onContextMenu: null,
       queue: null, writeChunk: null,
     });
   }
@@ -141,8 +141,9 @@ export function createTerminalRendererLifecycle({
     // force buffer reflows and make the terminal scrollbar jump.
     const fitController = terminalLocal.createFitController(id, term, fit);
     const requestFit = () => fitController.request();
+    const reconcileRenderer = () => fitController.reconcileRenderer();
     Object.assign(entry, {
-      term, fit, el, requestFit,
+      term, fit, el, requestFit, reconcileRenderer,
       cancelFitRaf: () => fitController.cancel(),
       onContextMenu,
       queue(data, replay = false, onComplete) {
