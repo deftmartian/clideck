@@ -6,6 +6,7 @@ import { countPerf, notePerf } from './perf.js';
 import { createMobileComposer, loadStoredDraft } from './mobile-composer.js';
 import { createMobileSelection } from './mobile-selection.js';
 import { createMobileTouchScroll } from './mobile-touch-scroll.js';
+import { createNativeWheelScroll } from './native-wheel-scroll.js';
 import transportLimits from '../../transport-limits.js';
 
 const { TERMINAL_INPUT_MAX_BYTES } = transportLimits;
@@ -107,6 +108,7 @@ export function createTerminalLocalIntegration({
     onLongPress: () => mobileSelection.activate(),
     onAppScroll: reportAppWheelScroll,
   });
+  const nativeWheelScroll = createNativeWheelScroll();
   mobileSelection = createMobileSelection({
     getActiveId: () => state.active,
     getEntry: id => state.terms.get(id),
@@ -218,6 +220,7 @@ export function createTerminalLocalIntegration({
     mobileComposer.syncTerminalInput({ term, mobileDirect: false });
     mobileSelection.attach(id, term, element);
     mobileTouchScroll.attach(id, term, element);
+    nativeWheelScroll.attach(id, term, element);
     const scheduleRenderer = globalThis.requestIdleCallback
       ? callback => requestIdleCallback(callback, { timeout: 250 })
       : callback => setTimeout(callback, 0);
@@ -288,6 +291,7 @@ export function createTerminalLocalIntegration({
     detach(id) {
       mobileSelection.detach(id);
       mobileTouchScroll.detach(id);
+      nativeWheelScroll.detach(id);
     },
     entryState(id, refreshJumpLatest, requestFit) {
       return {

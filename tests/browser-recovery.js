@@ -1520,6 +1520,90 @@ async function verifyTouchScrollWithMouseTracking(page, cdp, client, sessionId) 
   await writeMarker(client, sessionId, `MOUSE_CLEAN_${Date.now()}`);
 }
 
+// Mouse tracking on the primary buffer (for example Grok --no-alt-screen).
+// xterm would otherwise send wheel reports and freeze native scroll. The
+// intercept must move viewportY and must not leak SGR wheel reports to the PTY.
+async function verifyNativeWheelWithMouseTracking(page, client, sessionId, browserName) {
+  const marker = `NATIVE_WHEEL_READY_${Date.now()}`;
+  const markerSplit = Math.floor(marker.length / 2);
+  client.send({
+    type: 'input',
+    id: sessionId,
+    data: `node -e "for(let n=0;n<120;n++)console.log('NATIVE_WHEEL_'+n);console.log('${marker.slice(0, markerSplit)}'+'${marker.slice(markerSplit)}')"\r`,
+  });
+  await waitForOutput(client, sessionId, marker, `${browserName} native-wheel scrollback`);
+  await waitFor(async () => page.evaluate(async id => {
+    const { state } = window.__clideckTest;
+    return (state.terms.get(id)?.term?.buffer.active.baseY || 0) > 0;
+  }, sessionId), `${browserName} native-wheel baseY`);
+  client.send({
+    type: 'input',
+    id: sessionId,
+    data: `node -e "process.stdout.write('\\u001b[?1000h\\u001b[?1002h\\u001b[?1003h\\u001b[?1006hTRACK');process.stdin.setRawMode(true);process.stdin.resume();var seen=false;process.stdin.on('data',d=>{var s=d.toString('latin1');if(s.indexOf('q')>=0){process.stdout.write('\\u001b[?1006l\\u001b[?1003l\\u001b[?1002l\\u001b[?1000l');process.exit(0)}if(seen===false&&/\\x1b\\[<6[45];/.test(s)){seen=true;process.stdout.write('GOT_WHEEL\\n')}})"\r`,
+  });
+  await waitForOutput(client, sessionId, 'TRACK', `${browserName} native-wheel tracking on`);
+  await waitFor(async () => page.evaluate(async id => {
+    const { state } = window.__clideckTest;
+    const term = state.terms.get(id)?.term;
+    const buffer = term?.buffer.active;
+    return term
+      && term.modes.mouseTrackingMode !== 'none'
+      && buffer?.type === 'normal';
+  }, sessionId), `${browserName} primary-buffer mouse tracking`);
+  const before = await page.evaluate(async id => {
+    const { state } = window.__clideckTest;
+    const term = state.terms.get(id)?.term;
+    const buffer = term.buffer.active;
+    const smoothScrollDuration = term.options.smoothScrollDuration;
+    term.options.smoothScrollDuration = 0;
+    term.scrollToBottom();
+    return {
+      baseY: buffer.baseY,
+      viewportY: buffer.viewportY,
+      type: buffer.type,
+      smoothScrollDuration,
+    };
+  }, sessionId);
+  if (before.viewportY !== before.baseY || before.type === 'alternate') {
+    throw new Error(`${browserName} native-wheel fixture was not at the primary-buffer bottom: ${JSON.stringify(before)}`);
+  }
+  await page.evaluate(() => {
+    const screen = document.querySelector('.term-wrap.active .xterm-screen');
+    if (!screen) throw new Error('active xterm screen is missing');
+    screen.dispatchEvent(new WheelEvent('wheel', {
+      deltaY: -720,
+      deltaMode: 0,
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+    }));
+  });
+  const wheelHitsBefore = count(await terminalText(page, sessionId), 'GOT_WHEEL');
+  await waitFor(async () => page.evaluate(async ({ id, viewportY }) => {
+    const buffer = window.__clideckTest.state.terms.get(id)?.term?.buffer.active;
+    return buffer && buffer.viewportY < viewportY;
+  }, { id: sessionId, viewportY: before.viewportY }), `${browserName} native wheel moved viewport`);
+  await new Promise(resolve => setTimeout(resolve, 200));
+  const wheelHitsAfter = count(await terminalText(page, sessionId), 'GOT_WHEEL');
+  if (wheelHitsAfter > wheelHitsBefore) {
+    throw new Error(`${browserName} leaked wheel reports to a primary-buffer mouse-tracking app`);
+  }
+  await page.evaluate(async ({ id, smoothScrollDuration }) => {
+    const term = window.__clideckTest.state.terms.get(id)?.term;
+    if (term) term.options.smoothScrollDuration = smoothScrollDuration;
+  }, { id: sessionId, smoothScrollDuration: before.smoothScrollDuration });
+  client.send({ type: 'input', id: sessionId, data: 'q' });
+  await waitFor(async () => page.evaluate(async id => {
+    const { state } = window.__clideckTest;
+    return state.terms.get(id)?.term?.modes.mouseTrackingMode === 'none';
+  }, sessionId), `${browserName} native-wheel mouse-tracking reset`);
+  client.send({ type: 'input', id: sessionId, data: '\u0003' });
+  await writeMarker(client, sessionId, `NATIVE_WHEEL_CLEAN_${Date.now()}`);
+  await page.evaluate(async id => {
+    window.__clideckTest.state.terms.get(id)?.term?.scrollToBottom();
+  }, sessionId);
+}
+
 // Scrolling the terminal is reading, not typing: a vertical drag must drop
 // the composer keyboard.
 async function verifyScrollDismissesKeyboard(page, cdp, sessionId) {
@@ -1858,6 +1942,7 @@ async function run(browserName) {
       await verifyTouchScrolling(page, cdp, client, id);
       await verifyTouchScrollDuringStream(page, cdp, client, id);
       await verifyTouchScrollWithMouseTracking(page, cdp, client, id);
+      await verifyNativeWheelWithMouseTracking(page, client, id, browserName);
       await verifyScrollDismissesKeyboard(page, cdp, id);
       await verifyDrawerKeysKeepKeyboardState(page, browserName);
       await verifyMobileAttachImage(page, browserName, client, id);
@@ -1916,6 +2001,7 @@ async function run(browserName) {
       }
     } else {
       await verifyMobileSelection(page, browserName, client, id);
+      await verifyNativeWheelWithMouseTracking(page, client, id, browserName);
       await verifyDrawerKeysKeepKeyboardState(page, browserName);
       await verifyMobileAttachImage(page, browserName, client, id);
       await verifyComposerDraftPersistence(page, browserName, id);

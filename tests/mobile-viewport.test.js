@@ -161,6 +161,16 @@ test('mobile PTY estimates use touch bounds while mounted FitAddon remains autho
   assert.match(renderer, /claimResize:\s*true/);
 });
 
+test('primary-buffer mouse tracking steals the wheel for xterm scroll', () => {
+  const terminalLocal = read('public/js/terminal-local.js');
+  const nativeWheel = read('public/js/native-wheel-scroll.js');
+  assert.match(terminalLocal, /import \{ createNativeWheelScroll \} from '\.\/native-wheel-scroll\.js'/);
+  assert.match(terminalLocal, /nativeWheelScroll\.attach\(id, term, element\)/);
+  assert.match(terminalLocal, /nativeWheelScroll\.detach\(id\)/);
+  assert.match(nativeWheel, /from '\.\.\/\.\.\/native-wheel-policy\.js'/);
+  assert.doesNotMatch(nativeWheel, /presetId/);
+});
+
 test('desktop renderer retention is capped while touch keeps one renderer', () => {
   const terminals = read('public/js/terminals.js');
   const renderer = read('public/js/terminal-renderer.js');
