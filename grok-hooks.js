@@ -1,5 +1,6 @@
 const { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } = require('fs');
 const { dirname, join } = require('path');
+const { applyPageFlipOff, revertPageFlipOff } = require('./grok-ui-pref');
 
 const EVENTS = {
   UserPromptSubmit: 'start',
@@ -11,6 +12,23 @@ const EVENTS = {
 
 function configPath(configRoot) {
   return join(configRoot, 'hooks', 'clideck.json');
+}
+
+function grokConfigTomlPath(configRoot) {
+  return join(configRoot, 'config.toml');
+}
+
+function prefMessage(pref) {
+  if (!pref) return '';
+  if (!pref.success && pref.message) return pref.message;
+  if (pref.changed) {
+    return `Set [ui] page_flip_on_send = false in ${pref.path} (removed on uninstall if still false)`;
+  }
+  return '';
+}
+
+function joinMessages(...parts) {
+  return parts.filter(Boolean).join('. ');
 }
 
 function extractQuotedPath(command, needle) {
@@ -64,8 +82,16 @@ function install(configRoot, port, options = {}) {
   const clideckHook = route => ({ hooks: [{ type: 'command', command: hookCmd(route), timeout: 5 }] });
   const has = (arr, route) => arr?.some(entry => entry.hooks?.some(hook => hook.command === hookCmd(route)));
 
-  if (Object.entries(EVENTS).every(([event, route]) => has(hooks[event], route))) {
-    return { success: true, message: 'Already configured' };
+  const hooksAlready = Object.entries(EVENTS).every(([event, route]) => has(hooks[event], route));
+  const prefs = applyPageFlipOff(grokConfigTomlPath(configRoot));
+  if (prefs.success === false) {
+    return { success: false, message: prefMessage(prefs) };
+  }
+  if (hooksAlready) {
+    return {
+      success: prefs.success !== false,
+      message: joinMessages(prefs.changed ? prefMessage(prefs) : 'Already configured', !prefs.changed && prefMessage(prefs)),
+    };
   }
 
   const stripOld = arr => (arr || []).filter(entry => !entry.hooks?.some(hook =>
@@ -77,14 +103,28 @@ function install(configRoot, port, options = {}) {
   settings.hooks = hooks;
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, JSON.stringify(settings, null, 2) + '\n');
-  return { success: true, message: `Added CliDeck hooks to ${path}` };
+  return {
+    success: true,
+    message: joinMessages(`Added CliDeck hooks to ${path}`, prefMessage(prefs)),
+  };
 }
 
 function remove(configRoot) {
+  const pref = revertPageFlipOff(grokConfigTomlPath(configRoot));
+  if (pref.success === false) {
+    return { success: false, message: pref.message };
+  }
+  const prefNote = pref.changed
+    ? `Removed CliDeck [ui] page_flip_on_send from ${pref.path}`
+    : pref.message || '';
   const path = configPath(configRoot);
-  if (!existsSync(path)) return { success: true, message: 'No config file to clean' };
+  if (!existsSync(path)) {
+    return { success: pref.success !== false, message: joinMessages('No config file to clean', prefNote) };
+  }
   const settings = readSettings(path);
-  if (!settings.hooks) return { success: true, message: 'No hooks to remove' };
+  if (!settings.hooks) {
+    return { success: pref.success !== false, message: joinMessages('No hooks to remove', prefNote) };
+  }
 
   for (const event of Object.keys(EVENTS)) {
     const arr = settings.hooks[event];
@@ -98,7 +138,10 @@ function remove(configRoot) {
   } else {
     writeFileSync(path, JSON.stringify(settings, null, 2) + '\n');
   }
-  return { success: true, message: `Removed CliDeck hooks from ${path}` };
+  return {
+    success: pref.success !== false,
+    message: joinMessages(`Removed CliDeck hooks from ${path}`, prefNote),
+  };
 }
 
-module.exports = { configPath, hasAny, healthy, install, remove };
+module.exports = { configPath, grokConfigTomlPath, hasAny, healthy, install, remove };
