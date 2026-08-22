@@ -150,6 +150,17 @@ test('touch UI override is browser-local and exposed in Appearance settings', ()
   assert.doesNotMatch(settings, /state\.cfg\.touchUiMode/);
 });
 
+test('mobile PTY estimates use touch bounds while mounted FitAddon remains authoritative', () => {
+  const terminals = read('public/js/terminals.js');
+  const renderer = read('public/js/terminal-renderer.js');
+  const testSurface = read('public/js/test-surface.js');
+  assert.match(terminals, /estimateTerminalSize\(el\.clientWidth, el\.clientHeight/);
+  assert.match(terminals, /touchUi:\s*isTouchUiEnabled\(\)/);
+  assert.match(testSurface, /estimateSize,/);
+  assert.match(renderer, /fit\.fit\(\)[\s\S]{0,260}subscribeRenderer\(id, \{ snapshot: true \}\)/);
+  assert.match(renderer, /claimResize:\s*true/);
+});
+
 test('desktop renderer retention is capped while touch keeps one renderer', () => {
   const terminals = read('public/js/terminals.js');
   const renderer = read('public/js/terminal-renderer.js');

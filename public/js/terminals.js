@@ -8,6 +8,9 @@ import { createTerminalLocalIntegration } from './terminal-local.js';
 import { createTerminalRendererLifecycle } from './terminal-renderer.js';
 import { isTouchUiEnabled } from './touch-ui.js';
 import { writeClipboardText } from './terminal-clipboard.js';
+import terminalSize from '../../terminal-size.js';
+
+const { estimateTerminalSize } = terminalSize;
 
 function isLightBg(themeId) {
   const bg = resolveTheme(themeId)?.background;
@@ -543,10 +546,11 @@ function closeThemePicker() {
 
 export function estimateSize() {
   const el = document.getElementById('terminals');
-  // Account for inset-1 padding (4px each side)
-  const w = el.clientWidth - 8, h = el.clientHeight - 8;
-  // Menlo 13px: ~7.8px wide, ~17px tall
-  return { cols: Math.max(Math.floor(w / 7.8), 80), rows: Math.max(Math.floor(h / 17), 24) };
+  // This is only the provisional PTY size. The mounted xterm FitAddon supplies
+  // the authoritative geometry when the renderer subscribes.
+  return estimateTerminalSize(el.clientWidth, el.clientHeight, {
+    touchUi: isTouchUiEnabled(),
+  });
 }
 
 // --- Terminal management ---

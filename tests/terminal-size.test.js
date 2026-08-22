@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
+  estimateTerminalSize,
   normalizeTerminalSize,
   requireTerminalSize,
 } = require('../terminal-size');
@@ -21,4 +22,11 @@ test('terminal sizes reject supplied coercions, unsafe numbers, and out-of-range
     assert.equal(normalizeTerminalSize(cols, rows).ok, false, `${cols} x ${rows}`);
     assert.throws(() => requireTerminalSize(cols, rows), RangeError);
   }
+});
+
+test('provisional terminal sizes use touch bounds without weakening desktop defaults', () => {
+  assert.deepEqual(estimateTerminalSize(390, 844, { touchUi: true }), { cols: 48, rows: 49 });
+  assert.deepEqual(estimateTerminalSize(390, 844), { cols: 80, rows: 49 });
+  assert.deepEqual(estimateTerminalSize(0, 0, { touchUi: true }), { cols: 20, rows: 5 });
+  assert.deepEqual(estimateTerminalSize(100000, 100000, { touchUi: true }), { cols: 500, rows: 300 });
 });

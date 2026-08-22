@@ -254,6 +254,27 @@ async function touchUiState(page) {
   }));
 }
 
+async function verifyProvisionalTerminalSize(page, browserName, { touch }) {
+  const result = await page.evaluate(() => {
+    const container = document.getElementById('terminals');
+    return {
+      estimate: window.__clideckTest.estimateSize(),
+      width: container?.clientWidth,
+      height: container?.clientHeight,
+    };
+  });
+  const minimum = touch ? { cols: 20, rows: 5 } : { cols: 80, rows: 24 };
+  if (
+    result.estimate.cols < minimum.cols
+    || result.estimate.rows < minimum.rows
+    || result.estimate.cols > 500
+    || result.estimate.rows > 300
+    || (touch && result.width < 624 && result.estimate.cols >= 80)
+  ) {
+    throw new Error(`${browserName} provisional terminal size is wrong: ${JSON.stringify(result)}`);
+  }
+}
+
 async function verifyTouchRendererLifecycle(page, browserName, primaryId, sessionIds) {
   const initial = await page.evaluate(async () => {
     const { state } = window.__clideckTest;
@@ -433,6 +454,7 @@ async function verifyNarrowDesktopTouchUi(browser, baseUrl, browserName, session
     ) {
       throw new Error(`${browserName} narrow desktop was misclassified: ${JSON.stringify(initial)}`);
     }
+    await verifyProvisionalTerminalSize(page, browserName, { touch: false });
 
     const alternates = sessionIds.filter(id => id !== sessionId).slice(0, 4);
     for (const alternate of alternates) {
@@ -1816,6 +1838,7 @@ async function run(browserName) {
       async () => (await terminalText(page, id)).includes(base),
       `${browserName} initial replay`,
     );
+    await verifyProvisionalTerminalSize(page, browserName, { touch: true });
     await verifyTranscriptQuery(page, browserName, id, base, 'initial');
     await setTranscriptQuery(page, '');
     await verifyTouchRendererLifecycle(page, browserName, id, sessionIds);

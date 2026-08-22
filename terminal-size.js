@@ -6,6 +6,9 @@ const MIN_COLS = 20;
 const MAX_COLS = 500;
 const MIN_ROWS = 5;
 const MAX_ROWS = 300;
+const TERMINAL_PADDING_PX = 8;
+const TERMINAL_CELL_WIDTH_PX = 7.8;
+const TERMINAL_CELL_HEIGHT_PX = 17;
 
 function supplied(value) {
   return value !== undefined;
@@ -34,6 +37,17 @@ function requireTerminalSize(cols, rows) {
   return { cols: size.cols, rows: size.rows };
 }
 
+function estimateTerminalSize(width, height, { touchUi = false } = {}) {
+  const availableWidth = Math.max(0, Number(width) - TERMINAL_PADDING_PX);
+  const availableHeight = Math.max(0, Number(height) - TERMINAL_PADDING_PX);
+  const minCols = touchUi ? MIN_COLS : DEFAULT_COLS;
+  const minRows = touchUi ? MIN_ROWS : DEFAULT_ROWS;
+  return {
+    cols: Math.min(MAX_COLS, Math.max(Math.floor(availableWidth / TERMINAL_CELL_WIDTH_PX), minCols)),
+    rows: Math.min(MAX_ROWS, Math.max(Math.floor(availableHeight / TERMINAL_CELL_HEIGHT_PX), minRows)),
+  };
+}
+
 module.exports = {
   DEFAULT_COLS,
   DEFAULT_ROWS,
@@ -41,6 +55,7 @@ module.exports = {
   MAX_ROWS,
   MIN_COLS,
   MIN_ROWS,
+  estimateTerminalSize,
   normalizeTerminalSize,
   requireTerminalSize,
 };
