@@ -166,6 +166,15 @@ test('mobile PTY estimates use touch bounds while mounted FitAddon remains autho
   assert.match(renderer, /claimResize:\s*true/);
 });
 
+test('create resume and restart advertise whether the client is touch', () => {
+  const creator = read('public/js/creator.js');
+  const app = read('public/js/app.js');
+  const terminals = read('public/js/terminals.js');
+  assert.match(creator, /touchUi: isTouchUiEnabled\(\)/);
+  assert.match(app, /touchUi: isTouchUiEnabled\(\)/);
+  assert.match(terminals, /touchUi: isTouchUiEnabled\(\)/);
+});
+
 test('primary-buffer mouse tracking steals the wheel for xterm scroll', () => {
   const terminalLocal = read('public/js/terminal-local.js');
   const nativeWheel = read('public/js/native-wheel-scroll.js');

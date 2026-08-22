@@ -2,6 +2,7 @@ import { state, send } from './state.js';
 import { esc, agentIcon, binName, randomUUID } from './utils.js';
 import { openFolderPicker } from './folder-picker.js';
 import { estimateSize, sessionNameTakenInProject } from './terminals.js';
+import { isTouchUiEnabled } from './touch-ui.js';
 import { showToast } from './toast.js';
 
 const ADJECTIVES = [
@@ -129,14 +130,20 @@ function sortedPresets() {
 }
 
 function createFromCommand(cmd, sessionName, cwd, projectId) {
-  send({ type: 'create', commandId: cmd.id, name: sessionName, cwd, projectId: projectId || undefined, ...estimateSize() });
+  send({
+    type: 'create', commandId: cmd.id, name: sessionName, cwd,
+    projectId: projectId || undefined, touchUi: isTouchUiEnabled(), ...estimateSize(),
+  });
   localStorage.setItem(MRU_KEY, cmd.id);
 }
 
 function createFromPreset(preset, sessionName, cwd, projectId) {
   // Find existing command matching this preset
   const cmd = ensureCommandForPreset(preset);
-  send({ type: 'create', commandId: cmd.id, name: sessionName, cwd, projectId: projectId || undefined, ...estimateSize() });
+  send({
+    type: 'create', commandId: cmd.id, name: sessionName, cwd,
+    projectId: projectId || undefined, touchUi: isTouchUiEnabled(), ...estimateSize(),
+  });
   localStorage.setItem(MRU_KEY, preset.presetId);
 }
 

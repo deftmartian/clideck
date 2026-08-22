@@ -113,6 +113,10 @@
     "isAgent": true,
     "canResume": true,
     "resumeCommand": "grok --resume {{sessionId}}",
+    "screen": {
+      "desktopArgs": ["--no-alt-screen"],
+      "touchArgs": ["--minimal"]
+    },
     "sessionIdPattern": null,
     "outputMarker": null,
     "telemetryConfigPath": "~/.grok/hooks/clideck.json",

@@ -16,6 +16,7 @@ import { registerPwa } from './pwa.js';
 import { initClipboardClient } from './clipboard-client.js';
 import { copyTrimmedTerminalSelection, writeClipboardText } from './terminal-clipboard.js';
 import { initCompactNavigation } from './compact-navigation.js';
+import { isTouchUiEnabled } from './touch-ui.js';
 import { createConnectionClient } from './connection-client.js';
 import { createTerminalRecoveryClient } from './terminal-recovery-client.js';
 import { countPerf, notePerf, timePerf } from './perf.js';
@@ -363,7 +364,10 @@ function connect() {
           actionsEl.querySelector('.dismiss-btn').onclick = () => toast.remove();
           if (sid) actionsEl.querySelector('.restart-btn').onclick = () => {
             const entry = state.terms.get(sid);
-            send({ type: 'session.restart', id: sid, themeId: entry?.themeId, cols: entry?.term?.cols, rows: entry?.term?.rows });
+            send({
+              type: 'session.restart', id: sid, themeId: entry?.themeId,
+              touchUi: isTouchUiEnabled(), cols: entry?.term?.cols, rows: entry?.term?.rows,
+            });
             toast.remove();
           };
         } else {
@@ -533,7 +537,10 @@ sessionList.addEventListener('click', (e) => {
   // Resumable session click
   const resumableRow = e.target.closest('[data-resumable-id]');
   if (resumableRow) {
-    send({ type: 'session.resume', id: resumableRow.dataset.resumableId });
+    send({
+      type: 'session.resume', id: resumableRow.dataset.resumableId,
+      touchUi: isTouchUiEnabled(), ...estimateSize(),
+    });
     closeMobileSidebar();
     return;
   }
@@ -719,7 +726,9 @@ function resumeDormantSessions(ids, label) {
   showToast(`Starting ${uniqueIds.length} dormant session${uniqueIds.length > 1 ? 's' : ''}${label ? ` from ${label}` : ''}…`, { duration: 3000 });
   uniqueIds.forEach((id, index) => {
     setTimeout(() => {
-      if (state.resumable.some(s => s.id === id)) send({ type: 'session.resume', id });
+      if (state.resumable.some(s => s.id === id)) {
+        send({ type: 'session.resume', id, touchUi: isTouchUiEnabled(), ...estimateSize() });
+      }
     }, index * 1000);
   });
 }

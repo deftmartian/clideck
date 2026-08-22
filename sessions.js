@@ -2,7 +2,8 @@ const pty = require('node-pty');
 const { readFileSync, writeFileSync, existsSync } = require('fs');
 const { join } = require('path');
 const crypto = require('crypto');
-const { parseCommand, resolveValidDir, defaultShell, binName } = require('./utils');
+const { resolveValidDir, defaultShell, binName } = require('./utils');
+const { sessionLaunchParts } = require('./session-launch');
 const activity = require('./activity');
 const transcript = require('./transcript');
 const telemetry = require('./telemetry-receiver');
@@ -12,7 +13,7 @@ const plugins = require('./plugin-loader');
 const { presetForCommand, menuStartsWork } = require('./preset-utils');
 const { lineageOf } = require('./lineage');
 const { stripAnsi } = require('./ansi-utils');
-const { withCliDeckGuide } = require('./agent-session-guide');
+
 const { initialResumeReady, hasUsableResumeToken } = require('./resume-readiness');
 const { ServerCapture } = require('./server-capture');
 const { createSessionCapture } = require('./session-capture');
@@ -163,13 +164,12 @@ function isLightTheme(themeId) {
 
 function spawnSession(id, cmd, parts, cwd, name, themeId, commandId, savedToken, projectId, cols, rows) {
   const preset = matchPreset(cmd);
-  const launchParts = withCliDeckGuide(parts, preset?.presetId);
   const telemetryEnv = buildTelemetryEnv(id, cmd);
   const colorEnv = isLightTheme(themeId) ? { COLORFGBG: '0;15' } : { COLORFGBG: '15;0' };
   const extraEnv = commandEnv(cmd);
   let term;
   try {
-    term = pty.spawn(launchParts[0], launchParts.slice(1), {
+    term = pty.spawn(parts[0], parts.slice(1), {
       name: 'xterm-256color', cols, rows, cwd,
       env: { ...process.env, ...extraEnv, ...telemetryEnv, ...colorEnv },
     });
@@ -299,7 +299,7 @@ function create(msg, ws, cfg) {
   const cmd = cfg.commands.find(c => c.id === msg.commandId)
     || cfg.commands[0]
     || { label: 'Shell', command: defaultShell };
-  const parts = parseCommand(cmd.command);
+  const parts = sessionLaunchParts(cmd, matchPreset(cmd), { touchUi: !!msg.touchUi });
   const cwd = resolveValidDir(msg.cwd || cmd.defaultPath || cfg.defaultPath);
   const themeId = msg.themeId || cfg.defaultTheme || 'default';
   const name = msg.name || cmd.label;
@@ -341,7 +341,7 @@ function createProgrammatic(opts, cfg) {
   else if (opts.commandId) cmd = cfg.commands.find(c => c.id === opts.commandId);
   if (!cmd) return { error: 'Command not found' };
 
-  const parts = parseCommand(cmd.command);
+  const parts = sessionLaunchParts(cmd, matchPreset(cmd), { touchUi: !!opts.touchUi });
   const cwd = resolveValidDir(opts.cwd || cmd.defaultPath || cfg.defaultPath);
   const themeId = opts.themeId || cfg.defaultTheme || 'default';
   const name = opts.name || cmd.label;
@@ -406,7 +406,11 @@ function resume(msg, ws, cfg) {
     resumeStr = resumeStr.replace('{{sessionId}}', saved.sessionToken);
   }
 
-  const parts = parseCommand(resumeStr);
+  const parts = sessionLaunchParts(
+    cmd,
+    matchPreset(cmd) || PRESETS.find(preset => preset.presetId === saved.presetId),
+    { touchUi: !!msg.touchUi, commandText: resumeStr },
+  );
   const id = saved.id;
 
   const err = spawnSession(id, cmd, parts, cwd, saved.name, saved.themeId || saved.profileId || 'default', saved.commandId, saved.sessionToken, saved.projectId, size.cols, size.rows);
@@ -535,13 +539,16 @@ function restart(msg, ws, cfg) {
 
   const themeId = msg.themeId || s.themeId;
   const canResume = cmd.canResume && cmd.resumeCommand && hasUsableResumeToken(s);
-
-  let parts;
-  if (canResume) {
-    parts = parseCommand(cmd.resumeCommand.replace('{{sessionId}}', s.sessionToken));
-  } else {
-    parts = parseCommand(cmd.command);
-  }
+  const parts = sessionLaunchParts(
+    cmd,
+    matchPreset(cmd) || PRESETS.find(preset => preset.presetId === s.presetId),
+    {
+      touchUi: !!msg.touchUi,
+      commandText: canResume
+        ? cmd.resumeCommand.replace('{{sessionId}}', s.sessionToken)
+        : cmd.command,
+    },
+  );
 
   const savedToken = canResume ? s.sessionToken : null;
   const { name, cwd, commandId, projectId, muted, lastPreview, lastActivityAt } = s;

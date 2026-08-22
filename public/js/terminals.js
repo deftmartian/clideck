@@ -464,7 +464,7 @@ function openMenu(sessionId, anchor) {
       const re = state.terms.get(sessionId);
       if (re) {
         const size = re.term ? { cols: re.term.cols, rows: re.term.rows } : estimateSize();
-        send({ type: 'session.restart', id: sessionId, themeId: re.themeId, ...size });
+        send({ type: 'session.restart', id: sessionId, themeId: re.themeId, touchUi: isTouchUiEnabled(), ...size });
       }
     } else if (action === 'delete') {
       document.getElementById('session-list').dispatchEvent(
@@ -947,7 +947,7 @@ function showRestartBanner(id, themeId) {
     e.stopPropagation();
     console.log('[restart] click banner, sending session.restart', { id, themeId: entry.themeId });
     const size = entry.term ? { cols: entry.term.cols, rows: entry.term.rows } : estimateSize();
-    send({ type: 'session.restart', id, themeId: entry.themeId, ...size });
+    send({ type: 'session.restart', id, themeId: entry.themeId, touchUi: isTouchUiEnabled(), ...size });
   });
   group.appendChild(banner);
 }
