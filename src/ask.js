@@ -13,6 +13,7 @@ function parseAskRequest(value) {
   const callerSessionId = value.callerSessionId === undefined
     ? '' : typeof value.callerSessionId === 'string' ? value.callerSessionId.trim() : null;
   const steer = value.steer === undefined ? false : value.steer;
+  if (value.interruptExisting !== undefined && typeof value.interruptExisting !== 'boolean') return null;
   const timeoutMs = value.timeoutMs === undefined ? DEFAULT_ASK_TIMEOUT_MS : value.timeoutMs;
   if (!target || target.length > 200 || target.includes('\0')) return null;
   if (!text || text.length > MAX_CONTROL_TEXT || text.includes('\0')) return null;
@@ -27,6 +28,7 @@ function parseAskRequest(value) {
     timeoutMs,
     ...(callerSessionId && { callerSessionId }),
     ...(steer && { steer: true }),
+    ...(value.interruptExisting === true && { interruptExisting: true }),
   };
 }
 
@@ -105,7 +107,7 @@ function resolveAskTarget(entries, target, options = {}) {
       entries.filter((entry) => sameSessionScope(entry, options.caller)),
       value,
     );
-    if (local.error !== 'unknown_target') return local;
+    return local;
   }
   return matchingSessions(entries, value);
 }

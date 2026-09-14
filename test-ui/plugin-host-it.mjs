@@ -159,6 +159,7 @@ ok("host player exposes pause and resume controls", document.querySelector(".plu
 workers[0].emit({ type: "request", method: "open-terminal-composition", requestId: "composition-open", options: { state: "listening", title: "Local Dictation", canStop: true } });
 await tick();
 ok("Worker opens only the host-owned terminal composition", workers[0].sent.some((message) => message.type === "response" && message.requestId === "composition-open" && message.success && message.value.sessionId === "S") && document.querySelector(".plugin-composition")?.parentNode === termPanel);
+ok("dictation reveals the terminal from a document tab", termPanel.hidden === false);
 workers[0].emit({ type: "terminal-composition-update", patch: { state: "ready", draft: "Ship the focused fix.", canSend: true } });
 document.querySelector(".pc-send")._fire("click");
 ok("composition actions return to the owning Worker", document.querySelector(".pc-draft").textContent === "Ship the focused fix." && workers[0].sent.some((message) => message.type === "terminal-composition-action" && message.action.type === "send" && message.action.sessionId === "S"));
@@ -172,6 +173,7 @@ await tick();
 ok("disable removes runtime actions and client-owned workspaces", __runtimeCountForTest() === 0 && (await resolveActions("terminal.context", { selection: { text: "x" } })).length === 0 && ![...document.querySelectorAll(".cd-tab")].some((tab) => tab.textContent.includes("Board")));
 ok("plugin teardown cancels its active picker", !document.querySelector(".pk-overlay") && workers[0].sent.some((message) => message.type === "response" && message.requestId === "picker-teardown" && message.success && message.value === null));
 ok("runtime teardown rejects a still-pending semantic action", await stopRun === false);
+clickTab("Preview asset"); await tick();
 ok("persisted custom content survives disable with an unavailable state", [...document.querySelectorAll(".cd-tab")].some((tab) => tab.textContent.includes("Preview asset")) && !!document.querySelector(".cd-error"));
 ok("disable removes plugin viewer registrations, audio and composition", viewerFor("safe-client/preview") === null && player.hidden === true && !document.querySelector(".plugin-composition"));
 

@@ -1,0 +1,74 @@
+.fork-mobile-nav,.mobile-sidebar-backdrop,.mobile-git,.mobile-more,#mobile-composer,#mobile-page-reload,.th-actions>select{display:none}
+#pwa-update-banner{position:fixed;top:0;left:0;right:0;z-index:200;background:var(--surface-2);padding:10px;gap:12px}
+#pwa-update-banner:not([hidden]){display:flex}
+#pwa-update-banner button{padding:6px 12px}
+.terminal-draft .pc-draft{display:block;width:100%;min-height:80px;resize:vertical;font:16px var(--sans);background:var(--surface-1);color:var(--text);border:1px solid var(--border);padding:8px}
+.terminal-draft .pc-controls{flex-wrap:wrap}
+.terminal-draft button{min-height:44px;min-width:60px}
+.connection-status{position:fixed;top:48px;left:0;right:0;z-index:190;padding:8px 12px;background:var(--surface-2);color:var(--text);border-top:1px solid var(--border)}
+.connection-status[hidden]{display:none}
+.connection-status button{margin-left:12px;padding:6px 12px}
+.mobile-ui .app{position:fixed;top:var(--mobile-top,0px);left:0;width:100%;height:var(--mobile-height,100dvh);padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom)}
+.mobile-ui .sidebar{position:absolute;inset:0 auto 0 0;z-index:80;width:min(340px,88vw);padding-top:48px;transform:translateX(-101%);box-shadow:8px 0 24px var(--shadow)}
+.mobile-ui.fork-sidebar-open .sidebar{transform:translateX(0)}
+.mobile-ui.fork-sidebar-open .mobile-sidebar-backdrop{display:block;position:absolute;inset:0;z-index:75;background:#0008;border:0}
+.mobile-ui .resize-handle{display:none}
+.mobile-ui .main{min-width:0;width:100%}
+.mobile-ui .fork-mobile-nav{display:grid;place-items:center;position:absolute;top:calc(3px + env(safe-area-inset-top));left:4px;z-index:85;width:44px;height:44px;border:0;border-radius:8px;background:var(--bg);color:var(--text);font-size:23px}
+.mobile-ui .term-head{height:50px;flex:0 0 50px;min-height:50px;padding:0 5px 0 52px;gap:3px;flex-wrap:nowrap;container-type:normal;position:relative;z-index:40}
+.mobile-ui .th-id{flex:1;min-width:0;gap:5px}
+.mobile-ui .th-name{max-width:none;min-width:0;flex:1;font-size:14px;margin:0;padding:3px}
+.mobile-ui .th-avatar,.mobile-ui .th-rename,.mobile-ui .th-rename-msg,.mobile-ui .th-spacer,.mobile-ui .th-insights,.mobile-ui .th-div{display:none}
+.mobile-ui .mobile-git,.mobile-ui .mobile-more{display:block;flex:0 0 44px;width:44px;height:44px;border:0;border-radius:8px;background:transparent;color:var(--text);font:13px var(--sans)}
+.mobile-ui .mobile-git:disabled{opacity:.4}
+.mobile-ui .th-actions{display:none;position:absolute;right:6px;top:48px;width:min(260px,calc(100vw - 12px));padding:6px;border:1px solid var(--border);border-radius:12px;background:var(--surface-1);box-shadow:0 10px 35px var(--shadow);z-index:90}
+.mobile-ui.mobile-menu-open .th-actions{display:flex;flex-direction:column;align-items:stretch}
+.mobile-ui .th-actions>button{width:100%;height:44px;display:flex;gap:10px;padding:0 12px;color:var(--text);font:13px var(--sans)}
+.mobile-ui .th-actions>button::after{content:attr(aria-label)}
+.mobile-ui .th-actions>button#mobile-page-reload{font-size:0}
+.mobile-ui .th-actions>button#mobile-page-reload::after{font-size:13px}
+.mobile-ui .th-actions>select{display:block;min-height:44px;background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px}
+.mobile-ui .rp-empty{padding-top:60px}
+.mobile-ui #term{min-height:0;overflow:hidden;padding:5px 6px}
+.mobile-ui .plugin-frame{min-height:0}
+.mobile-ui .cd-tabs{min-height:40px;flex-shrink:0;overflow-x:auto}
+.mobile-ui .cd-tab{min-height:40px;flex-shrink:0}
+.mobile-ui #mobile-composer{display:block;flex:0 0 auto;padding:6px;background:var(--bg-side);border-top:1px solid var(--border)}
+.mobile-ui #mobile-composer[hidden]{display:none}
+.mobile-composer-editor{display:flex;align-items:flex-end;gap:5px}
+#mobile-composer button{min-width:44px;min-height:44px;flex-shrink:0;border:1px solid var(--border);border-radius:8px;padding:5px 10px;background:var(--surface-2);color:var(--text);font:13px var(--sans);touch-action:manipulation}
+#mobile-composer button:disabled{opacity:.4}
+#mobile-composer #mobile-composer-tools{padding:0;width:44px;font-size:23px}
+#mobile-composer #mobile-composer-send{padding:0;width:44px;background:var(--accent);color:var(--accent-ink);font-size:21px;border-color:var(--accent)}
+#mobile-composer textarea{flex:1;min-width:0;width:100%;height:44px;min-height:44px;max-height:82px;resize:none;border:1px solid var(--border-strong);border-radius:9px;padding:10px;font:16px/21px var(--sans);background:var(--surface-1);color:var(--text)}
+#mobile-composer textarea:focus{outline:2px solid var(--accent);outline-offset:-2px}
+#mobile-composer-accessories{display:flex;flex-wrap:wrap;gap:5px;padding-bottom:6px;max-height:min(220px,40dvh);overflow:auto}
+#mobile-composer-accessories[hidden]{display:none}
+#mobile-composer-accessories select{appearance:none;-webkit-appearance:none;padding:6px;max-width:100%;min-height:44px;background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:8px}
+.fork-selection-actions{display:none;align-items:center;gap:5px;padding-bottom:6px}
+.mobile-selection-active .fork-selection-actions{display:flex}
+.fork-selection-actions span{flex:1;min-width:0;font-size:12px}
+.mobile-selection-active .xterm-screen{touch-action:none}
+.mobile-draft-status:empty{display:none}
+.mobile-draft-status{padding:4px 6px;color:var(--dim);font-size:12px}
+#mobile-composer.voice-active .mobile-composer-editor,#mobile-composer.voice-active #mobile-composer-accessories{display:none}
+#mobile-voice-slot:empty{display:none}
+#mobile-voice-slot .plugin-composition{position:static;transform:none;width:100%;margin:0;animation:none;box-shadow:none;padding:6px;grid-template-columns:minmax(0,1fr);gap:5px;border-radius:10px}
+#mobile-voice-slot .pc-signal,#mobile-voice-slot .pc-hint{display:none}
+#mobile-voice-slot .pc-controls{grid-column:1;justify-self:end}
+#mobile-voice-slot .pc-draft{max-height:48px}
+.mobile-short #mobile-voice-slot .pc-top{display:none}
+.mobile-ui .toaster{top:calc(54px + env(safe-area-inset-top));bottom:auto;right:6px;max-width:calc(100vw - 12px)}
+.mobile-ui .scroll-btn{bottom:10px}
+.mobile-short #mobile-composer textarea{height:44px!important;max-height:44px}
+.mobile-short #mobile-composer-accessories{max-height:44px;padding-bottom:0;margin-bottom:5px}
+.mobile-short .mobile-draft-status{font-size:10px;line-height:12px;padding:1px 4px}
+
+/* Keep the explicit layout override reversible on desktop and touch screens. */
+body:not(.mobile-ui) #interface-mode{display:block;position:fixed;right:8px;bottom:8px;z-index:200;max-width:125px;background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px}
+.mobile-ui .th-actions{max-height:calc(var(--mobile-height,100dvh) - 60px);overflow-y:auto}
+
+.mobile-session-status{display:none}
+.mobile-ui .mobile-session-status{display:block;width:7px;height:7px;flex:0 0 7px;border-radius:50%;background:var(--faint)}
+.mobile-ui .mobile-session-status[data-state="idle"]{background:#73ba91}
+.mobile-ui .mobile-session-status[data-state="working"]{background:#dfad54}

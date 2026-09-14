@@ -6,6 +6,8 @@ const MAX_CONTROL_BYTES = 16 * 1024 * 1024;
 const MAX_SESSION_ID = 200;
 const CONTROL_TYPES = new Set([
   'session.create',
+  'session.history.get',
+  'session.subscribe', 'session.unsubscribe', 'session.ack', 'session.claimResize', 'transcript.cache.get',
   'prompt',
   'prompt.answer',
   'input',
@@ -64,6 +66,19 @@ function isKnownControlType(type) {
 }
 
 function hasValidControlFields(message) {
+  if (message.type === 'transcript.cache.get') return true;
+  if (['session.subscribe', 'session.unsubscribe', 'session.ack', 'session.claimResize'].includes(message.type)) {
+    if (!isString(message.id, 200)) return false;
+    if (message.type === 'session.subscribe') return isDimension(message.cols, 20, 500)
+      && isDimension(message.rows, 5, 300)
+      && (message.claim === undefined || typeof message.claim === 'boolean')
+      && (message.cursor === undefined || (message.cursor && isString(message.cursor.generation, 200)
+        && Number.isSafeInteger(message.cursor.seq) && message.cursor.seq >= 0));
+    if (message.type === 'session.ack') return Number.isSafeInteger(message.streamId) && message.streamId >= 0
+      && isString(message.generation, 200)
+      && ((Number.isSafeInteger(message.seq) && message.seq >= 0) || (Number.isSafeInteger(message.part) && message.part >= 0));
+    return true;
+  }
   if (message.type === 'config.get' || message.type === 'checkAvailability') return true;
   if (message.type === 'plugins.refresh' || message.type === 'plugin.openFolder') {
     return hasValidRequestId(message);
@@ -103,13 +118,16 @@ function hasValidControlFields(message) {
   if (message.type === 'dirs.mkdir') {
     return isString(message.parent, 4096) && isString(message.name, 255, true);
   }
+  if (message.type === 'session.history.get') return typeof message.sessionId === 'string' && message.sessionId.length <= 200
+    && typeof message.requestId === 'string' && message.requestId.length <= 100;
   if (message.type === 'session.create') {
+    if (message.touchUi !== undefined && typeof message.touchUi !== 'boolean') return false;
     return (message.provider === undefined || isString(message.provider, 100))
       && (message.commandId === undefined || isString(message.commandId, 100))
       && (message.name === undefined || isString(message.name, 200, true))
       && (message.cwd === undefined || isString(message.cwd, 4096))
-      && (message.cols === undefined || isDimension(message.cols, 20, 1000))
-      && (message.rows === undefined || isDimension(message.rows, 5, 500))
+      && (message.cols === undefined || isDimension(message.cols, 20, 500))
+      && (message.rows === undefined || isDimension(message.rows, 5, 300))
       && (message.theme === undefined || isTheme(message.theme))
       && (message.projectId === undefined || isProjectId(message.projectId));
   }
@@ -139,7 +157,7 @@ function hasValidControlFields(message) {
     return typeof message.data === 'string' && message.data.length <= MAX_CONTROL_TEXT;
   }
   if (message.type === 'resize') {
-    return isDimension(message.cols, 20, 1000) && isDimension(message.rows, 5, 500);
+    return isDimension(message.cols, 20, 500) && isDimension(message.rows, 5, 300);
   }
   if (message.type === 'session.rename') return isString(message.name, 200, true);
   if (message.type === 'session.resume') {
@@ -147,8 +165,8 @@ function hasValidControlFields(message) {
   }
   if (message.type === 'session.restart') {
     return (message.theme === undefined || isTheme(message.theme))
-      && (message.cols === undefined || isDimension(message.cols, 20, 1000))
-      && (message.rows === undefined || isDimension(message.rows, 5, 500));
+      && (message.cols === undefined || isDimension(message.cols, 20, 500))
+      && (message.rows === undefined || isDimension(message.rows, 5, 300));
   }
   if (message.type === 'session.mute') return typeof message.muted === 'boolean';
   if (message.type === 'session.setProject') return isProjectId(message.projectId);

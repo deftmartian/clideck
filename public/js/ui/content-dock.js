@@ -489,13 +489,18 @@ function renderDock() {
   showRail(dropArmed && bare);
 }
 
+export function showTerminalTab() {
+  const entry = docks.get(store.activeId);
+  if (entry && entry.activeId !== TERMINAL_TAB) { entry.activeId = TERMINAL_TAB; renderDock(); }
+}
+
 function terminalTab(on) {
   const tab = h("div", "cd-tab cd-tab-term" + (on ? " on" : ""));
   tab.setAttribute("role", "tab"); tab.setAttribute("aria-selected", String(on));
   tab.append(spanIcon("terminal"));
   const label = h("span", "cd-tab-name"); label.textContent = "Terminal";
   tab.appendChild(label);
-  tab.addEventListener("click", () => { const e = docks.get(store.activeId); if (e) { e.activeId = TERMINAL_TAB; renderDock(); } });
+  tab.addEventListener("click", showTerminalTab);
   return tab;
 }
 function docTab(it, on, entry) {

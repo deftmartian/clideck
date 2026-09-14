@@ -1,11 +1,17 @@
+import { connectionStatus, diagnoseConnection } from './connection-status.js';
+import { noteServerVersion } from './pwa.js';
 // WebSocket transport. Connects back to whatever host:port served the page
 // (4100, or a side port like 4123), so it works wherever the engine runs.
+import { handleTerminalFrame, resumeTerminal, suspendTerminal, resetTerminalStream, disconnectTerminalStream } from "./terminal-stream.js";
 import { store } from "./store.js";
 import { resolvedTheme } from "./theme.js";
 import { toast } from "./ui/toast.js";
 
 let ws = null;
 let retry = null;
+let connectedOnce = false;
+let transcriptRequested = false;
+let diagnostic = null;
 
 // ── Offline send-queue (§U, v1 state.js:17-65) ──────────────────────────────────
 // While the socket is down for ORDINARY offline (not the stale-engine state — a stale engine 1003-closes our
@@ -60,17 +66,17 @@ export function pendingQueue() { return queue.map((m) => ({ ...m })); }
 const HEALTHY_MS = 2000;
 const STALE_AFTER = 3;
 const RETRY_MS = 1500, STALE_RETRY_MS = 4000;
-const STALE_MSG = "Engine is outdated or unreachable — restart the engine (node src/server.js) and refresh.";
+const STALE_MSG = "Connection interrupted. Check your connection or reload this page.";
 let openedAt = 0, fastCloses = 0, stale = false, healthyT = null;
 
 export function send(obj) {
-  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
-  else enqueue(obj);   // offline → queue whitelisted actions, flushed in order on reconnect (input/resize dropped)
+  if (ws && ws.readyState === WebSocket.OPEN) { ws.send(JSON.stringify(obj)); return true; }
+  enqueue(obj); return false;   // offline → queue whitelisted actions, flushed in order on reconnect (input/resize dropped)
 }
 
 export function createSession(provider, cwd, name, projectId, commandId) {
   // cols/rows are the PTY's initial size; the terminal refits + resizes on focus.
-  const msg = { type: "session.create", cols: 120, rows: 40 };
+  const msg = { type: "session.create", cols: 120, rows: 40, touchUi: window.matchMedia?.("(pointer: coarse)").matches === true };
   if (commandId) msg.commandId = commandId; // spawn a custom command (engine resolves it; provider omitted)
   else if (provider) msg.provider = provider;   // omitted → engine default (claude-code)
   // Working dir: an explicit cwd wins; a blank cwd with NO project falls back to the configured Default working
@@ -93,14 +99,14 @@ export function resumeSession(id) {
   // Valid only on dormant rows; the engine re-broadcasts session.created{live:true} for the
   // same id. Silently dropped on live/unknown ids, so double-clicks are harmless. Resume
   // respawns the PTY, so re-advertise the theme too so the fresh process renders to match.
-  send({ type: "session.resume", sessionId: id, theme: resolvedTheme() });
+  send({ type: "session.resume", sessionId: id, touchUi: window.matchMedia?.("(pointer: coarse)").matches === true, theme: resolvedTheme() });
 }
 
 export function restartSession(id, theme) {
   // Re-spawn this session's PTY (engine `session.restart` lands in parallel). Carry a light/dark theme
   // (→ COLORFGBG, so the fresh process renders themed) + the current pane size. `theme` defaults to the app
   // mode; the theme picker passes the session's chosen theme polarity so a restart applies its color mode.
-  send({ type: "session.restart", sessionId: id, theme: theme === "light" || theme === "dark" ? theme : resolvedTheme(), cols: store.termCols, rows: store.termRows });
+  send({ type: "session.restart", sessionId: id, touchUi: window.matchMedia?.("(pointer: coarse)").matches === true, theme: theme === "light" || theme === "dark" ? theme : resolvedTheme(), cols: store.termCols, rows: store.termRows });
 }
 
 export function renameSession(id, name) {
@@ -223,10 +229,16 @@ export function requestTranscriptPage(sessionId, before, limit = 30) {
 
 export function connectWs() {
   clearTimeout(retry);
-  try { ws = new WebSocket(`ws://${location.host}`); }
+  if (ws && ws.readyState <= WebSocket.OPEN) return;
+  diagnostic?.abort();
+  connectionStatus(navigator.onLine === false ? "offline" : "connecting", reconnectWs);
+  try { ws = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/?protocol=fork-v6`); }
   catch { scheduleReconnect(); return; }
 
+  const socket = ws;
   ws.onopen = () => {
+    if (ws !== socket) return;
+    connectionStatus("connected", reconnectWs);
     openedAt = Date.now();
     clearTimeout(healthyT);
     healthyT = setTimeout(onHealthy, HEALTHY_MS);   // survives this long → a real, working engine
@@ -234,10 +246,24 @@ export function connectWs() {
     else requestConfig();                            // stale probe: DON'T wipe the UI; a healthy engine replies + survives
   };
   ws.onmessage = (m) => {
+    if (ws !== socket) return;
     let ev; try { ev = JSON.parse(m.data); } catch { return; }
-    store.applyEvent(ev);
+    if (ev.type === 'sessions.inventory') {
+      const present = new Set(ev.ids);
+      for (const id of store.sessions.keys()) if (!present.has(id)) store.applyEvent({ type: 'session.closed', sessionId: id });
+      resumeTerminal(); return;
+    }
+    if (ev.type === 'config') noteServerVersion(ev.config?.version || ev.version);
+    if (!handleTerminalFrame(ev)) store.applyEvent(ev);
   };
   ws.onclose = () => {
+    if (ws !== socket) return;
+    disconnectTerminalStream();
+    diagnostic?.abort(); diagnostic = new AbortController();
+    const controller = diagnostic;
+    diagnoseConnection(controller.signal).then(status => {
+      if (diagnostic === controller && !controller.signal.aborted && !store.connected) connectionStatus(status, reconnectWs);
+    });
     clearTimeout(healthyT);
     store.setConnected(false);
     if (openedAt) fastCloses = Date.now() - openedAt < HEALTHY_MS ? fastCloses + 1 : 0;   // count only sockets that OPENED then died fast
@@ -245,11 +271,14 @@ export function connectWs() {
     if (fastCloses >= STALE_AFTER && !stale) { stale = true; store.setStale(true, STALE_MSG); }   // the failure now explains itself
     scheduleReconnect();
   };
-  ws.onerror = () => { try { ws.close(); } catch {} };
+  ws.onerror = () => { if (ws === socket) { try { socket.close(); } catch {} } };
 }
 
 function initConnection() {
-  store.reset();               // replay is the full truth of live sessions
+  if (!connectedOnce) { store.reset(); resetTerminalStream(); }
+  connectedOnce = true;
+  transcriptRequested = false;
+  diagnostic?.abort();
   store.setConnected(true);    // engine replays each live session on connect
   requestConfig();             // pull config (engine replies {type:'config'})
 }
@@ -261,3 +290,21 @@ function onHealthy() {
 }
 
 function scheduleReconnect() { clearTimeout(retry); retry = setTimeout(connectWs, stale ? STALE_RETRY_MS : RETRY_MS); }
+
+export function reconnectWs() {
+  clearTimeout(retry); diagnostic?.abort();
+  if (ws && ws.readyState <= WebSocket.OPEN) ws.close();
+  else connectWs();
+}
+window.addEventListener('online', reconnectWs);
+window.addEventListener('offline', () => { connectionStatus('offline', reconnectWs); if (ws) ws.close(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') suspendTerminal();
+  else if (store.connected) resumeTerminal();
+  else reconnectWs();
+});
+store.on('filter', () => {
+  if (store.search && store.connected && !transcriptRequested) {
+    transcriptRequested = true; send({ type: 'transcript.cache.get' });
+  }
+});

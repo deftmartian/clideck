@@ -1,9 +1,10 @@
+import { commitCompositionDraft } from "./terminal-draft.js";
 // Browser plugin host. client.js runs in a module Worker, never in CliDeck's window. The host owns every
 // visible surface and converts Worker registrations into action/viewer/workspace records with deterministic
 // teardown on disable, failure, replacement, or reconnect.
 import { store } from "../store.js";
 import { sendPluginMessage } from "../ws.js";
-import { terminalSelection, terminalFocusTarget, commitTerminalDraft, getTerminalSelectionSnapshot } from "./terminal.js";
+import { terminalSelection, terminalFocusTarget, getTerminalSelectionSnapshot } from "./terminal.js";
 import { registerHotkey, unregisterHotkey, unregisterAllForPlugin } from "./hotkeys.js";
 import { registerAction, unregisterActionsForPlugin, resolveActions, runAction, onActionsChange, setActionErrorHandler } from "./action-registry.js";
 import { registerPluginViewer, registerWorkspace, unregisterViewersForPlugin, workspaceFor } from "./viewer-registry.js";
@@ -104,7 +105,7 @@ class Runtime {
       else if (message.method === "open-terminal-composition") {
         value = openPluginComposition(id, message.options, (action) => this.worker.postMessage({ type: "terminal-composition-action", action }));
       }
-      else if (message.method === "commit-terminal-draft") value = commitTerminalDraft(message.text, message.options);
+      else if (message.method === "commit-terminal-draft") value = commitCompositionDraft(message.text, message.options);
       else { this.response(message.requestId, false, null, "Unknown host request."); return; }
       this.response(message.requestId, true, value);
     } catch (error) { this.response(message.requestId, false, null, error && error.message || String(error)); }

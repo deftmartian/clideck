@@ -178,7 +178,12 @@ test('CLI lists, asks, reports status, and rejects invalid targets', async () =>
     assert.equal(status.code, 0, status.stderr);
     assert.equal(JSON.parse(status.stdout)[1].status, 'idle');
 
-    const asked = await runCli(['ask', '@Main/Reviewer', '--timeout', '30s'], env, 'Review this.');
+    const protectedAsk = await runCli(['ask', '@Main/Reviewer', 'Do not interrupt'], env);
+    assert.equal(protectedAsk.code, 1);
+    assert.match(protectedAsk.stderr, /existing user conversation/i);
+    assert.deepEqual(target.prompts, []);
+
+    const asked = await runCli(['ask', '--interrupt-existing', '@Main/Reviewer', '--timeout', '30s'], env, 'Review this.');
     assert.equal(asked.code, 0, asked.stderr);
     assert.equal(asked.stdout, 'CLI_ANSWER\n');
     assert.match(asked.stderr, /contacting "@Main\/Reviewer"/);
@@ -192,12 +197,12 @@ test('CLI lists, asks, reports status, and rejects invalid targets', async () =>
     }]);
 
     target.status = 'working';
-    const busy = await runCli(['ask', 'Reviewer', 'Do not queue.'], env);
+    const busy = await runCli(['ask', '--interrupt-existing', 'Reviewer', 'Do not queue.'], env);
     assert.equal(busy.code, 1);
     assert.match(busy.stderr, /Re-run with --steer/);
     assert.equal(broadcasts.filter((event) => event.type === 'session.dispatch').length, 1);
 
-    const steered = await runCli(['ask', 'Reviewer', 'Use the new constraint.', '--steer'], env);
+    const steered = await runCli(['ask', '--interrupt-existing', 'Reviewer', 'Use the new constraint.', '--steer'], env);
     assert.equal(steered.code, 0, steered.stderr);
     assert.equal(steered.stdout, '');
     assert.match(steered.stderr, /steered "Reviewer"/);
@@ -206,7 +211,7 @@ test('CLI lists, asks, reports status, and rejects invalid targets', async () =>
     assert.equal(broadcasts.filter((event) => event.type === 'session.dispatch').length, 2);
 
     target.menu = ['Approve'];
-    const blockedSteer = await runCli(['ask', 'Reviewer', 'Do not select.', '--steer'], env);
+    const blockedSteer = await runCli(['ask', '--interrupt-existing', 'Reviewer', 'Do not select.', '--steer'], env);
     assert.equal(blockedSteer.code, 1);
     assert.match(blockedSteer.stderr, /cannot be steered/i);
     assert.equal(target.prompts.at(-1), '[CliDeck steer from @Main/Programmer]\n\nUse the new constraint.');
@@ -225,7 +230,7 @@ test('CLI lists, asks, reports status, and rejects invalid targets', async () =>
     assert.equal(unknownCaller.code, 1);
     assert.match(unknownCaller.stderr, /Caller session is not active/i);
 
-    const unknownCallerAsk = await runCli(['ask', 'Reviewer', 'Hello.'], {
+    const unknownCallerAsk = await runCli(['ask', '--interrupt-existing', 'Reviewer', 'Hello.'], {
       CLIDECK_SESSION_ID: 'missing-caller',
       CLIDECK_URL: httpUrl,
     });
@@ -277,12 +282,12 @@ test('CLI discovery includes dormant peers, groups all projects and refreshes li
     assert.match(grouped.stdout, /Hint:/);
 
     // Listing stays project-local by default; asking an exact other-project address still works.
-    const asked = await runCli(['ask', '@There/Reviewer', 'Review fixture.'], env);
+    const asked = await runCli(['ask', '--interrupt-existing', '@There/Reviewer', 'Review fixture.'], env);
     assert.equal(asked.code, 0, asked.stderr);
     assert.equal(asked.stdout, 'CLI_ANSWER\n');
     assert.equal(remote.prompts.length, 1);
 
-    const dormant = await runCli(['ask', '@Here/Old reviewer', 'Review fixture.'], env);
+    const dormant = await runCli(['ask', '--interrupt-existing', '@Here/Old reviewer', 'Review fixture.'], env);
     assert.equal(dormant.code, 1);
     assert.match(dormant.stderr, /dormant \(stopped\)/);
     assert.match(dormant.stderr, /Hint: Run clideck agents/);

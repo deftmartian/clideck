@@ -1,4 +1,7 @@
 const http = require('http');
+const { resolve } = require('path');
+const { ForkTransport, PROTOCOL: FORK_PROTOCOL } = require('./fork/transport');
+const { WorkerManager, canAskSession, workerMetadata } = require('./fork-workers');
 const { serverUrl } = require('./hook-url');
 const { existsSync } = require('fs');
 const { WebSocketServer, WebSocket } = require('ws');
@@ -133,6 +136,13 @@ class HeadlessServer {
       }
     }
     this.clients = new Set();
+    this.forkTransport = new ForkTransport(this);
+    this.clipboardImages = require('./fork/clipboard-image-http').createClipboardImageUploadHandler({
+      sessions: { getSessions: () => this.sessions, input: ({ id, data }) => this.sessions.get(id)?.writeInput(data) },
+      originPolicy: { allows: (origin, host) => isAllowedWebSocketOrigin(origin, host, this.host) },
+      store: require('./fork/clipboard-images').createClipboardImageStore({ directory: resolve(this.persistence.dataDir, 'uploads', 'images') }),
+    });
+    this.requireProtocol = options.requireProtocol === true;
     this.pluginManager = options.pluginManager || new PluginManager({
       dataDir: this.persistence.dataDir,
       configStore: this.configStore,
@@ -152,21 +162,26 @@ class HeadlessServer {
       || new AskCoordinator((event) => this.broadcast(event));
     this.promptCoordinator = options.promptCoordinator
       || new PromptCoordinator((event) => this.broadcast(event));
+    this.workers = new WorkerManager(this);
     this.closing = false;
     this.closePromise = null;
     this.httpServer = http.createServer((req, res) => this.handleHttp(req, res));
     this.webSocketServer = new WebSocketServer({
       server: this.httpServer,
       maxPayload: MAX_CONTROL_BYTES,
+      perMessageDeflate: { threshold: 16 * 1024, serverNoContextTakeover: true, clientNoContextTakeover: true,
+        concurrencyLimit: 2, zlibDeflateOptions: { level: 3 } },
       verifyClient: ({ origin, req }) => (
         isAllowedWebSocketOrigin(origin, req.headers.host, this.host)
+        && (!this.requireProtocol || new URL(req.url, 'http://localhost').searchParams.get('protocol') === FORK_PROTOCOL)
       ),
     });
-    this.webSocketServer.on('connection', (socket) => this.handleConnection(socket));
+    this.webSocketServer.on('connection', (socket, request) => this.handleConnection(socket, request));
   }
 
   async listen() {
     await this.pluginManager.start();
+    this.forkTransport.start();
     return new Promise((resolve, reject) => {
       this.httpServer.once('error', reject);
       this.httpServer.listen(this.port, this.host, () => {
@@ -191,7 +206,9 @@ class HeadlessServer {
     this.pluginManager?.emitCoreEvent?.(event);
     const message = JSON.stringify(event);
     for (const client of this.clients) {
-      if (client.readyState === WebSocket.OPEN) client.send(message);
+      if (client.forkTransport) {
+        if (event.type !== 'output') this.forkTransport.stream.sendControl(client, event);
+      } else if (client.readyState === WebSocket.OPEN) client.send(message);
     }
   }
 
@@ -319,7 +336,7 @@ class HeadlessServer {
     return this.startSession({
       provider,
       name: message.name,
-      providerOptions: this.providerLaunchOptions(provider.id),
+      providerOptions: { ...this.providerLaunchOptions(provider.id), touchUi: message.touchUi === true },
       command: customCommand?.command || this.commands[provider.id],
       commandId: customCommand?.id,
       commandLabel: customCommand?.label,
@@ -332,7 +349,7 @@ class HeadlessServer {
     }, true);
   }
 
-  resumeSession(sessionId, theme) {
+  resumeSession(sessionId, theme, touchUi = false) {
     const id = String(sessionId || '');
     if (this.sessions.has(id)) return null;
     const entry = this.persistence.get(id);
@@ -344,8 +361,10 @@ class HeadlessServer {
     if (entry.commandId && !customCommand) return null;
     if (!provider) return null;
     const { providerOptions } = this.resumeLaunch(provider, entry);
+    providerOptions.touchUi = touchUi;
     return this.startSession({
       id: entry.id,
+      ...workerMetadata(entry),
       provider,
       name: entry.name,
       providerOptions,
@@ -490,9 +509,10 @@ class HeadlessServer {
     const { providerOptions, resumed } = this.resumeLaunch(session.provider, entry || {});
     const options = {
       id,
+      ...workerMetadata(session),
       provider: session.provider,
       name: session.name,
-      providerOptions,
+      providerOptions: { ...providerOptions, touchUi: message.touchUi ?? session.launchOptions?.touchUi },
       command: session.command,
       commandId: session.commandId,
       commandLabel: session.commandLabel,
@@ -532,11 +552,16 @@ class HeadlessServer {
   startSession(options, register, createdFields = {}, throwOnError = false) {
     const session = new AgentSession({ ...options, serverUrl: this.address().httpUrl });
     this.sessions.set(session.id, session);
+    this.forkTransport.attach(session);
     if (register) this.persistence.register(session);
     const onEvent = (event) => {
+      if (event.type === 'session.closed') this.forkTransport.detach(session);
       if (event.type === 'session.closed' && event.restarting) return;
       let outbound = event;
-      if (event.type === 'output') this.persistence.appendHistory(session.id, event.data);
+      if (event.type === 'output') {
+        this.forkTransport.output(session, event.data);
+        this.persistence.appendHistory(session.id, event.data);
+      }
       else if (event.type === 'turn.user') this.storeTranscriptEntry(session.id, 'user', event.text);
       else if (event.type === 'agent.final') {
         this.persistence.recordFinal(session.id, event.text, event.at);
@@ -561,6 +586,7 @@ class HeadlessServer {
     try {
       session.start(createdFields);
     } catch (error) {
+      this.forkTransport.detach(session);
       this.sessions.delete(session.id);
       if (register) this.removeSessionState(session.id);
       if (!register && !throwOnError) return null;
@@ -953,19 +979,21 @@ class HeadlessServer {
     return true;
   }
 
-  handleConnection(socket) {
+  handleConnection(socket, request) {
+    socket.forkTransport = new URL(request?.url || '/', 'http://localhost').searchParams.get('protocol') === FORK_PROTOCOL;
     if (this.closing) {
       socket.close();
       return;
     }
     this.clients.add(socket);
+    if (socket.forkTransport) this.forkTransport.register(socket);
     for (const entry of this.persistence.list()) {
       const session = this.sessions.get(entry.id);
       if (session && !session.closed) this.replayLiveSession(socket, session);
       else this.replayDormantSession(socket, entry);
     }
     socket.send(JSON.stringify({ type: 'plugins', plugins: this.pluginManager.snapshot() }));
-    socket.send(JSON.stringify({ type: 'transcript.cache', cache: this.transcriptStore.getCache() }));
+    this.forkTransport.inventory(socket);
 
     socket.on('message', (raw) => {
       if (this.closing) return;
@@ -975,8 +1003,8 @@ class HeadlessServer {
         socket.close(1011, 'control failed');
       }
     });
-    socket.on('close', () => this.clients.delete(socket));
-    socket.on('error', () => this.clients.delete(socket));
+    socket.on('close', () => { this.forkTransport.unregister(socket); this.clients.delete(socket); });
+    socket.on('error', () => { this.forkTransport.unregister(socket); this.clients.delete(socket); });
   }
 
   handleControl(socket, raw) {
@@ -1009,12 +1037,13 @@ class HeadlessServer {
       socket.close(1003, 'invalid control fields');
       return;
     }
+    if (this.forkTransport.control(socket, message)) return;
     if (message.type === 'session.create') {
       if (this.createSession(message) === null) socket.close(1003, 'unknown provider');
       return;
     }
     if (message.type === 'session.resume') {
-      this.resumeSession(message.sessionId, message.theme);
+      this.resumeSession(message.sessionId, message.theme, message.touchUi === true);
       return;
     }
     if (message.type === 'session.rename') {
@@ -1184,7 +1213,10 @@ class HeadlessServer {
       return;
     }
     if (message.type === 'prompt') session.sendPrompt(message.text);
-    else if (message.type === 'input') session.writeInput(message.data);
+    else if (message.type === 'input') {
+      if (socket.forkTransport) this.forkTransport.stream.claimResize(socket, session.id);
+      session.writeInput(message.data);
+    }
     else if (message.type === 'resize') {
       session.resize(message.cols, message.rows);
       this.persistence.touch(session.id, { cols: session.cols, rows: session.rows });
@@ -1198,8 +1230,7 @@ class HeadlessServer {
 
   replayLiveSession(socket, session) {
     socket.send(JSON.stringify(session.snapshot()));
-    const history = this.persistence.historyTail(session.id);
-    if (history) socket.send(JSON.stringify({ type: 'output', sessionId: session.id, data: history, replay: true }));
+    this.forkTransport.replayHistory(socket, session.id);
     this.replayContent(socket, session.id).catch(() => {});
     if (session.status) {
       socket.send(JSON.stringify({
@@ -1231,8 +1262,7 @@ class HeadlessServer {
     if (entry.lastFinal) {
       socket.send(JSON.stringify({ type: 'agent.update', sessionId: entry.id, text: entry.lastFinal }));
     }
-    const history = this.persistence.historyTail(entry.id);
-    if (history) socket.send(JSON.stringify({ type: 'output', sessionId: entry.id, data: history, replay: true }));
+    this.forkTransport.replayHistory(socket, entry.id);
     this.replayContent(socket, entry.id).catch(() => {});
   }
 
@@ -1249,6 +1279,10 @@ class HeadlessServer {
 
   async handleHttp(req, res) {
     const pathname = String(req.url || '').split('?')[0];
+    if (req.method === 'GET' && pathname === '/api/health') {
+      res.setHeader('Cache-Control', 'no-store');
+      sendJson(res, 200, {ok:true,version:ENGINE_BUILD_VERSION,protocol:FORK_PROTOCOL}); return;
+    }
     if (req.method === 'GET' && pathname === '/api/session/backup') {
       if (!isLoopbackAddress(req.socket?.remoteAddress)
         || !isAllowedWebSocketOrigin(req.headers.origin, req.headers.host, this.host)
@@ -1270,6 +1304,19 @@ class HeadlessServer {
       }, null, 2));
       return;
     }
+    if (req.method === 'POST' && pathname === '/api/session/spawn') {
+      if (!isLoopbackAddress(req.socket?.remoteAddress)
+        || !isAllowedWebSocketOrigin(req.headers.origin, req.headers.host, this.host)) {
+        sendJson(res, 403, { ok: false, error: 'local_only' }); return;
+      }
+      let body;
+      try { body = await readJson(req, 260 * 1024); } catch {
+        sendJson(res, 400, { ok: false, error: 'invalid_request' }); return;
+      }
+      const result = await this.workers.spawn(body);
+      sendJson(res, result.ok ? 200 : 409, result);
+      return;
+    }
     if (await this.pluginHttp.handle(req, res, pathname)) return;
     if (req.method === 'POST' && (pathname === '/ask' || pathname === '/api/session/ask')) {
       await this.handleAsk(req, res);
@@ -1286,6 +1333,9 @@ class HeadlessServer {
     if (req.method === 'POST' && pathname === '/show') {
       await this.handleShow(req, res);
       return;
+    }
+    if (req.method === 'POST' && /\/clipboard-image$/.test(pathname)) {
+      if (await this.clipboardImages.handle(req, res)) return;
     }
     if (req.method === 'PUT' && pathname === '/upload') {
       await this.handleUpload(req, res);
@@ -1305,6 +1355,11 @@ class HeadlessServer {
     if (req.method === 'GET') {
       if (await servePluginStatic(req, res, this.pluginManager)) return;
       await serveStatic(req, res);
+      return;
+    }
+
+    if (req.method === 'POST' && /^\/hook\/grok\/(start|stop|session-start|session-end|menu)$/.test(pathname)) {
+      await require('./fork/grok-provider').handleLegacyHook(this, req, res, pathname.split('/').at(-1), readJson);
       return;
     }
 
@@ -1392,6 +1447,11 @@ class HeadlessServer {
         message: resolved.message,
         targets,
       });
+      return;
+    }
+    if (!canAskSession(caller?.entry, resolved.entry, request.interruptExisting)) {
+      sendJson(res, 403, { ok: false, error: 'existing_session_protected',
+        message: 'This is an existing user conversation. Spawn a worker, or use --interrupt-existing only when the user explicitly names this session.' });
       return;
     }
     const available = request.steer
@@ -1743,6 +1803,7 @@ class HeadlessServer {
         const closed = sessions.map((session) => session.waitForClose?.() || Promise.resolve());
         for (const session of sessions) session.close();
         await Promise.all(closed);
+        this.forkTransport.stop();
         await this.pluginManager.close();
         this.saveState('shutdown');
         for (const client of this.clients) client.close();
@@ -1823,7 +1884,7 @@ async function main(argv = process.argv.slice(2), env = process.env) {
       const migrated = require('./legacy-migration').migrateLegacy({ dataDir: options.dataDir || DEFAULT_DATA_DIR });
       if (migrated) console.log(`Imported ${migrated.sessions} legacy CliDeck sessions. Resume them from the sidebar.`);
     }
-    server = new HeadlessServer({ ...options, serverLock: lock, freshInstall });
+    server = new HeadlessServer({ ...options, serverLock: lock, freshInstall, requireProtocol: true });
     address = await server.listen();
   } catch (error) {
     server?.persistence.close();

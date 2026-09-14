@@ -129,6 +129,7 @@ function makeSession(ev) {
     status: null, menu: [], menuContext: "", latestAgent: "", lastAgentMessage: "",
     contextUsage: contextUsage(ev.contextUsage), lastAgentAt: epochMs(ev.lastAgentAt), model: modelName(ev.model),
     muted: ev.muted === true,
+    nativeScroll: ev.nativeScroll === true,
     bracketedPaste: typeof ev.bracketedPaste === "boolean" ? ev.bracketedPaste : null,
     workStartedAt: 0,
     // The ENGINE's last-activity stamp (persistence.js `lastActive`), epoch ms, or null when it did not send
@@ -238,6 +239,7 @@ function applyEvent(ev) {
         known.lastActive = engineActive(ev) || known.lastActive;
         known.muted = ev.muted === true;
         if (typeof ev.bracketedPaste === "boolean") known.bracketedPaste = ev.bracketedPaste;
+        if (typeof ev.nativeScroll === "boolean") known.nativeScroll = ev.nativeScroll;
         known.projectId = ev.projectId || null;
         emit("session:update", known.id);
       }
@@ -260,6 +262,7 @@ function applyEvent(ev) {
       known.lastActive = engineActive(ev) || known.lastActive;
       known.muted = ev.muted === true;   // mute toggles arrive as a session.created re-broadcast
       if (typeof ev.bracketedPaste === "boolean") known.bracketedPaste = ev.bracketedPaste;
+        if (typeof ev.nativeScroll === "boolean") known.nativeScroll = ev.nativeScroll;
       known.projectId = ev.projectId || null;   // setProject re-broadcasts the snapshot with the new projectId
       emit("session:update", known.id);
     }
@@ -299,7 +302,7 @@ function applyEvent(ev) {
       if (!active) s.unread += 1;                   // unread = final while unfocused
       emit("session:update", s.id); emit("chrome"); break;
     case "menu": s.menu = ev.choices || []; s.menuContext = ev.context || ""; emit("session:update", s.id); break;
-    case "output": appendBuf(s, ev.data); emit("session:output", s.id, ev.data, ev.replay === true); break;
+    case "output": appendBuf(s, ev.data); emit("session:output", s.id, ev.data, ev.replay === true, ev.parsed); break;
     // turn.user is intentionally ignored — the terminal already echoes what you type.
   }
 }

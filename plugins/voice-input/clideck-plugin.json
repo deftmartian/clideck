@@ -1,0 +1,51 @@
+{
+  "id": "voice-input",
+  "name": "Voice Input",
+  "version": "2.1.0",
+  "apiVersion": 1,
+  "enabledByDefault": false,
+  "icon": "mic",
+  "description": "Whisper dictation with prepared Linux local voice or OpenAI transcription. Record up to ten minutes.",
+  "settings": [
+    {
+      "key": "backend",
+      "label": "Backend",
+      "type": "select",
+      "default": "openai",
+      "options": [
+        {
+          "value": "openai",
+          "label": "OpenAI Whisper"
+        },
+        {
+          "value": "local",
+          "label": "Local Whisper"
+        }
+      ]
+    },
+    {
+      "key": "openai-api-key",
+      "label": "OpenAI API key",
+      "type": "secret",
+      "default": ""
+    },
+    {
+      "key": "language",
+      "label": "Language",
+      "type": "text",
+      "default": "auto"
+    },
+    {
+      "key": "shortcut",
+      "label": "Record shortcut",
+      "type": "shortcut",
+      "default": "F4"
+    },
+    {
+      "key": "replacements-file",
+      "label": "Replacements file",
+      "type": "text",
+      "default": ""
+    }
+  ]
+}

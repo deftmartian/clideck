@@ -196,9 +196,9 @@ test('PTY output leads immediately and batches sustained redraws', async () => {
   session.handleExit(0, null);
 });
 
-test('session output batching defaults to 100ms', () => {
+test('session output batching defaults to 16ms', () => {
   const session = claudeSession();
-  assert.equal(session.outputBatchMs, 100);
+  assert.equal(session.outputBatchMs, 16);
   session.handleExit(0, null);
 });
 
@@ -640,4 +640,19 @@ test('Claude kills the PTY when pending transcript persistence times out', async
 
   session.close();
   await killed;
+});
+
+
+test('Codex mobile paste submits separately, preserves following input order and cancels safely', async () => {
+  const session = new AgentSession({provider:getProvider('codex'),port:4100,promptSubmitDelay:()=>10});
+  const writes=[];session.terminal={write:data=>writes.push(data)};
+  session.writeInput('\x1b[200~line one\nline two\x1b[201~\r');
+  session.writeInput('next');
+  assert.deepEqual(writes,['\x1b[200~line one\nline two\x1b[201~']);
+  await new Promise(resolve=>setTimeout(resolve,30));
+  assert.deepEqual(writes,['\x1b[200~line one\nline two\x1b[201~','\r','next']);
+  writes.length=0;session.writeInput('\x1b[200~cancel this\x1b[201~\r');session.writeInput('\x03');
+  await new Promise(resolve=>setTimeout(resolve,30));assert.deepEqual(writes,['\x1b[200~cancel this\x1b[201~','\x03']);
+  writes.length=0;session.writeInput('\x1b[200~close this\x1b[201~\r');session.handleExit(0,null);
+  await new Promise(resolve=>setTimeout(resolve,30));assert.deepEqual(writes,['\x1b[200~close this\x1b[201~']);
 });

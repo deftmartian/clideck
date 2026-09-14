@@ -14,7 +14,8 @@ function usage(pluginCommands = []) {
     '  clideck --version',
     '  clideck agents [--all] [--json] [--url <url>]',
     '  clideck ask status [--all] [--json] [--url <url>]',
-    '  clideck ask <target> <message> [--timeout 10m] [--url <url>]',
+    '  clideck ask <target> <message> [--timeout 10m] [--interrupt-existing]',
+    '  clideck spawn --project <name|id> --name <name> --prompt <text> --wait [--worktree]',
     '  clideck ask <target> <message> --steer [--url <url>]',
     '  cat message.txt | clideck ask <target> [--timeout 10m]',
     '  clideck show <path> [--kind <kind>] [--url <url>]',
@@ -99,6 +100,16 @@ function parseOptions(
     } else if (allowPromptOptions && argument === '--options') {
       options.promptOptions = args[++index];
       if (!options.promptOptions) throw new Error('--options requires a value.');
+    } else if (allowSteer && argument === '--interrupt-existing') {
+      options.interruptExisting = true;
+    } else if (allowSteer && argument === '--session') {
+      const target = args[++index];
+      if (!target) throw new Error('--session requires a target');
+      positional.unshift(target);
+    } else if (allowSteer && argument === '--message') {
+      const text = args[++index];
+      if (!text) throw new Error('--message requires text');
+      positional.push(text);
     } else if (allowSteer && argument === '--steer') {
       options.steer = true;
     } else if (argument === '--help' || argument === '-h') options.help = true;
@@ -446,6 +457,7 @@ async function runAsk(args, env, io) {
         text: message,
         timeoutMs: options.timeoutMs,
         ...(options.steer && { steer: true }),
+        ...(options.interruptExisting && { interruptExisting: true }),
       }),
       timeoutMs: options.steer ? 5000 : options.timeoutMs + 5000,
     });
@@ -454,6 +466,35 @@ async function runAsk(args, env, io) {
   } finally {
     stopProgress();
   }
+}
+
+async function runSpawn(args, env, io) {
+  const request = { callerSessionId: requireCaller(env) };
+  let url = defaultUrl(env);
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '--help' || arg === '-h') return io.stdout.write(`${usage()}\n`);
+    if (arg === '--wait') request.wait = true;
+    else if (arg === '--worktree') request.worktree = true;
+    else if (arg === '--no-project') request.noProject = true;
+    else if (arg === '--timeout') {
+      request.timeoutMs = parseDuration(args[++i]);
+      if (!request.timeoutMs) throw new Error('Invalid timeout');
+    } else if (arg === '--url') {
+      url = args[++i]; if (!url) throw new Error('--url requires a value');
+    } else {
+      const key = { '--project': 'project', '-p': 'project', '--name': 'name', '-n': 'name',
+        '--prompt': 'prompt', '-m': 'prompt', '--preset': 'preset' }[arg];
+      if (!key || !args[i + 1]) throw new Error(`Invalid spawn argument: ${arg}`);
+      request[key] = args[++i];
+    }
+  }
+  if (!request.prompt) request.prompt = await readStdin(io.stdin);
+  const body = await requestJson(url, '/api/session/spawn', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request), timeoutMs: (request.timeoutMs || DEFAULT_TIMEOUT_MS) + 10_000,
+  });
+  io.stdout.write(request.wait ? `${String(body.answer || '').trimEnd()}\n` : `${JSON.stringify(body)}\n`);
 }
 
 async function runShow(args, env, io) {
@@ -545,6 +586,7 @@ async function run(args, env = process.env, io = process) {
   const [command, ...rest] = commandArgs;
   if (command === 'agents') return runAgents(rest, commandEnv, io);
   if (command === 'ask') return runAsk(rest, commandEnv, io);
+  if (command === 'spawn') return runSpawn(rest, commandEnv, io);
   if (command === 'show') return runShow(rest, commandEnv, io);
   if (command === 'prompt') return runPrompt(rest, commandEnv, io);
   if (command === 'annotate') return runAnnotate(rest, commandEnv, io);

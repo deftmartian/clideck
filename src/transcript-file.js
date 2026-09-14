@@ -1,4 +1,4 @@
-const { statSync, unwatchFile, watchFile } = require('fs');
+const { statSync } = require('fs');
 
 function hasNonemptyFile(path) {
   if (!path) return false;
@@ -15,18 +15,22 @@ function waitForNonemptyFile(path, timeoutMs) {
   return new Promise((resolve) => {
     let settled = false;
     let timer;
+    let poll;
     const finish = (ready) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      unwatchFile(path, check);
+      clearInterval(poll);
       resolve(ready);
     };
     const check = () => {
       if (hasNonemptyFile(path)) finish(true);
     };
-    watchFile(path, { interval: 100, persistent: false }, check);
-    timer = setTimeout(() => finish(false), timeoutMs);
+    // A file created before watchFile completes its initial stat can become
+    // the watcher's baseline and never emit a change. Poll readiness directly.
+    poll = setInterval(check, 100);
+    poll.unref?.();
+    timer = setTimeout(() => finish(hasNonemptyFile(path)), timeoutMs);
     check();
   });
 }

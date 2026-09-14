@@ -1,0 +1,3 @@
+# Versions verified with the host local voice environment.
+numpy==2.5.1
+faster-whisper==1.2.1

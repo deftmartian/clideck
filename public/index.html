@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <script>
 /* no-FOUC theme pre-stamp: resolve auto|light|dark and stamp <html> before first paint */
 (function(){try{var p=localStorage.getItem('clideck.theme');
@@ -17,8 +17,12 @@ if(w>=240&&w<=560)document.documentElement.style.setProperty('--sidebar-w',w+'px
 <link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180">
 <link rel="stylesheet" href="/vendor/xterm.css">
 <link rel="stylesheet" href="/css/app.css">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icons/clideck-apple-180.png">
+<link rel="stylesheet" href="/css/fork-mobile.css">
 </head>
 <body>
+<div id="pwa-update-banner" hidden><span id="pwa-update-message"></span><button id="pwa-update-action">Prepare update</button><button id="pwa-update-dismiss">Later</button></div>
 <!-- stale/outdated-engine banner — shown by ws.js after repeated instant socket closes (see store 'stale' event) -->
 <div class="engine-banner" id="engine-banner" role="alert" hidden>
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>

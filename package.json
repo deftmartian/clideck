@@ -1,15 +1,16 @@
 {
   "name": "clideck",
-  "version": "2.1.1",
+  "version": "2.1.1-fork.7",
   "description": "Run AI agents from different providers, let them work with you and each other, and view their work in one place",
   "main": "src/server.js",
   "bin": {
-    "clideck": "bin/clideck.js"
+    "clideck": "bin/clideck.js",
+    "clideck-update": "bin/clideck-update.py",
+    "clideck-voice-setup": "bin/clideck-voice-setup.js"
   },
   "files": [
     "bin/",
     "src/",
-    "public/",
     "plugin-sdk/",
     "plugins/emoji/",
     "plugins/git-diff/",
@@ -17,7 +18,10 @@
     "plugins/smart-dictation/",
     "PLUGIN-SDK.md",
     "SESSION-BACKUP.md",
-    "UPGRADING.md"
+    "UPGRADING.md",
+    "plugins/voice-input/",
+    "dist/public/",
+    "LOCAL-MAINTENANCE.md"
   ],
   "scripts": {
     "start": "node bin/clideck.js",
@@ -32,13 +36,22 @@
     "smoke:resume": "node smoke-resume.js",
     "smoke:shell": "node smoke-shell.js",
     "test": "node --test",
-    "test:backend": "node --test test/*.test.js"
+    "test:backend": "node --test test/*.test.js",
+    "build:client": "node tools/build-client.js",
+    "prepack": "npm run build:client",
+    "test:browser:fork": "node test-ui/xterm-replies-browser.mjs && node test-ui/xterm-scroll-browser.mjs && node test-ui/fork-integration-browser.mjs && node test-ui/draft-integration-browser.mjs && node test-ui/terminal-cursor-browser.mjs",
+    "check:client": "node tools/check-client.js",
+    "test:browser:mobile": "node test-ui/mobile-restoration-browser.mjs"
   },
   "dependencies": {
-    "@xterm/xterm": "^6.0.0",
+    "@xterm/addon-serialize": "0.15.0-beta.301",
+    "@xterm/addon-webgl": "0.20.0-beta.300",
+    "@xterm/headless": "6.1.0-beta.303",
+    "@xterm/xterm": "6.1.0-beta.304",
     "mermaid": "^11.16.0",
     "node-pty": "1.2.0-beta.15",
-    "ws": "^8.19.0"
+    "smol-toml": "1.7.1",
+    "ws": "8.21.1"
   },
   "engines": {
     "node": ">=22.12.0"
@@ -52,5 +65,9 @@
   "homepage": "https://clideck.dev/",
   "bugs": {
     "url": "https://github.com/rustykuntz/clideck/issues"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "playwright-core": "1.61.1"
   }
 }

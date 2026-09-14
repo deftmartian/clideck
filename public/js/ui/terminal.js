@@ -1,7 +1,13 @@
+import { resetTerminalView } from '../terminal-reset.js';
+import { createTerminalInput } from './terminal-input.js';
+import { enableTerminalRenderer } from '../terminal-renderer.js';
 // The right pane: a real, themed xterm terminal you type into directly.
 // Keystrokes go out as {type:'input', sessionId} raw controls. Output events feed
 // term.write(). Focusing a session resets the terminal and rewrites its buffer.
-// No composer — the terminal IS the input surface.
+// Layouts claim input through setTerminalInputOwner; this component owns xterm.
+import { configureTerminalStream, subscribeTerminal, suspendTerminal } from "../terminal-stream.js";
+import { reconnectWs } from "../ws.js";
+import { isTerminalReply } from "../terminal-replies.js";
 import { store } from "../store.js";
 import { send, renameSession, openContentPath } from "../ws.js";
 import { sessionFace } from "../providers-ui.js";
@@ -43,6 +49,10 @@ function applyActiveTheme() {
 }
 
 let term = null;
+const terminalInput = createTerminalInput({ getTerminal: () => term, getSession: () => store.active(), isConnected: () => store.connected });
+export function setTerminalInputOwner(owner) { terminalInput.setOwner(owner); }
+export function focusTerminalInput() { terminalInput.focus(); }
+export function mobileTerminalEntry() { return term && mount ? {term, host: mount} : null; }
 let mount = null;
 let scrollBtn = null;
 let nameEl = null;
@@ -80,13 +90,15 @@ export function initTerminal() {
     macOptionIsMeta: true, drawBoldTextInBrightColors: true,
   });
   term.open(mount);
+  terminalInput.sync();
+  enableTerminalRenderer(term);
   onTheme(applyActiveTheme);                    // app light/dark flip re-applies the active session's theme (mode default may change)
   store.on("config", applyActiveTheme);         // a theme-library config change re-colours the open terminal live
   registerLinks();
-  registerTerminalFocus(() => { if (term) term.focus(); });
+  registerTerminalFocus(() => { if (term) terminalInput.focus(); });
   // The terminal tab hides rather than unmounts (scrollback must survive), and a hidden element measures 0 so
   // fit() correctly no-ops while away. Coming back therefore needs an EXPLICIT refit + focus.
-  onTerminalTabShown(() => requestAnimationFrame(() => { fit(true); if (!renaming) term && term.focus(); updateScrollBtn(); }));          // prompt-paste refocuses the terminal
+  onTerminalTabShown(() => requestAnimationFrame(() => { fit(true); if (!renaming && !window.matchMedia?.("(pointer: coarse)").matches && !document.activeElement?.closest(".plugin-composition")) term && terminalInput.focus(); updateScrollBtn(); }));          // prompt-paste refocuses the terminal
 
   // Full per-terminal key + clipboard pipeline (OSC52 → Ctrl+C-copy → Shift+Enter → clear/Ctrl+K → // trigger
   // → registry) lives in hotkeys.js. The pane is shared across sessions, so Shift+Enter's Claude-compatible
@@ -121,7 +133,7 @@ export function initTerminal() {
     const s = store.active();
     const text = e.clipboardData && e.clipboardData.getData("text/plain");
     const bracketedPaste = s?.bracketedPaste ?? term.modes.bracketedPasteMode;
-    if (!s || s.live === false || !text || !bracketedPaste) return;
+    if (!terminalInput.canWrite() || !s || s.live === false || !text || !bracketedPaste) return;
     e.preventDefault();
     e.stopPropagation();
     send({ type: "input", sessionId: s.id, data: pastePayload(text) });
@@ -129,7 +141,7 @@ export function initTerminal() {
 
   // every keystroke → raw input for the focused session (menu digits included).
   // Dormant sessions are read-only: the PTY is gone, so input goes nowhere — drop it locally.
-  term.onData((data) => { const s = store.active(); if (s && s.live !== false) send({ type: "input", sessionId: s.id, data }); });
+  term.onData((data) => { if (!terminalInput.canWrite() || isTerminalReply(data)) return; const s = store.active(); if (s && s.live !== false) send({ type: "input", sessionId: s.id, data }); });
 
   scrollBtn = document.getElementById("scroll-btn");
   nameEl = document.getElementById("th-name");
@@ -148,12 +160,13 @@ export function initTerminal() {
   const ro = new ResizeObserver(debounce(() => { fit(true); updateScrollBtn(); }, 90));
   ro.observe(mount);
 
+  configureTerminalStream({ term, store, send, reconnect: reconnectWs });
   store.on("active", (id) => focusSession(id));
-  store.on("session:output", (id, data, replay) => { if (id === store.activeId) writeTerminal(data, replay, () => { updateScrollBtn(); probeVisiblePaths(); }); });   // callback fires post-parse, so baseY is current
+  store.on("session:output", (id, data, replay, parsed) => { if (id === store.activeId) writeTerminal(data, replay, () => { updateScrollBtn(); probeVisiblePaths(); parsed?.(); }); });   // callback fires post-parse, so baseY is current
   store.on("session:update", (id) => { if (id === store.activeId) updateHeader(); });
   store.on("connection", () => { updateHeader(); updateEmpty(); });   // connect lands AFTER reset paints "offline"; with no sessions nothing else ever repaints it
   store.on("chrome", updateEmpty);
-  store.on("reset", () => { closePromptDropdown(); term.reset(); applyActiveTheme(); updateHeader(); updateEmpty(); updateScrollBtn(); sentDims.clear(); });
+  store.on("reset", () => { closePromptDropdown(); resetTerminalView(term); applyActiveTheme(); updateHeader(); updateEmpty(); updateScrollBtn(); sentDims.clear(); });
   store.on("session:remove", (id) => sentDims.delete(id));
 
   // Buffer row numbers stop meaning what they meant after a reflow or a session change, so a selection anchor
@@ -172,8 +185,8 @@ function focusSession(id) {
   const s = id != null ? store.sessions.get(id) : null;
   updateEmpty();
   updateHeader();
-  if (!s) return;
-  term.reset();
+  if (!s) { suspendTerminal(); return; }
+  resetTerminalView(term);
   // ⚠️ THE CACHE IS THIS BROWSER'S MEMORY, NOT THE PTY'S STATE. Another client can resize the same session
   // while we are looking elsewhere, and the engine does not broadcast that — so on the way back our entry
   // would still say "already told them 92x28", we would skip, and the pty would stay at the other client's
@@ -182,7 +195,7 @@ function focusSession(id) {
   // nothing. Observer ticks after that still dedupe, which is the whole point of the cache.
   sentDims.delete(id);
   if (s.outputBuf) writeTerminal(s.outputBuf, true);   // a focus rewrite is replay even when its buffer contains once-live output
-  requestAnimationFrame(() => { fit(true); if (!renaming) term.focus(); updateScrollBtn(); probeVisiblePaths(); });   // don't steal focus from an inline rename
+  requestAnimationFrame(() => { fit(true); subscribeTerminal({ snapshot: true }); if (!renaming && !window.matchMedia?.("(pointer: coarse)").matches) terminalInput.focus(); updateScrollBtn(); probeVisiblePaths(); });   // don't steal focus from an inline rename
 
 }
 
@@ -484,8 +497,8 @@ export function commitTerminalDraft(text, options = {}) {
   const session = store.active();
   if (!text || !sessionId || !session || session.id !== sessionId || session.live === false) return false;
   if (new TextEncoder().encode(text).byteLength > 64 * 1024) return false;
-  send({ type: "input", sessionId, data: pastePayload(text) + (options.submit === true ? "\r" : "") });
-  if (term) term.focus();
+  if (!send({ type: "input", sessionId, data: pastePayload(text) + (options.submit === true ? "\r" : "") })) return false;
+  if (term && options.focus !== false) terminalInput.focus();
   return true;
 }
 
@@ -601,8 +614,8 @@ function fit(sendResize) {
   const cell = cellSize();
   let scrollW = 0;
   try { scrollW = (term._core && term._core.viewport && term._core.viewport.scrollBarWidth) || 0; } catch {}
-  const cols = Math.max(20, Math.floor((mount.clientWidth - padX - scrollW) / cell.w));
-  const rows = Math.max(6, Math.floor((mount.clientHeight - padY) / cell.h));
+  const cols = Math.min(500, Math.max(20, Math.floor((mount.clientWidth - padX - scrollW) / cell.w)));
+  const rows = Math.min(300, Math.max(6, Math.floor((mount.clientHeight - padY) / cell.h)));
   if (!isFinite(cols) || !isFinite(rows)) return;
   store.setTermSize(cols, rows);                    // remembered for the session.restart dims
   if (cols !== term.cols || rows !== term.rows) term.resize(cols, rows);
@@ -627,6 +640,7 @@ const sentDims = new Map();
 export function __sentDimsForTest() { return sentDims; }
 
 function updateHeader() {
+  terminalInput.sync();
   if (renaming) return;                 // don't clobber the inline name input mid-edit
   const s = store.active();
   const head = document.getElementById("term-head");
@@ -677,7 +691,7 @@ function updateHeader() {
   rp.classList.toggle("readonly", readonly);
   term.options.cursorBlink = !readonly;                       // blink returns when a resumed session goes live
   if (wasReadonly && !readonly && store.activeId === s.id) {  // dormant→live flip on the open session: keep the buffer, sync PTY size, focus for input
-    requestAnimationFrame(() => { fit(true); term.focus(); });
+    requestAnimationFrame(() => { fit(true); terminalInput.focus(); });
   }
 }
 

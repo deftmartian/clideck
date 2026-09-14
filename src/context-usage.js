@@ -105,6 +105,23 @@ function readLatestCodexUsage(path) {
   return null;
 }
 
+// Resume can omit the startup model banner. Recover actual transcript metadata,
+// without guessing the current CLI default or reading an unbounded conversation.
+function readLatestCodexModel(path,limit=4*1024*1024) {
+  let fd;
+  try {
+    fd=openSync(path,'r');const size=fstatSync(fd).size;
+    const length=Math.min(size,limit),buffer=Buffer.allocUnsafe(length);
+    const count=readSync(fd,buffer,0,length,size-length);
+    const lines=buffer.subarray(0,count).toString('utf8').split('\n');
+    for(let index=lines.length-1;index>=0;index--){
+      if(!lines[index].includes('"model"'))continue;
+      try {const record=JSON.parse(lines[index]);if(['turn_context','session_meta'].includes(record.type)&&typeof record.payload?.model==='string')return record.payload.model;}catch{}
+    }
+  } catch {} finally {if(fd!==undefined)closeSync(fd);}
+  return null;
+}
+
 function watchCodexContext(path, onUsage, options = {}) {
   if (!path || typeof onUsage !== 'function') return () => {};
   const readUsage = options.readUsage || readLatestCodexUsage;
@@ -113,9 +130,10 @@ function watchCodexContext(path, onUsage, options = {}) {
   let timer = null;
   let watcher = null;
   let signature = '';
-  let stopped = false;
+  let stopped = false, modelFound = false;
   const sample = () => {
     if (stopped) return;
+    if(options.onModel){const model=(options.readModel || readLatestCodexModel)(path,modelFound?CODEX_TAIL_BYTES:4*1024*1024);if(model){modelFound=true;options.onModel(model);}}
     const usage = readUsage(path);
     if (!usage) return;
     const next = `${usage.usedTokens}:${usage.windowTokens}:${usage.percent}`;
@@ -148,6 +166,7 @@ module.exports = {
   normalizeContextUsage,
   parseCodexLine,
   readLatestCodexUsage,
+  readLatestCodexModel,
   structuredContextUsage,
   watchCodexContext,
 };

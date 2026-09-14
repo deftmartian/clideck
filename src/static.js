@@ -1,8 +1,9 @@
-const { createReadStream } = require('fs');
+const { createReadStream, existsSync } = require('fs');
 const { readFile, stat } = require('fs/promises');
 const { dirname, extname, resolve, sep } = require('path');
 
-const PUBLIC_DIR = resolve(__dirname, '../public');
+const staged = resolve(__dirname, '../dist/public');
+const PUBLIC_DIR = existsSync(resolve(staged, 'index.html')) ? staged : resolve(__dirname, '../public');
 const XTERM_JS = require.resolve('@xterm/xterm');
 const MERMAID_JS = resolve(
   dirname(require.resolve('mermaid/package.json')),
@@ -10,6 +11,7 @@ const MERMAID_JS = resolve(
 );
 const VENDOR_FILES = new Map([
   ['/vendor/xterm.js', XTERM_JS],
+  ['/vendor/xterm-webgl.js', require.resolve('@xterm/addon-webgl')],
   ['/vendor/xterm.css', resolve(dirname(XTERM_JS), '../css/xterm.css')],
   ['/vendor/mermaid.js', MERMAID_JS],
 ]);
@@ -20,6 +22,7 @@ const CONTENT_TYPES = new Map([
   ['.css', 'text/css; charset=utf-8'],
   ['.txt', 'text/plain; charset=utf-8'],
   ['.json', 'application/json; charset=utf-8'],
+  ['.webmanifest', 'application/manifest+json'],
   ['.wasm', 'application/wasm'],
   ['.onnx', 'application/octet-stream'],
   ['.bin', 'application/octet-stream'],
@@ -52,7 +55,8 @@ async function serveStatic(req, res) {
     return;
   }
 
-  const filePath = VENDOR_FILES.get(pathname) || publicFile(pathname);
+  const stagedVendor = VENDOR_FILES.has(pathname) && publicFile(pathname);
+  const filePath = (stagedVendor && existsSync(stagedVendor) ? stagedVendor : VENDOR_FILES.get(pathname)) || publicFile(pathname);
   const contentType = filePath && CONTENT_TYPES.get(extname(filePath));
   if (!filePath || !contentType) {
     res.writeHead(404).end();
@@ -60,9 +64,21 @@ async function serveStatic(req, res) {
   }
 
   try {
-    const body = await readFile(filePath);
+    const accepted = new Map(String(req.headers['accept-encoding'] || '').toLowerCase().split(',').map(part => {
+      const [name, ...params] = part.trim().split(';');
+      const quality = params.find(param => param.trim().startsWith('q='));
+      return [name, quality ? Number(quality.trim().slice(2)) : 1];
+    }));
+    const quality = name => accepted.get(name) ?? accepted.get('*') ?? 0;
+    const encoding = ['br', 'gzip'].filter(name => quality(name) > 0
+      && existsSync(filePath + (name === 'br' ? '.br' : '.gz')))
+      .sort((a, b) => quality(b) - quality(a))[0] || '';
+    const body = await readFile(encoding ? filePath + (encoding === 'br' ? '.br' : '.gz') : filePath);
     res.writeHead(200, {
       'Content-Type': contentType,
+      'Cache-Control': /^\/build\/[a-zA-Z0-9_-]+-[A-Z0-9]{8}\.js$/.test(pathname) ? 'public, max-age=31536000, immutable' : 'no-cache',
+      'Vary': 'Accept-Encoding',
+      ...(encoding && { 'Content-Encoding': encoding }),
       'X-Content-Type-Options': 'nosniff',
     }).end(body);
   } catch {

@@ -1,3 +1,4 @@
+const { workerMetadata } = require('./fork-workers');
 const { EventEmitter } = require('events');
 const { randomUUID } = require('crypto');
 const { delimiter, join } = require('path');
@@ -10,7 +11,7 @@ const BRACKETED_PASTE_START = '\x1b[200~';
 const BRACKETED_PASTE_END = '\x1b[201~';
 const TRANSCRIPT_READY_TIMEOUT_MS = 5000;
 const CLOSE_GRACE_MS = 1500;
-const OUTPUT_BATCH_MS = 100;
+const OUTPUT_BATCH_MS = 16;
 const COLORFGBG_BY_THEME = {
   light: '0;15',
   dark: '15;0',
@@ -34,6 +35,7 @@ function sessionEnvironment(launchEnv, sessionId, port, colorfgbg, serverUrl = `
 class AgentSession extends EventEmitter {
   constructor(options) {
     super();
+    Object.assign(this, workerMetadata(options));
     this.provider = options.provider;
     if (!this.provider) throw new Error('provider is required');
     this.id = options.id || randomUUID();
@@ -45,8 +47,8 @@ class AgentSession extends EventEmitter {
       this.projectId = options.projectId || null;
     }
     this.cwd = options.cwd || process.cwd();
-    this.cols = Number(options.cols || 120);
-    this.rows = Number(options.rows || 40);
+    this.cols = Math.min(500, Math.max(20, Number(options.cols || 120)));
+    this.rows = Math.min(300, Math.max(5, Number(options.rows || 40)));
     this.port = options.port;
     this.serverUrl = options.serverUrl || `http://127.0.0.1:${this.port}`;
     this.muted = options.muted === true;
@@ -68,6 +70,9 @@ class AgentSession extends EventEmitter {
     this.closed = false;
     this.sessionStarted = !this.provider.requiresSessionStart;
     this.submitTimer = null;
+    this.inputSubmitTimer = null;
+    this.queuedInput = [];
+    this.queuedInputBytes = 0;
     this.submitRetryTimer = null;
     this.promptSubmitDelay = options.promptSubmitDelay
       || ((length) => Math.min(1500, Math.max(250, 200 + Math.ceil(length / 100) * 75)));
@@ -114,9 +119,11 @@ class AgentSession extends EventEmitter {
       sessionId: this.id,
       hookToken: this.hookToken,
     });
-    const extraArgs = Array.isArray(this.launchOptions.extraArgs)
-      ? this.launchOptions.extraArgs.filter((value) => typeof value === 'string')
+    const suppliedExtraArgs = launch.extraArgs ?? this.launchOptions.extraArgs;
+    const extraArgs = Array.isArray(suppliedExtraArgs)
+      ? suppliedExtraArgs.filter((value) => typeof value === 'string')
       : [];
+    this.nativeScroll = launch.nativeScroll === true;
     this.launchCleanup = launch.cleanup || (() => {});
     try {
       this.terminal = pty.spawn(launch.command, [...extraArgs, ...(launch.args || [])], {
@@ -145,6 +152,7 @@ class AgentSession extends EventEmitter {
       muted: this.muted,
       live: true,
       bracketedPaste: this.bracketedPasteMode,
+      nativeScroll: this.nativeScroll === true,
       projectId: this.projectId ?? null,
       ...(this.lastAgentAt && { lastAgentAt: this.lastAgentAt }),
       ...(this.contextUsage !== undefined && { contextUsage: this.contextUsage }),
@@ -256,6 +264,7 @@ class AgentSession extends EventEmitter {
     this.stopContextMonitor = this.provider.watchContextUsage(
       value,
       (usage) => this.setContextUsage(usage),
+      { onModel: (model) => this.setModel(model) },
     );
   }
 
@@ -466,6 +475,9 @@ class AgentSession extends EventEmitter {
     const delay = this.promptSubmitDelay(prompt.length);
     clearTimeout(this.submitTimer);
     clearTimeout(this.submitRetryTimer);
+    clearTimeout(this.inputSubmitTimer);
+    this.inputSubmitTimer = null;
+    this.queuedInput = []; this.queuedInputBytes = 0;
     clearTimeout(this.activityTimer);
     this.submitTimer = setTimeout(() => {
       if (!this.closed) this.terminal.write('\r');
@@ -477,10 +489,43 @@ class AgentSession extends EventEmitter {
     }
   }
 
+  flushInputSubmit() {
+    clearTimeout(this.inputSubmitTimer);
+    this.inputSubmitTimer = null;
+    const queued = this.queuedInput;
+    this.queuedInput = []; this.queuedInputBytes = 0;
+    if (this.closed) return;
+    this.writeInput('\r');
+    for (const data of queued) this.writeInput(data);
+  }
+
   writeInput(data) {
     if (!this.terminal || this.closed) return;
     this.flushScreen();
     const input = String(data || '');
+    if (this.inputSubmitTimer) {
+      // Explicit cancellation must never be followed by a delayed Enter.
+      if (input === '\x03' || input === '\x1b') {
+        clearTimeout(this.inputSubmitTimer); this.inputSubmitTimer = null;
+        this.queuedInput = []; this.queuedInputBytes = 0;
+      } else {
+        const bytes = Buffer.byteLength(input);
+        if (this.queuedInputBytes + bytes <= 256 * 1024) {
+          this.queuedInput.push(input); this.queuedInputBytes += bytes; return true;
+        }
+        // Bound memory even if another client floods this short submission window.
+        this.flushInputSubmit();
+        return this.writeInput(input);
+      }
+    }
+    // Codex's paste burst detector can swallow Enter in the same PTY write.
+    // Keep the delay in the live session, independent of browser focus/lifetime.
+    if (this.provider.id === 'codex' && input.startsWith(BRACKETED_PASTE_START)
+      && input.endsWith(BRACKETED_PASTE_END + '\r')) {
+      this.terminal.write(input.slice(0, -1));
+      this.inputSubmitTimer = setTimeout(() => this.flushInputSubmit(), this.promptSubmitDelay(input.length));
+      return true;
+    }
     // Codex delays its native clear hook until the next prompt. Invalidate the
     // old reading on submission; only a native hook may bind the new rollout.
     if (this.provider.id === 'codex' && !this.menu.length
@@ -508,8 +553,8 @@ class AgentSession extends EventEmitter {
   resize(cols, rows) {
     if (!this.terminal || this.closed) return;
     this.flushScreen();
-    const nextCols = Math.max(20, Number(cols || this.cols));
-    const nextRows = Math.max(5, Number(rows || this.rows));
+    const nextCols = Math.min(500, Math.max(20, Number(cols || this.cols)));
+    const nextRows = Math.min(300, Math.max(5, Number(rows || this.rows)));
     // Even an unchanged PTY resize can make Codex clear its scrollback.
     if (nextCols === this.cols && nextRows === this.rows) return;
     this.cols = nextCols;
@@ -533,6 +578,7 @@ class AgentSession extends EventEmitter {
       live: true,
       model: this.model,
       bracketedPaste: this.bracketedPasteMode,
+      nativeScroll: this.nativeScroll === true,
       projectId: this.projectId ?? null,
       ...(this.lastAgentAt && { lastAgentAt: this.lastAgentAt }),
       ...(this.contextUsage !== undefined && { contextUsage: this.contextUsage }),
@@ -588,6 +634,9 @@ class AgentSession extends EventEmitter {
     this.closeRequested = true;
     clearTimeout(this.submitTimer);
     clearTimeout(this.submitRetryTimer);
+    clearTimeout(this.inputSubmitTimer);
+    this.inputSubmitTimer = null;
+    this.queuedInput = []; this.queuedInputBytes = 0;
     const pendingTranscript = this.provider.requiresResumeTranscript
       && this.userPrompts.length > 0
       && this.resumeTranscriptPath
@@ -609,6 +658,9 @@ class AgentSession extends EventEmitter {
     this.closeRequested = true;
     clearTimeout(this.submitTimer);
     clearTimeout(this.submitRetryTimer);
+    clearTimeout(this.inputSubmitTimer);
+    this.inputSubmitTimer = null;
+    this.queuedInput = []; this.queuedInputBytes = 0;
     clearTimeout(this.activityTimer);
     this.killTerminal();
     return this.closedPromise;
@@ -626,6 +678,9 @@ class AgentSession extends EventEmitter {
     this.outputTimer = null;
     clearTimeout(this.submitTimer);
     clearTimeout(this.submitRetryTimer);
+    clearTimeout(this.inputSubmitTimer);
+    this.inputSubmitTimer = null;
+    this.queuedInput = []; this.queuedInputBytes = 0;
     clearTimeout(this.activityTimer);
     clearTimeout(this.closeKillTimer);
     this.closeKillTimer = null;

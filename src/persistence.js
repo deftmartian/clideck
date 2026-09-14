@@ -1,3 +1,4 @@
+const { workerMetadata } = require('./fork-workers');
 const {
   existsSync,
   mkdirSync,
@@ -65,6 +66,7 @@ function normalizeEntry(value) {
   if (!value.provider || !value.cwd) return null;
   const assets = normalizeAssets(value.assets);
   return {
+    ...workerMetadata(value),
     id: String(value.id),
     provider: String(value.provider),
     name: typeof value.name === 'string' ? value.name.trim() : '',
@@ -227,6 +229,7 @@ class SessionPersistence {
   register(session) {
     const timestamp = this.now();
     const entry = {
+      ...workerMetadata(session),
       id: session.id,
       provider: session.provider.id,
       name: session.name || '',

@@ -116,7 +116,7 @@ test('availability control replies only to its requester and includes built-ins'
     const result = await waitFor(requester.messages, (event) => event.type === 'availability.result');
     assert.equal(result.success, true);
     assert.deepEqual(result.providers.map((provider) => provider.id), [
-      'claude-code', 'antigravity', 'codex', 'gemini', 'opencode', 'pi', 'shell',
+      'claude-code', 'antigravity', 'codex', 'gemini', 'grok', 'opencode', 'pi', 'shell',
     ]);
     assert.deepEqual(result.commands, [{
       id: BASH_COMMAND.id,
