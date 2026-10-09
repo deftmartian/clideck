@@ -1,4 +1,5 @@
 const { randomUUID } = require('crypto');
+const { readText } = require('./files');
 const {
   createReadStream,
   existsSync,
@@ -34,6 +35,7 @@ const CONTENT_TYPES = new Map([
   ['.txt', { kind: 'text', mime: 'text/plain' }],
   ['.log', { kind: 'text', mime: 'text/plain' }],
   ['.json', { kind: 'json', mime: 'application/json' }],
+  ['.csv', { kind: 'csv', mime: 'text/csv' }],
   ['.pdf', { kind: 'pdf', mime: 'application/pdf' }],
   ['.mmd', { kind: 'mermaid', mime: 'text/plain' }],
   ['.patch', { kind: 'diff', mime: 'text/plain' }],
@@ -44,6 +46,7 @@ const FILE_KIND_TYPES = new Map([
   ['markdown', { kind: 'markdown', mime: 'text/markdown' }],
   ['text', { kind: 'text', mime: 'text/plain' }],
   ['json', { kind: 'json', mime: 'application/json' }],
+  ['csv', { kind: 'csv', mime: 'text/csv' }],
   ['pdf', { kind: 'pdf', mime: 'application/pdf' }],
   ['mermaid', { kind: 'mermaid', mime: 'text/plain' }],
   ['diff', { kind: 'diff', mime: 'text/plain' }],
@@ -142,6 +145,9 @@ async function resolveFilePath(filePath, kind) {
     throw new ContentError('not_found', 'Content file was not found.', 404);
   }
   const type = fileType(path, kind);
+  if (type.kind === 'csv' && info.size > MAX_OPEN_CONTENT_BYTES) {
+    throw new ContentError('too_large', 'CSV preview exceeds the 10MB limit.', 413);
+  }
   return { path, name: basename(path), ...type };
 }
 
@@ -209,7 +215,14 @@ class ContentStore {
   }
 
   async addOpenFile(sessionId, filePath) {
-    const content = await resolveFilePath(filePath);
+    let content;
+    try { content = await resolveFilePath(filePath); }
+    catch (error) {
+      if (error.code !== 'unsupported_type') throw error;
+      content = await resolveFilePath(filePath, 'text');
+      // User-opened source/extensionless files may use the text viewer; reject binary/large fallbacks.
+      await readText(content.path);
+    }
     return this.store(sessionId, { ...content, source: 'file', scope: 'user' });
   }
 
@@ -561,6 +574,8 @@ async function serveContent(req, res, content) {
     'Accept-Ranges': 'bytes',
     'Content-Type': served.mime,
     'X-Content-Type-Options': 'nosniff',
+    // Keep HTML isolated even when its asset URL is opened directly.
+    ...(served.mime === 'text/html' && { 'Content-Security-Policy': 'sandbox allow-scripts' }),
   };
   let range = null;
   if (req.headers.range !== undefined) {

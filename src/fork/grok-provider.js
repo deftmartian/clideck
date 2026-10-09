@@ -66,6 +66,28 @@ const grokProvider = {
   },
 };
 
+function rememberGrokSession(session, id) {
+  if (!session.grokSessionIds) session.grokSessionIds = new Set();
+  if (id) session.grokSessionIds.add(id);
+}
+
+// A new conversation id replaces the live handle before later hooks run.
+// An id this process already retired cannot come back and overwrite it.
+function acceptGrokSessionStart(session, id) {
+  const next = String(id || '').trim();
+  if (!next) return true;
+  rememberGrokSession(session, session.resumeHandle);
+  if (!session.resumeHandle || next === session.resumeHandle) {
+    if (!session.resumeHandle) session.resumeHandle = next;
+    rememberGrokSession(session, next);
+    return true;
+  }
+  if (session.grokSessionIds.has(next)) return false;
+  session.resumeHandle = next;
+  rememberGrokSession(session, next);
+  return true;
+}
+
 async function handleLegacyHook(server, req, res, route, readJson) {
   if (!require('../security').isAllowedWebSocketOrigin(req.headers.origin, req.headers.host, server.host)) { res.writeHead(403).end(); return; }
   try {
@@ -76,13 +98,20 @@ async function handleLegacyHook(server, req, res, route, readJson) {
     if (launch !== session.hookToken) { res.writeHead(204).end(); return; }
     let raw = {};
     try { raw = JSON.parse(envelope.payload || '{}'); } catch {}
-    const id = envelope.session_id || raw.sessionId || raw.session_id;
-    if (route !== 'session-start' && session.resumeHandle && id && id !== session.resumeHandle) { res.writeHead(204).end(); return; }
+    if (raw.subagentType || raw.subagent_type) { res.writeHead(204).end(); return; }
+    const id = String(envelope.session_id || raw.sessionId || raw.session_id || '').trim();
+    if (route === 'session-start') {
+      if (!acceptGrokSessionStart(session, id)) { res.writeHead(204).end(); return; }
+    } else if (session.resumeHandle && id && id !== session.resumeHandle) {
+      res.writeHead(204).end(); return;
+    }
     const path = transcriptPath(session.cwd, id, session.launchOptions.grokConfigRoot);
-    const payload = { ...raw, ...envelope, session_id: id, transcript_path: path,
-      last_assistant_message: raw.last_assistant_message || raw.lastAssistantMessage || (route === 'stop' ? latestReply(path) : '') };
+    const assistant = route === 'stop'
+      ? (raw.last_assistant_message || raw.lastAssistantMessage || latestReply(path))
+      : '';
+    const payload = { ...raw, ...envelope, session_id: id, transcript_path: path, last_assistant_message: assistant };
     session.handleHook(route, payload);
-    if (id) {
+    if (id && (!session.resumeHandle || id === session.resumeHandle)) {
       const metadata = grokProvider.resumeMetadata(payload);
       session.recordResumeMetadata(metadata);
       server.persistence.recordResumeMetadata(session.id, metadata);

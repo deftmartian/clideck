@@ -1,6 +1,5 @@
 #!/usr/bin/env node
-// Silent Grok Build lifecycle hook for CliDeck.
-// Reads Grok hook JSON from stdin (camelCase envelope), posts to CliDeck.
+// Exit 0 always. Grok Stop is on the turn path: exit 2 blocks the turn.
 
 const http = require('http');
 const https = require('https');

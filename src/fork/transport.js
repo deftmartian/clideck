@@ -11,6 +11,7 @@ class ForkTransport {
     this.clients = new Set();
     this.stream = createSessionStream({
       clients: this.clients,
+      batchDelayMs: 0,
       getSession: id => server.sessions.get(id),
       snapshot: async (id, atSeq) => server.sessions.get(id)?.capture.snapshot(1000, atSeq),
       applyResize: (id, cols, rows) => {
@@ -50,8 +51,8 @@ class ForkTransport {
     this.stream.queueOutput(session.id, data, start, session.outputSeq);
   }
 
-  register(socket) { this.stream.register(socket); }
-  unregister(socket) { this.stream.unregister(socket); }
+  register(socket) { this.clients.add(socket); this.stream.register(socket); }
+  unregister(socket) { this.stream.unregister(socket); this.clients.delete(socket); }
   detach(session) { this.stream.clearSession(session.id); session.capture?.dispose(); }
   start() { this.stream.start(); }
   stop() { this.stream.stop(); }
@@ -84,7 +85,10 @@ class ForkTransport {
       const history = this.server.persistence.historyTail(sessionId);
       await capture.write(history,history.length);
       const snapshot = await capture.snapshot(300);
-      if (socket.historyRequest === requestId) this.send(socket,{type:'session.history',id:sessionId,requestId,data:snapshot.data});
+      if (socket.historyRequest === requestId) this.send(socket,{
+        type:'session.history',id:sessionId,requestId,data:snapshot.data,
+        ...this.server.historyRetentionField(sessionId),
+      });
     } finally {
       capture.dispose(); socket.historyLoading = false;
       const next = socket.nextHistory; socket.nextHistory = null;

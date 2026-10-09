@@ -21,6 +21,9 @@ const codexProvider = {
   finalText(payload) {
     return String(payload.last_assistant_message || '').trim();
   },
+  userText(payload) {
+    return typeof payload.prompt === 'string' ? payload.prompt.trim() : '';
+  },
   resumeMetadata(payload) {
     return {
       handle: String(payload.session_id || '').trim(),

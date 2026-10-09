@@ -1,57 +1,57 @@
 # clideck
 
-One place for your AI agents to work with you and each other.
+A local workspace for CLI agents.
 
-![CliDeck with a team of agents and a Markdown report open](public/clideck-team.png)
+Run Claude Code, Codex, Gemini CLI, OpenCode, Pi, and shell sessions in one browser
+window. Group them into projects, follow their progress, and pick up conversations
+where you left off. Each session is the agent's actual terminal, with its own
+tools, configuration, and account. Agents can open their work directly in CliDeck
+for you to review as they go.
 
-Put a frontend agent, a backend agent, and a researcher in the same project. They can
-use different AI providers. Tell one to ask another for help, and the request and
-answer travel between their actual terminals. You stay part of the conversation.
+![CliDeck's terminal workspace with three projects and six agent sessions](public/clideck-workspace.png)
 
-CliDeck runs the agent CLIs you already use. No orchestration code to write, and no
-new agent API to wire up.
+*Projects and sessions on the left; the selected agent's terminal on the right.*
 
 ## Quick start
 
-Requires **Node.js 22.12 or newer** and at least one installed agent CLI.
+Requires **Node.js 22.12+** and an installed agent CLI.
 
 ```sh
 npm install -g clideck@2
 clideck
 ```
 
-Open **http://127.0.0.1:4000**. Create a project, open a few sessions, and give them
-names that describe their work. The short tour shows you around.
+Open **http://127.0.0.1:4000**, create a project, and add sessions. Mix providers
+as needed. You can also run `npx clideck@2`.
 
-You can also run `npx clideck@2`. Coming from v1? Read [the upgrade notes](UPGRADING.md)
-first. The latest v2 imports your legacy sessions, projects, and saved prompts automatically.
+## Working with sessions
 
-## Agents working together
+The interface works like a WhatsApp conversation list: message previews, unread
+counts, and activity times let you follow many sessions while working in one.
 
-Say “ask the reviewer to check my work.” Your agent discovers the reviewer, sends
-the request, and gets the answer back. The reviewer can use a different provider.
+- **Projects.** Group sessions by working folder; drag them between projects.
+- **Live status.** See who is working, idle, or needs your attention. Browser and
+  sound notifications let you know when work finishes.
+- **Resume and history.** Reopen saved sessions, read earlier conversations, and
+  see when stopped sessions were last used. Back up your setup and restore selected
+  settings, projects or sessions.
+- **Search.** Find sessions and search their conversation text. Filter to unread
+  sessions when catching up.
+- **Saved prompts.** Type `//` to reuse a prompt. `{{session_name}}` and
+  `{{project_name}}` fill in the current context.
+- **Controls.** Light and dark themes and configurable shortcuts.
 
-- **Projects** keep sessions together around a folder.
-- **Session names are addresses** such as `@website/reviewer`. Type `@@` in a
-  terminal to find them.
-- **CliDeck Ask** carries requests and replies between sessions. Agents can check
-  who is available or steer a session that is already working.
-- **You stay involved** through the terminals, notifications, and questions agents
-  can send back to you.
+## See what agents produce
 
-The agent-facing commands are available inside CliDeck sessions:
+Agents can create reports, pages, images, and other artifacts and automatically
+open them in CliDeck as part of their work. Results appear in tabs beside the
+terminal, ready for you to inspect and give feedback. Supported previews include:
 
-```sh
-clideck agents
-clideck ask "@website/reviewer" "Review the changes and report the important issues"
-clideck ask status
-```
+- Markdown, plain text, logs, JSON, CSV tables, HTML, and PDFs.
+- Images (PNG, JPEG, GIF, WebP) and video (MP4, WebM).
+- Mermaid diagrams, diffs, charts, and test results.
 
-## View what they produce
-
-Ask an agent to show its work inside CliDeck. Markdown reports, HTML pages, images,
-videos, PDFs, diagrams, and diffs open in preview tabs beside the terminals. You can
-also drop files onto the tab strip.
+Agents open these with `clideck show`:
 
 ```sh
 clideck show report.md
@@ -59,52 +59,59 @@ clideck show demo.html
 clideck show walkthrough.mp4
 ```
 
-## Also included
+They can update the same preview as they revise their work. You can also drop
+files onto the tab strip yourself.
 
-- Claude Code, Codex, Gemini, OpenCode, Pi, and shell sessions, plus custom commands.
-- Saved prompts with `//` lookup and `{{session_name}}` / `{{project_name}}` fields.
-- Session resume, terminal history, working/idle notifications, and session backups.
-- Light and dark themes, configurable shortcuts, and a plugin SDK.
-- **Git Changes** shows what your agents changed, with branch and worktree comparisons.
-- **Supertonic Voice** reads replies and selected text aloud.
-- **Emoji** support and optional **Smart Dictation** for speaking your prompts.
+![A Markdown report open in a CliDeck preview tab beside its terminal tab](public/clideck-output.png)
 
-Voice models are downloaded when set up; they are not included in the npm package.
-OmniVoice is not part of this release.
+## Plugins
 
-## What changed in v2
+- **Git Changes** — inspect edits, branches, and worktree comparisons.
+- **Supertonic Voice** — listen to replies or selected text. Voice models download during setup.
+- **Emoji** — emoji support in the terminal.
+- **Smart Dictation** — optional voice input for prompts.
 
-We removed Autopilot because today's agents already have sub-agents. The CLI is
-the right interface for this generation of CLI agents, so CliDeck focuses on
-helping them work across providers with you.
+You can also build plugins with the [plugin SDK](PLUGIN-SDK.md).
 
-We also removed mobile control. Harnesses such as Codex and Claude Code now provide
-their own remote access, and maintaining another mobile control layer no longer
-makes sense for CliDeck.
+## Work as a team
 
-The focus is projects where you and agents from multiple providers work together,
-with their conversations and outputs in one place.
+**CliDeck Ask** lets agents send requests to other sessions and receive their
+replies, including across providers. You set the direction and review the results.
 
-## Running locally
+In an FPS project, you flag enemy voices that don't fit. The character programmer
+chooses the SFX agent from the team, asks for replacements, and brings the update
+back for you to try.
+
+In a LoRA project, you flag poor results in darker scenes. The training manager
+asks the dataset agent for better examples, retrains, and opens the comparison
+images in CliDeck for your review.
+
+Type `@@` to find sessions such as `@game/sound`. Agents find teammates with
+`clideck agents` and contact them with `clideck ask`.
+
+![An FPS team with map, SFX, visual assets, story, QA, and player agents. Your character programmer chooses SFX for the voice request; SFX replies to the programmer, who brings the update back to you.](public/clideck-teamwork.png)
+
+## Local setup
 
 ```sh
 clideck --port 4200
 clideck --data-dir /path/to/clideck-data
 clideck --help
-clideck --version
 ```
 
-`CLIDECK_PORT` or `PORT` also sets the port. CliDeck v2 binds to loopback only. Its default
-data directory is `~/.clideck-next`, kept separate from v1's `~/.clideck`.
-Agent CLIs use their own accounts and network connections.
+`CLIDECK_PORT` or `PORT` also sets the port. CliDeck binds to localhost and stores
+its data in `~/.clideck-next` by default. Agent CLIs use their own network connections.
 
-For development, run `npm ci`, `npm test`, then `npm start`.
+For development: `npm ci`, `npm test`, then `npm start`.
 
-## Docs
+## Coming from v1
 
-- [Upgrading from v1](UPGRADING.md)
-- [Session backup and recovery](SESSION-BACKUP.md)
-- [Plugin SDK](PLUGIN-SDK.md)
+The latest v2 imports legacy sessions, projects, and saved prompts automatically.
+Read [the upgrade notes](UPGRADING.md) before updating; see
+[session backup and recovery](SESSION-BACKUP.md) for restoring saved work.
+
+Autopilot was removed because agents already have sub-agents; mobile control was
+removed because harnesses provide their own remote access.
 
 ## License
 

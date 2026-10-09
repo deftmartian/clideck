@@ -14,7 +14,10 @@ import time
 
 import numpy as np
 
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _model = None
+_backend = None  # 'mlx' or 'faster_whisper'
+_fw_model = None
 
 
 def respond(msg_id, data):
@@ -22,13 +25,21 @@ def respond(msg_id, data):
     sys.stdout.flush()
 
 
-def load_model(*, local_files_only=True):
-    global _model
+def load_model():
+    global _model, _backend, _fw_model
     if _model is not None:
         return
-    from faster_whisper import WhisperModel
-    _model = WhisperModel("small", device="auto", compute_type="int8",
-                          local_files_only=local_files_only)
+
+    if sys.platform == "darwin":
+        sys.path.insert(0, SCRIPT_DIR)
+        from whisper_turbo import load_model as _load
+        _model = _load()
+        _backend = "mlx"
+    else:
+        from faster_whisper import WhisperModel
+        _fw_model = WhisperModel("small", device="auto", compute_type="int8")
+        _model = _fw_model
+        _backend = "faster_whisper"
 
 
 def write_wav(pcm_f32):
@@ -38,7 +49,6 @@ def write_wav(pcm_f32):
     pcm16 = (pcm16 * 32767).astype(np.int16)
     data = pcm16.tobytes()
     n = len(data)
-    # WAV header
     header = struct.pack('<4sI4s4sIHHIIHH4sI',
         b'RIFF', 36 + n, b'WAVE',
         b'fmt ', 16, 1, 1, 16000, 32000, 2, 16,
@@ -49,13 +59,18 @@ def write_wav(pcm_f32):
 
 
 def transcribe(pcm_f32, lang="auto"):
+    if _backend == "mlx":
+        from whisper_turbo import transcribe as _transcribe
+        # Pass numpy array directly — no file, no ffmpeg
+        return _transcribe(path_audio=pcm_f32, lang=lang)
+
     # faster-whisper needs a file
     path = write_wav(pcm_f32)
     try:
         kwargs = {"task": "transcribe"}
         if lang and lang != "auto":
             kwargs["language"] = lang
-        segs, info = _model.transcribe(path, **kwargs)
+        segs, info = _fw_model.transcribe(path, **kwargs)
         segs = list(segs)
         text = "".join(s.text for s in segs).strip()
         lps = [s.avg_logprob for s in segs if s.avg_logprob is not None]
@@ -100,7 +115,7 @@ def handle(cmd):
             respond(cid, {"error": str(e)})
 
     elif action == "status":
-        respond(cid, {"loaded": _model is not None, "backend": "faster_whisper"})
+        respond(cid, {"loaded": _model is not None, "backend": _backend})
 
 
 def main():
@@ -116,8 +131,4 @@ def main():
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 2 and sys.argv[1] in ("--prepare-model", "--check"):
-        load_model(local_files_only=sys.argv[1] == "--check")
-        print("Local voice model ready.")
-    else:
-        main()
+    main()

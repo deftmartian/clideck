@@ -4,6 +4,7 @@ const { randomUUID } = require('crypto');
 const { delimiter, join } = require('path');
 const pty = require('./pty');
 const { Screen } = require('./screen');
+const { migrateLegacyHooks } = require('./legacy-hooks');
 const { hasNonemptyFile, waitForNonemptyFile } = require('./transcript-file');
 const { augmentedPath } = require('./custom-command');
 
@@ -57,6 +58,8 @@ class AgentSession extends EventEmitter {
     this.colorfgbg = COLORFGBG_BY_THEME[options.theme];
     this.screen = new Screen(this.cols, this.rows);
     this.userPrompts = [];
+    this.pendingPromptEchoes = [];
+    this.recordedPromptIds = new Set();
     this.status = null;
     this.menu = [];
     this.menuContext = '';
@@ -98,6 +101,8 @@ class AgentSession extends EventEmitter {
     this.hookToken = randomUUID();
     this.activeHookTurn = '';
     this.completedHookTurns = new Set();
+    this.grokActivePromptId = '';
+    this.grokSeenPromptIds = new Set();
     this.contextTranscriptPath = String(options.contextTranscriptPath || '');
     this.stopContextMonitor = () => {};
     this.resumeHandle = String(this.launchOptions.resumeHandle || '');
@@ -125,13 +130,15 @@ class AgentSession extends EventEmitter {
       : [];
     this.nativeScroll = launch.nativeScroll === true;
     this.launchCleanup = launch.cleanup || (() => {});
+    const env = sessionEnvironment(launch.env, this.id, this.port, this.colorfgbg, this.serverUrl);
+    migrateLegacyHooks(this.provider.id, env, this.cwd);
     try {
       this.terminal = pty.spawn(launch.command, [...extraArgs, ...(launch.args || [])], {
         name: 'xterm-256color',
         cols: this.cols,
         rows: this.rows,
         cwd: this.cwd,
-        env: sessionEnvironment(launch.env, this.id, this.port, this.colorfgbg, this.serverUrl),
+        env,
       });
     } catch (error) {
       this.launchCleanup();
@@ -346,12 +353,13 @@ class AgentSession extends EventEmitter {
     this.lastUpdate = '';
   }
 
-  finalizeTurn() {
+  finalizeTurn({ reportUnsuccessful = true } = {}) {
     if (!this.turnOpen) return;
     const hasCanonicalFinal = Boolean(this.pendingFinalText);
     const candidate = this.pendingFinalText
       || (this.provider.screenFinalFallback === false ? '' : this.currentCandidate());
-    if (candidate && (hasCanonicalFinal || candidate !== this.baselineCandidate)) {
+    const published = candidate && (hasCanonicalFinal || candidate !== this.baselineCandidate);
+    if (published) {
       if (candidate !== this.lastUpdate) {
         this.lastUpdate = candidate;
         this.emitAgentUpdate(candidate);
@@ -364,20 +372,66 @@ class AgentSession extends EventEmitter {
     this.baselineCandidate = candidate;
     this.lastUpdate = '';
     this.pendingFinalText = '';
+    this.releaseGrokPrompt();
+    if (!published && reportUnsuccessful) this.emitProtocol('turn.failed', { error: 'no_answer' });
   }
 
   finishTurn() {
+    this.pendingPromptEchoes = [];
     this.pendingFinal = false;
     this.finalizeTurn();
     this.setStatus('idle');
   }
 
+  releaseGrokPrompt() {
+    if (this.provider.id !== 'grok') return;
+    this.grokActivePromptId = '';
+  }
+
+  // Grok can deliver an older turn ending after the next UserPromptSubmit.
+  // Missing IDs are session-wide backstops; unseen IDs can be bash-mode turns.
+  grokHookIgnored(route, payload) {
+    if (this.provider.id !== 'grok') return false;
+    if (payload.subagentType || payload.subagent_type) return true;
+    const promptId = typeof payload.promptId === 'string' ? payload.promptId
+      : (typeof payload.prompt_id === 'string' ? payload.prompt_id : '');
+    if (route === 'start') {
+      if (promptId) this.grokSeenPromptIds.add(promptId);
+      if (this.grokSeenPromptIds.size > 256) this.grokSeenPromptIds.delete(this.grokSeenPromptIds.values().next().value);
+      this.grokActivePromptId = promptId;
+      return false;
+    }
+    const ending = route === 'stop' || route === 'stop-failure' || route === 'stop-cancelled' || route === 'idle';
+    if (!ending) return false;
+    if (route === 'idle') {
+      const kind = payload.notificationType || payload.notification_type || '';
+      if (kind && kind !== 'idle_prompt') return true;
+    }
+    return Boolean(promptId && this.grokSeenPromptIds.has(promptId) && promptId !== this.grokActivePromptId);
+  }
+
   cancelTurn() {
+    const active = this.turnOpen || this.pendingFinal;
+    this.pendingPromptEchoes = [];
     this.pendingFinal = false;
     this.pendingFinalText = '';
     this.turnOpen = false;
     this.lastUpdate = '';
+    this.releaseGrokPrompt();
     this.setStatus('idle');
+    if (active) this.emitProtocol('turn.cancelled', { error: 'cancelled' });
+  }
+
+  failTurn(error) {
+    const active = this.turnOpen || this.pendingFinal;
+    this.pendingPromptEchoes = [];
+    this.pendingFinal = false;
+    this.pendingFinalText = '';
+    this.turnOpen = false;
+    this.lastUpdate = '';
+    this.releaseGrokPrompt();
+    this.setStatus('idle');
+    if (active) this.emitProtocol('turn.failed', { error });
   }
 
   settlePendingFinal() {
@@ -387,10 +441,15 @@ class AgentSession extends EventEmitter {
 
   handleHook(route, payload = {}) {
     this.flushScreen();
+    if (this.grokHookIgnored(route, payload)) return;
     const turnId = this.provider.id === 'codex' && typeof payload.turn_id === 'string' ? payload.turn_id : '';
     if (turnId && this.completedHookTurns.has(turnId)) return;
+    // Codex can submit several prompts (including steering) within one turn.
+    // Record those before the duplicate-start lifecycle guard.
+    if (route === 'start') this.recordNativePrompt(payload);
     if (turnId && route === 'start' && turnId === this.activeHookTurn) return;
-    if (turnId && (route === 'stop' || route === 'idle') && this.activeHookTurn && turnId !== this.activeHookTurn) return;
+    const codexEnding = route === 'stop' || route === 'idle' || route === 'stop-failure' || route === 'stop-cancelled';
+    if (turnId && codexEnding && this.activeHookTurn && turnId !== this.activeHookTurn) return;
     this.setModel(this.provider.model?.(payload));
     if (route === 'context') {
       const usage = this.provider.contextUsage?.(payload);
@@ -405,6 +464,13 @@ class AgentSession extends EventEmitter {
     }
     if (route === 'stop') {
       this.completeHookTurn(turnId);
+      const reason = String(payload.reason || '');
+      // A Grok session-end Stop is observe-only. Its text is not the answer.
+      if (this.provider.id === 'grok' && reason && reason !== 'end_turn') {
+        this.analyzeScreen();
+        this.failTurn('no_answer');
+        return;
+      }
       this.pendingFinalText = this.provider.finalText?.(payload) || '';
       this.analyzeScreen();
       if (this.provider.finalizeOnStop) {
@@ -413,6 +479,24 @@ class AgentSession extends EventEmitter {
       }
       this.pendingFinal = true;
       this.settlePendingFinal();
+      return;
+    }
+    if (route === 'stop-failure') {
+      this.completeHookTurn(turnId);
+      this.analyzeScreen();
+      this.failTurn('provider_error');
+      return;
+    }
+    if (route === 'stop-cancelled') {
+      this.completeHookTurn(turnId);
+      this.analyzeScreen();
+      this.cancelTurn();
+      return;
+    }
+    if (route === 'idle' && this.provider.id === 'codex') {
+      this.completeHookTurn(turnId);
+      this.analyzeScreen();
+      this.cancelTurn();
       return;
     }
     if (route === 'idle' || route === 'session-end') {
@@ -440,15 +524,36 @@ class AgentSession extends EventEmitter {
   }
 
   completeHookTurn(turnId) {
+    turnId ||= this.activeHookTurn;
     if (!turnId) return;
     this.completedHookTurns.add(turnId);
     if (this.completedHookTurns.size > 32) this.completedHookTurns.delete(this.completedHookTurns.values().next().value);
     if (this.activeHookTurn === turnId) this.activeHookTurn = '';
   }
 
+  recordNativePrompt(payload) {
+    const text = this.provider.userText?.(payload);
+    if (!text) return;
+    const id = this.provider.id === 'claude-code' && typeof payload.prompt_id === 'string'
+      ? payload.prompt_id : '';
+    if (id && this.recordedPromptIds.has(id)) return;
+    if (id) {
+      this.recordedPromptIds.add(id);
+      if (this.recordedPromptIds.size > 64) this.recordedPromptIds.delete(this.recordedPromptIds.values().next().value);
+    }
+    // Only consume the next expected echo, once. Never deduplicate user text
+    // against conversation history: repeated identical messages are valid.
+    const expected = this.pendingPromptEchoes[0];
+    if (expected !== undefined && (expected === text || this.provider.promptEchoMatches?.(expected, text))) {
+      this.pendingPromptEchoes.shift();
+      return;
+    }
+    this.emitProtocol('turn.user', { text });
+  }
+
   sendPrompt(text) {
     const prompt = String(text || '').trim();
-    if (!prompt || !this.terminal || this.closed) return false;
+    if (!prompt || !this.terminal || this.closed || this.attachmentFrames) return false;
     this.flushScreen();
     this.baselineCandidate = this.currentCandidate();
     this.pendingFinal = false;
@@ -461,7 +566,7 @@ class AgentSession extends EventEmitter {
 
   steerPrompt(text) {
     const prompt = String(text || '').trim();
-    if (!prompt || !this.terminal || this.closed) return false;
+    if (!prompt || !this.terminal || this.closed || this.attachmentFrames) return false;
     this.flushScreen();
     if (this.menu.length) return false;
     this.submitPrompt(prompt, false);
@@ -470,6 +575,10 @@ class AgentSession extends EventEmitter {
 
   submitPrompt(prompt, retryWhenIdle) {
     this.userPrompts.push(prompt);
+    if (this.provider.userText) {
+      this.pendingPromptEchoes.push(prompt);
+      if (this.pendingPromptEchoes.length > 32) this.pendingPromptEchoes.shift();
+    }
     this.emitProtocol('turn.user', { text: prompt });
     this.terminal.write(`${BRACKETED_PASTE_START}${prompt}${BRACKETED_PASTE_END}`);
     const delay = this.promptSubmitDelay(prompt.length);
@@ -477,7 +586,7 @@ class AgentSession extends EventEmitter {
     clearTimeout(this.submitRetryTimer);
     clearTimeout(this.inputSubmitTimer);
     this.inputSubmitTimer = null;
-    this.queuedInput = []; this.queuedInputBytes = 0;
+    this.queuedInput = []; this.queuedInputBytes = 0; this.attachmentFrames = null;
     clearTimeout(this.activityTimer);
     this.submitTimer = setTimeout(() => {
       if (!this.closed) this.terminal.write('\r');
@@ -489,13 +598,34 @@ class AgentSession extends EventEmitter {
     }
   }
 
+  writeAttachmentDraft(frames, submit) {
+    if (!Array.isArray(frames) || !frames.length || frames.length > 33
+      || frames.some(frame => typeof frame !== 'string' || !frame.startsWith(BRACKETED_PASTE_START) || !frame.endsWith(BRACKETED_PASTE_END))
+      || frames.reduce((bytes, frame) => bytes + Buffer.byteLength(frame), 0) > 66 * 1024
+      || this.inputSubmitTimer || this.closed || this.closeRequested) return false;
+    this.attachmentFrames = [...frames.slice(1), ...(submit ? ['\r'] : [])];
+    this.writeInput(frames[0]);
+    // Native image decoding is asynchronous; keep frames separate and pacing alive across browser navigation.
+    this.inputSubmitTimer = setTimeout(() => this.flushInputSubmit(), 1700);
+    return true;
+  }
+
   flushInputSubmit() {
     clearTimeout(this.inputSubmitTimer);
     this.inputSubmitTimer = null;
+    if (this.attachmentFrames?.length) {
+      const frame = this.attachmentFrames.shift();
+      if (this.closed) { this.attachmentFrames = null; return; }
+      this.writeInput(frame);
+      this.inputSubmitTimer = setTimeout(() => this.flushInputSubmit(), frame === '\r' ? 0 : 1700);
+      return;
+    }
+    const attachment = this.attachmentFrames;
+    this.attachmentFrames = null;
     const queued = this.queuedInput;
-    this.queuedInput = []; this.queuedInputBytes = 0;
+    this.queuedInput = []; this.queuedInputBytes = 0; this.attachmentFrames = null;
     if (this.closed) return;
-    this.writeInput('\r');
+    if (!attachment) this.writeInput('\r');
     for (const data of queued) this.writeInput(data);
   }
 
@@ -507,12 +637,13 @@ class AgentSession extends EventEmitter {
       // Explicit cancellation must never be followed by a delayed Enter.
       if (input === '\x03' || input === '\x1b') {
         clearTimeout(this.inputSubmitTimer); this.inputSubmitTimer = null;
-        this.queuedInput = []; this.queuedInputBytes = 0;
+        this.queuedInput = []; this.queuedInputBytes = 0; this.attachmentFrames = null;
       } else {
         const bytes = Buffer.byteLength(input);
         if (this.queuedInputBytes + bytes <= 256 * 1024) {
           this.queuedInput.push(input); this.queuedInputBytes += bytes; return true;
         }
+        if (this.attachmentFrames) return false;
         // Bound memory even if another client floods this short submission window.
         this.flushInputSubmit();
         return this.writeInput(input);
@@ -540,7 +671,8 @@ class AgentSession extends EventEmitter {
       this.beginTurn();
       this.setStatus('working');
     }
-    if (this.menu.length && this.userPrompts.length && /[\r\n0-9]/.test(input)) {
+    // Menu approval continues the current turn, regardless of how it was submitted.
+    if (this.menu.length && this.turnOpen && /[\r\n0-9]/.test(input)) {
       this.beginTurn();
       this.setStatus('working');
     }
@@ -636,7 +768,7 @@ class AgentSession extends EventEmitter {
     clearTimeout(this.submitRetryTimer);
     clearTimeout(this.inputSubmitTimer);
     this.inputSubmitTimer = null;
-    this.queuedInput = []; this.queuedInputBytes = 0;
+    this.queuedInput = []; this.queuedInputBytes = 0; this.attachmentFrames = null;
     const pendingTranscript = this.provider.requiresResumeTranscript
       && this.userPrompts.length > 0
       && this.resumeTranscriptPath
@@ -660,7 +792,7 @@ class AgentSession extends EventEmitter {
     clearTimeout(this.submitRetryTimer);
     clearTimeout(this.inputSubmitTimer);
     this.inputSubmitTimer = null;
-    this.queuedInput = []; this.queuedInputBytes = 0;
+    this.queuedInput = []; this.queuedInputBytes = 0; this.attachmentFrames = null;
     clearTimeout(this.activityTimer);
     this.killTerminal();
     return this.closedPromise;
@@ -674,19 +806,21 @@ class AgentSession extends EventEmitter {
     if (this.closed) return;
     this.flushScreen();
     this.closed = true;
+    this.pendingPromptEchoes = [];
+    this.recordedPromptIds.clear();
     clearTimeout(this.outputTimer);
     this.outputTimer = null;
     clearTimeout(this.submitTimer);
     clearTimeout(this.submitRetryTimer);
     clearTimeout(this.inputSubmitTimer);
     this.inputSubmitTimer = null;
-    this.queuedInput = []; this.queuedInputBytes = 0;
+    this.queuedInput = []; this.queuedInputBytes = 0; this.attachmentFrames = null;
     clearTimeout(this.activityTimer);
     clearTimeout(this.closeKillTimer);
     this.closeKillTimer = null;
     this.stopContextMonitor();
     this.stopContextMonitor = () => {};
-    if (!this.restarting) this.finalizeTurn();
+    if (!this.restarting) this.finalizeTurn({ reportUnsuccessful: false });
     this.launchCleanup();
     this.emitProtocol('session.closed', {
       exitCode,

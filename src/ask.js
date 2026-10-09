@@ -194,6 +194,9 @@ class AskCoordinator {
         if (event.type === 'agent.final') {
           release();
           finishResponse({ ok: true, answer: event.text });
+        } else if (event.type === 'turn.cancelled' || event.type === 'turn.failed') {
+          release();
+          finishResponse(unsuccessfulTurn(event.error));
         } else if (event.type === 'session.closed') {
           release();
           finishResponse({ ok: false, error: 'target_closed' });
@@ -215,8 +218,20 @@ class AskCoordinator {
   }
 }
 
+const UNSUCCESSFUL_TURN = {
+  cancelled: 'The turn was cancelled before it answered.',
+  provider_error: 'The agent failed before it answered.',
+  no_answer: 'The turn ended without an answer.',
+};
+
+function unsuccessfulTurn(error) {
+  const code = Object.hasOwn(UNSUCCESSFUL_TURN, error) ? error : 'no_answer';
+  return { ok: false, error: code, message: UNSUCCESSFUL_TURN[code] };
+}
+
 module.exports = {
   AskCoordinator,
+  unsuccessfulTurn,
   DEFAULT_ASK_TIMEOUT_MS,
   MAX_ASK_TIMEOUT_MS,
   availableAskSession,

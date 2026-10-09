@@ -6,6 +6,7 @@ const {
   readdirSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } = require('fs');
 const { homedir } = require('os');
@@ -77,6 +78,7 @@ function normalizeEntry(value) {
     ...(Object.keys(assets).length && { assets }),
     createdAt: value.createdAt || new Date().toISOString(),
     lastActive: value.lastActive || value.createdAt || new Date().toISOString(),
+    ...(value.historyTruncated === true && { historyTruncated: true }),
     ...(value.lastFinal && { lastFinal: String(value.lastFinal) }),
     ...(Number(value.lastAgentAt) > 0 && { lastAgentAt: Number(value.lastAgentAt) }),
     ...(value.resumeHandle && { resumeHandle: String(value.resumeHandle) }),
@@ -106,32 +108,54 @@ function writeRegistry(path, text) {
   renameSync(temporary, path);
 }
 
+function retentionMessage(state, limit) {
+  const cap = `${limit} bytes`;
+  if (state === 'truncated') {
+    return `Terminal output kept for this session is capped at ${cap}. The oldest output was removed and cannot be restored. This is terminal output, separate from the native conversation. Conversation History does not recover removed terminal bytes.`;
+  }
+  if (state === 'uncertain') {
+    return `This terminal history file is at the ${cap} cap and has no retention flag, so it is uncertain whether older output was removed. Terminal output and conversation History are separate. History does not recover missing terminal bytes.`;
+  }
+  return '';
+}
+
 class ByteTail {
   constructor(limit, initial = Buffer.alloc(0)) {
     this.limit = limit;
     this.chunks = [];
     this.length = 0;
+    this.truncated = false;
     this.append(initial);
   }
 
   append(value) {
     let buffer = Buffer.isBuffer(value) ? value : Buffer.from(String(value || ''));
-    if (!buffer.length) return;
-    if (buffer.length >= this.limit) {
+    if (!buffer.length) return false;
+    let discarded = false;
+    if (buffer.length > this.limit) {
+      discarded = true;
       this.chunks = [Buffer.from(buffer.subarray(buffer.length - this.limit))];
       this.length = this.limit;
-      return;
-    }
-    this.chunks.push(buffer);
-    this.length += buffer.length;
-    while (this.chunks.length > 1 && this.length - this.chunks[0].length >= this.limit) {
-      this.length -= this.chunks.shift().length;
-    }
-    if (this.length > this.limit) {
-      const overflow = this.length - this.limit;
-      this.chunks[0] = Buffer.from(this.chunks[0].subarray(overflow));
+    } else if (buffer.length === this.limit) {
+      discarded = this.length > 0;
+      this.chunks = [buffer];
       this.length = this.limit;
+    } else {
+      this.chunks.push(buffer);
+      this.length += buffer.length;
+      while (this.chunks.length > 1 && this.length - this.chunks[0].length >= this.limit) {
+        this.length -= this.chunks.shift().length;
+        discarded = true;
+      }
+      if (this.length > this.limit) {
+        const overflow = this.length - this.limit;
+        this.chunks[0] = Buffer.from(this.chunks[0].subarray(overflow));
+        this.length = this.limit;
+        discarded = true;
+      }
     }
+    if (discarded) this.truncated = true;
+    return discarded;
   }
 
   buffer() {
@@ -158,6 +182,7 @@ class SessionPersistence {
     this.now = options.now || (() => new Date().toISOString());
     this.entries = new Map();
     this.history = new Map();
+    this.historyReadErrors = new Set();
     this.historyTimers = new Map();
     this.registryTimer = null;
     this.closed = false;
@@ -224,6 +249,21 @@ class SessionPersistence {
     clearTimeout(this.registryTimer);
     this.registryTimer = setTimeout(() => this.saveRegistry(), this.debounceMs);
     this.registryTimer.unref?.();
+  }
+
+  // Restore definitions only. Never register over a session: register clears its history.
+  importMissing(values) {
+    const entries = values.map(normalizeEntry);
+    if (entries.some((entry) => !entry)) throw new Error('Invalid sessions in backup.');
+    const added = entries.filter((entry) => !this.entries.has(entry.id));
+    for (const entry of added) this.entries.set(entry.id, entry);
+    try {
+      this.saveRegistry();
+    } catch (error) {
+      for (const entry of added) this.entries.delete(entry.id);
+      throw error;
+    }
+    return added.map(cloneEntry);
   }
 
   register(session) {
@@ -303,13 +343,33 @@ class SessionPersistence {
 
   readHistory(id) {
     const key = String(id);
-    if (this.history.has(key)) return this.history.get(key);
+    const pending = this.history.get(key);
+    if (pending && !this.historyReadErrors.has(key)) return pending;
     const path = this.historyPath(key);
     let buffer = Buffer.alloc(0);
     try {
-      if (path && existsSync(path)) buffer = readFileSync(path);
-    } catch {}
+      if (path) buffer = readFileSync(path);
+    } catch (error) {
+      if (error.code !== 'ENOENT') {
+        if (!this.historyReadErrors.has(key)) {
+          console.warn(`CliDeck history: cannot read ${path}; preserving the file until reading succeeds (${error.code || 'read error'}).`);
+        }
+        this.historyReadErrors.add(key);
+        const tail = pending || new ByteTail(this.historyLimit);
+        this.history.set(key, tail);
+        return tail;
+      }
+    }
     const tail = new ByteTail(this.historyLimit, buffer);
+    // Output received during a read failure must follow, never replace, the saved tail.
+    if (pending) {
+      tail.append(pending.buffer());
+      tail.truncated ||= pending.truncated;
+      if (tail.truncated && this.entries.get(key)?.historyTruncated !== true) {
+        this.update(key, { historyTruncated: true });
+      }
+    }
+    this.historyReadErrors.delete(key);
     this.history.set(key, tail);
     return tail;
   }
@@ -318,15 +378,42 @@ class SessionPersistence {
     return this.readHistory(id).toString();
   }
 
-  appendHistory(id, data) {
-    if (this.closed || !this.entries.has(String(id))) return;
+  historyRetention(id) {
     const key = String(id);
-    this.readHistory(key).append(data);
-    this.touch(key);
+    const entry = this.entries.get(key);
+    const tail = this.history.get(key);
+    let bytes = tail ? tail.length : 0;
+    if (!tail) {
+      const path = this.historyPath(key);
+      try {
+        if (path && existsSync(path)) bytes = statSync(path).size;
+      } catch { /* a missing history file is an empty tail */ }
+    }
+    const flagged = entry?.historyTruncated === true || tail?.truncated === true;
+    let state = 'full';
+    if (bytes > 0 && flagged) state = 'truncated';
+    else if (bytes >= this.historyLimit) state = 'uncertain';
+    const message = retentionMessage(state, this.historyLimit);
+    return {
+      state,
+      limit: this.historyLimit,
+      bytes,
+      ...(message && { message }),
+    };
+  }
+
+  appendHistory(id, data) {
+    if (this.closed || !this.entries.has(String(id))) return false;
+    const key = String(id);
+    const entry = this.entries.get(key);
+    const already = entry.historyTruncated === true;
+    const discarded = this.readHistory(key).append(data);
+    this.touch(key, discarded ? { historyTruncated: true } : {});
     clearTimeout(this.historyTimers.get(key));
     const timer = setTimeout(() => this.flushHistory(key), this.debounceMs);
     timer.unref?.();
     this.historyTimers.set(key, timer);
+    return Boolean(discarded && !already);
   }
 
   flushHistory(id) {
@@ -335,18 +422,19 @@ class SessionPersistence {
     clearTimeout(this.historyTimers.get(key));
     this.historyTimers.delete(key);
     const path = this.historyPath(key);
-    const history = this.history.get(key);
-    if (!path || !history) return;
+    const history = this.historyReadErrors.has(key) ? this.readHistory(key) : this.history.get(key);
+    if (!path || !history || this.historyReadErrors.has(key)) return;
     const temporary = `${path}.${process.pid}.tmp`;
-    writeFileSync(temporary, history.buffer());
+    writeFileSync(temporary, history.buffer(), { mode: 0o600 });
     renameSync(temporary, path);
   }
 
   markClosed(session) {
+    // Shutdown records dimensions only. lastActive stays at the last real
+    // input or output so a restart does not look like new activity.
     this.update(session.id, {
       cols: session.cols,
       rows: session.rows,
-      lastActive: this.now(),
     }, true);
     this.flushHistory(session.id);
   }
@@ -358,6 +446,7 @@ class SessionPersistence {
     clearTimeout(this.historyTimers.get(key));
     this.historyTimers.delete(key);
     this.history.delete(key);
+    this.historyReadErrors.delete(key);
     const path = this.historyPath(key);
     if (path) rmSync(path, { force: true });
     this.saveRegistry();
@@ -384,4 +473,5 @@ module.exports = {
   DEFAULT_DATA_DIR,
   DEFAULT_HISTORY_LIMIT,
   SessionPersistence,
+  retentionMessage,
 };

@@ -5,6 +5,8 @@ const MAX_CONTROL_TEXT = 1024 * 1024;
 const MAX_CONTROL_BYTES = 16 * 1024 * 1024;
 const MAX_SESSION_ID = 200;
 const CONTROL_TYPES = new Set([
+  'engine.update.check',
+  'engine.update.install',
   'session.create',
   'session.history.get',
   'session.subscribe', 'session.unsubscribe', 'session.ack', 'session.claimResize', 'transcript.cache.get',
@@ -28,6 +30,7 @@ const CONTROL_TYPES = new Set([
   'transcript.page',
   'config.get',
   'config.update',
+  'config.recover',
   'checkAvailability',
   'plugins.refresh',
   'plugin.install',
@@ -66,6 +69,13 @@ function isKnownControlType(type) {
 }
 
 function hasValidControlFields(message) {
+  if (message.type === 'engine.update.check' || message.type === 'engine.update.install') {
+    return Object.keys(message).length === 1;
+  }
+  if (message.type === 'config.get') return hasValidRequestId(message);
+  if (message.type === 'config.recover') return hasValidRequestId(message)
+    && Object.keys(message).every((key) => key === 'type' || key === 'requestId');
+  if (message.type === 'checkAvailability') return true;
   if (message.type === 'transcript.cache.get') return true;
   if (['session.subscribe', 'session.unsubscribe', 'session.ack', 'session.claimResize'].includes(message.type)) {
     if (!isString(message.id, 200)) return false;
@@ -79,7 +89,6 @@ function hasValidControlFields(message) {
       && ((Number.isSafeInteger(message.seq) && message.seq >= 0) || (Number.isSafeInteger(message.part) && message.part >= 0));
     return true;
   }
-  if (message.type === 'config.get' || message.type === 'checkAvailability') return true;
   if (message.type === 'plugins.refresh' || message.type === 'plugin.openFolder') {
     return hasValidRequestId(message);
   }
@@ -154,7 +163,14 @@ function hasValidControlFields(message) {
   if (message.type === 'content.close') return isString(message.contentId, MAX_SESSION_ID);
   if (message.type === 'prompt') return isString(message.text, MAX_CONTROL_TEXT);
   if (message.type === 'input') {
-    return typeof message.data === 'string' && message.data.length <= MAX_CONTROL_TEXT;
+    const data = typeof message.data === 'string' && message.data.length <= MAX_CONTROL_TEXT;
+    const frames = Array.isArray(message.frames) && message.frames.length > 0 && message.frames.length <= 33
+      && typeof message.submit === 'boolean'
+      && message.frames.every(frame => typeof frame === 'string' && frame.startsWith('\x1b[200~') && frame.endsWith('\x1b[201~'))
+      && message.frames.reduce((bytes, frame) => bytes + Buffer.byteLength(frame), 0) <= 66 * 1024;
+    const paths = message.paths === undefined || (Array.isArray(message.paths) && message.paths.length <= 32
+      && message.paths.every(path => isString(path,8192)) && isString(message.requestId,100));
+    return paths && (data || frames);
   }
   if (message.type === 'resize') {
     return isDimension(message.cols, 20, 500) && isDimension(message.rows, 5, 300);

@@ -1,9 +1,11 @@
 const http = require('http');
-const { resolve } = require('path');
+const { resolve, isAbsolute } = require('path');
 const { ForkTransport, PROTOCOL: FORK_PROTOCOL } = require('./fork/transport');
 const { WorkerManager, canAskSession, workerMetadata } = require('./fork-workers');
+const { Files, MAX_TEXT_BYTES, openDownload, pathValue } = require('./files');
+const { pipeline } = require('stream/promises');
 const { serverUrl } = require('./hook-url');
-const { existsSync } = require('fs');
+const { existsSync, accessSync, statSync, constants:fsConstants } = require('fs');
 const { WebSocketServer, WebSocket } = require('ws');
 const { AgentSession } = require('./session');
 const {
@@ -21,6 +23,7 @@ const {
   isKnownControlType,
 } = require('./control');
 const { ConfigStore } = require('./config-store');
+const { diagnoseSessions, resolveResume } = require('./resume-diagnostics');
 const {
   ContentError,
   ContentStore,
@@ -42,7 +45,7 @@ const { isAllowedWebSocketOrigin, isLoopbackAddress, isLoopbackHost } = require(
 const { listSessionAgents, resolveLiveCaller } = require('./session-agents');
 const { servePluginStatic, serveStatic } = require('./static');
 const { ServerLock } = require('./server-lock');
-const { alreadyRunningLine, startupBanner } = require('./startup');
+const { alreadyRunningLine, startupBanner, notifyUpdate } = require('./startup');
 const { TranscriptStore } = require('./transcript-store');
 const { MAX_UPLOAD_BYTES, UploadError, saveUpload } = require('./upload');
 const { checkCommandAvailability } = require('./availability');
@@ -51,19 +54,30 @@ const { createCustomCommandProvider, parseCommand } = require('./custom-command'
 const { PluginManager } = require('./plugin-manager');
 const { createAgentSessionGuide } = require('./agent-session-guide');
 const { PluginHttp } = require('./plugin-http');
+const { MAX_BACKUP_BYTES, createBackup, previewBackup, restoreBackup } = require('./backup');
 
-const HOOK_ROUTE_RE = /^\/hooks\/([^/]+)\/(start|stop|idle|session-start|session-end|menu|context)$/;
+const HOOK_ROUTE_RE = /^\/hooks\/([^/]+)\/(start|stop|idle|stop-failure|stop-cancelled|session-start|session-end|menu|context)$/;
 const MAX_SHOW_REQUEST_BYTES = MAX_CONTENT_BYTES * 6 + 16 * 1024;
 
 function readJson(req, limit = 100 * 1024) {
   return new Promise((resolve, reject) => {
     let body = '';
+    let bytes = 0;
+    let tooLarge = false;
     req.setEncoding('utf8');
     req.on('data', (chunk) => {
+      if (tooLarge) return;
+      bytes += Buffer.byteLength(chunk);
+      if (bytes > limit) {
+        tooLarge = true;
+        body = '';
+        reject(new Error('Request too large.'));
+        return;
+      }
       body += chunk;
-      if (body.length > limit) reject(new Error('request too large'));
     });
     req.on('end', () => {
+      if (tooLarge) return;
       try {
         resolve(body ? JSON.parse(body) : {});
       } catch (error) {
@@ -72,6 +86,13 @@ function readJson(req, limit = 100 * 1024) {
     });
     req.on('error', reject);
   });
+}
+
+// ASCII fallback plus RFC 5987 name; header values must never carry control characters or quotes.
+function attachmentDisposition(name) {
+  const fallback = name.replace(/[^\x20-\x7e]|["\\%]/g, '_');
+  const encoded = encodeURIComponent(name).replace(/['()*]/g, ch => '%' + ch.charCodeAt(0).toString(16).toUpperCase());
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`;
 }
 
 function sendJson(res, statusCode, body) {
@@ -122,6 +143,8 @@ class HeadlessServer {
       dataDir: options.dataDir || this.persistence.dataDir,
       freshInstall,
     });
+    const configRecovery = this.configStore.recoveryStatus();
+    if (configRecovery) console.warn(`CliDeck config: ${configRecovery.message}`);
     this.transcriptStore = options.transcriptStore || new TranscriptStore({
       dataDir: options.dataDir || this.persistence.dataDir,
       validIds: this.persistence.list().map((entry) => entry.id),
@@ -136,6 +159,7 @@ class HeadlessServer {
       }
     }
     this.clients = new Set();
+    this.updates = options.updates || null;
     this.forkTransport = new ForkTransport(this);
     this.clipboardImages = require('./fork/clipboard-image-http').createClipboardImageUploadHandler({
       sessions: { getSessions: () => this.sessions, input: ({ id, data }) => this.sessions.get(id)?.writeInput(data) },
@@ -163,6 +187,7 @@ class HeadlessServer {
     this.promptCoordinator = options.promptCoordinator
       || new PromptCoordinator((event) => this.broadcast(event));
     this.workers = new WorkerManager(this);
+    this.files = new Files();
     this.closing = false;
     this.closePromise = null;
     this.httpServer = http.createServer((req, res) => this.handleHttp(req, res));
@@ -358,9 +383,23 @@ class HeadlessServer {
     const provider = customCommand
       ? createCustomCommandProvider(customCommand)
       : getProvider(entry.provider);
-    if (entry.commandId && !customCommand) return null;
+    if (entry.commandId && !customCommand) {
+      this.broadcastSessionError(id, { code: 'command_unavailable', operation: 'session.resume',
+        message: 'This session’s CLI agent command is missing or disabled. Restore its CLI Agents settings or enable the command in Settings.' });
+      return null;
+    }
     if (!provider) return null;
-    const { providerOptions } = this.resumeLaunch(provider, entry);
+    const launch = this.resumeLaunch(provider, entry);
+    if (!launch.ok) {
+      this.broadcastSessionError(id, {
+        code: launch.code,
+        operation: 'session.resume',
+        message: launch.message,
+      });
+      return null;
+    }
+    this.warnResume(id, launch);
+    const { providerOptions } = launch;
     providerOptions.touchUi = touchUi;
     return this.startSession({
       id: entry.id,
@@ -384,14 +423,26 @@ class HeadlessServer {
   }
 
   resumeLaunch(provider, entry) {
+    const decision = resolveResume(provider, entry || {});
     const providerOptions = this.providerLaunchOptions(provider.id);
     delete providerOptions.resumeHandle;
-    // Native CLIs resolve their own conversation IDs. A missing cached transcript
-    // path (notably after a v1 import) must never silently turn Resume into New.
-    const resumed = Boolean(entry.resumeHandle
-      && (provider.id !== 'custom-command' || provider.canResume));
-    if (resumed) providerOptions.resumeHandle = entry.resumeHandle;
-    return { providerOptions, resumed };
+    // A missing cached transcript path must not turn a saved native handle
+    // into a new conversation. A missing required handle must not either.
+    if (decision.ok && decision.resumed && decision.handle) {
+      providerOptions.resumeHandle = decision.handle;
+    }
+    return { providerOptions, resumed: decision.resumed, ...decision };
+  }
+
+  warnResume(id, decision) {
+    if (!decision?.warnings?.length) return;
+    this.broadcast({
+      type: 'session.notice',
+      sessionId: id,
+      level: 'warning',
+      code: 'resume_transcript_unverified',
+      message: decision.warnings.join(' '),
+    });
   }
 
   providerLaunchOptions(providerId) {
@@ -506,7 +557,17 @@ class HeadlessServer {
     }
 
     const entry = this.persistence.get(id);
-    const { providerOptions, resumed } = this.resumeLaunch(session.provider, entry || {});
+    const launch = this.resumeLaunch(session.provider, entry || {});
+    if (!launch.ok) {
+      this.broadcastSessionError(id, {
+        code: launch.code,
+        operation: 'session.restart',
+        message: launch.message,
+      });
+      return null;
+    }
+    this.warnResume(id, launch);
+    const { providerOptions, resumed } = launch;
     const options = {
       id,
       ...workerMetadata(session),
@@ -560,7 +621,13 @@ class HeadlessServer {
       let outbound = event;
       if (event.type === 'output') {
         this.forkTransport.output(session, event.data);
-        this.persistence.appendHistory(session.id, event.data);
+        if (this.persistence.appendHistory(session.id, event.data)) {
+          this.broadcast({
+            type: 'session.historyRetention',
+            sessionId: session.id,
+            historyRetention: this.persistence.historyRetention(session.id),
+          });
+        }
       }
       else if (event.type === 'turn.user') this.storeTranscriptEntry(session.id, 'user', event.text);
       else if (event.type === 'agent.final') {
@@ -663,7 +730,13 @@ class HeadlessServer {
         commandId: entry.commandId,
         label: entry.commandLabel || '',
       }),
+      ...this.historyRetentionField(entry.id),
     };
+  }
+
+  historyRetentionField(id) {
+    const historyRetention = this.persistence.historyRetention(id);
+    return historyRetention.state === 'full' ? {} : { historyRetention };
   }
 
   getCustomCommand(id) {
@@ -852,9 +925,12 @@ class HeadlessServer {
     }
   }
 
-  sendConfig(socket) {
+  sendConfig(socket, requestId = '') {
+    const recovery = this.configStore.recoveryStatus();
     this.sendControlResult(socket, {
       type: 'config', config: this.configForClient(this.configStore.get()),
+      ...(recovery && { recovery }),
+      ...(typeof requestId === 'string' && requestId && { requestId }),
     });
   }
 
@@ -866,6 +942,79 @@ class HeadlessServer {
 
   broadcastConfig(config) {
     this.broadcast({ type: 'config', config: this.configForClient(config) });
+  }
+
+  // A plain GET carries no Origin, so a DNS-rebound page would pass the shared origin check;
+  // require a loopback or explicitly allowed Host and a same-origin fetch.
+  allowFileDownload(req) {
+    const site = req.headers['sec-fetch-site'];
+    if (!this.allowLocalApi(req) || (site && site !== 'same-origin' && site !== 'none')) return false;
+    if (!isLoopbackHost(this.host)) return true;
+    const host = String(req.headers.host || '').trim();
+    try {
+      const hostname = new URL(`http://${host}`).hostname;
+      if (isLoopbackHost(hostname)) return true;
+    } catch { return false; }
+    const allowed = String(process.env.CLIDECK_ALLOWED_ORIGINS || '').split(',').map(value => value.trim());
+    return allowed.includes(`http://${host}`) || allowed.includes(`https://${host}`);
+  }
+
+  async handleFileDownload(req, res) {
+    if (!this.allowFileDownload(req)) { sendJson(res, 403, { ok: false, error: 'local_only' }); return; }
+    const query = new URL(req.url, 'http://localhost').searchParams;
+    let download;
+    try {
+      if (!this.persistence.get(query.get('sessionId'))) { sendJson(res, 404, { ok: false, error: 'unknown_session' }); return; }
+      download = await openDownload(pathValue(query.get('path')));
+    } catch (error) {
+      sendJson(res, error.code === 'ENOENT' ? 404 : 400, { ok: false, error: error.code || 'files_failed', message: error.message });
+      return;
+    }
+    const { handle, size, name } = download;
+    let sent = 0;
+    try {
+      res.writeHead(200, {
+        'Content-Type': 'application/octet-stream',
+        'Content-Length': size,
+        'Content-Disposition': attachmentDisposition(name),
+        'Cache-Control': 'no-store',
+        'X-Content-Type-Options': 'nosniff',
+      });
+      if (size > 0) {
+        // Bounded to the size announced, even if the file grows while streaming.
+        const source = handle.createReadStream({ start: 0, end: size - 1, autoClose: true });
+        source.on('data', chunk => { sent += chunk.length; });
+        await pipeline(source, res);
+      } else res.end();
+      if (sent !== size) res.destroy(); // The file shrank; make the browser see a failed download.
+    } catch { res.destroy(); }
+    finally { await handle.close().catch(() => {}); }
+  }
+
+  allowLocalApi(req) {
+    return isLoopbackAddress(req.socket?.remoteAddress)
+      && isAllowedWebSocketOrigin(req.headers.origin, req.headers.host, this.host)
+      && req.headers['sec-fetch-site'] !== 'cross-site';
+  }
+
+  recoverConfig(socket) {
+    try {
+      const result = this.configStore.recover();
+      if (result.recovered) this.broadcastConfig(result.config);
+      this.sendControlResult(socket, {
+        type: 'config.recover.result',
+        success: true,
+        recovered: result.recovered,
+        preserved: result.preserved ? result.preserved.split(/[\\/]/).pop() : null,
+      });
+    } catch (error) {
+      this.sendControlResult(socket, {
+        type: 'config.recover.result',
+        success: false,
+        code: error.code || 'config_recovery_failed',
+        error: error.message,
+      });
+    }
   }
 
   updateConfig(config, socket) {
@@ -994,6 +1143,7 @@ class HeadlessServer {
     }
     socket.send(JSON.stringify({ type: 'plugins', plugins: this.pluginManager.snapshot() }));
     this.forkTransport.inventory(socket);
+    if (this.updates) socket.send(JSON.stringify(this.updates.snapshot()));
 
     socket.on('message', (raw) => {
       if (this.closing) return;
@@ -1035,6 +1185,11 @@ class HeadlessServer {
         return;
       }
       socket.close(1003, 'invalid control fields');
+      return;
+    }
+    if (message.type === 'engine.update.check' || message.type === 'engine.update.install') {
+      const action = message.type === 'engine.update.check' ? 'check' : 'install';
+      this.updates?.[action]().then(result => this.sendControlResult(socket, result)).catch(() => {});
       return;
     }
     if (this.forkTransport.control(socket, message)) return;
@@ -1094,11 +1249,15 @@ class HeadlessServer {
       return;
     }
     if (message.type === 'config.get') {
-      this.sendConfig(socket);
+      this.sendConfig(socket, message.requestId);
       return;
     }
     if (message.type === 'config.update') {
       this.updateConfig(message.config, socket);
+      return;
+    }
+    if (message.type === 'config.recover') {
+      this.recoverConfig(socket);
       return;
     }
     if (message.type === 'checkAvailability') {
@@ -1201,6 +1360,7 @@ class HeadlessServer {
 
     const session = this.targetSession(message);
     if (!session) {
+      if (message.type === 'input' && message.requestId) socket.send(JSON.stringify({type:'input.accepted',requestId:message.requestId,ok:false,error:'The session is no longer running.'}));
       if (message.type === 'session.close' && this.removeSessionState(message.sessionId)) {
         this.transcriptStore.delete(message.sessionId);
         this.broadcast({
@@ -1212,10 +1372,22 @@ class HeadlessServer {
       }
       return;
     }
-    if (message.type === 'prompt') session.sendPrompt(message.text);
+    if (message.type === 'prompt') {
+      if (!session.sendPrompt(message.text)) socket.send(JSON.stringify({type:'input.rejected',error:'Prompt was not inserted. Wait for the attachment draft to finish, then send again.'}));
+    }
     else if (message.type === 'input') {
       if (socket.forkTransport) this.forkTransport.stream.claimResize(socket, session.id);
-      session.writeInput(message.data);
+      let ok = true, error;
+      try {
+        for (const path of message.paths || []) {
+          if (!isAbsolute(path) || !statSync(path).isFile()) throw new Error('Attachment unavailable. Remove and attach the file again.');
+          accessSync(path, fsConstants.R_OK);
+        }
+        if (session.inputSubmitTimer && message.requestId) throw new Error('The previous draft is still being inserted. Wait, then Send again.');
+        ok = message.frames ? session.writeAttachmentDraft(message.frames, message.submit === true) : session.writeInput(message.data) !== false;
+      } catch { ok = false; error = session.inputSubmitTimer ? 'The previous draft is still being inserted. Wait, then Send again.' : 'Attachment unavailable. Remove and attach the file again.'; }
+      if (message.requestId) socket.send(JSON.stringify({type:'input.accepted',requestId:message.requestId,ok,error}));
+      else if (!ok) socket.send(JSON.stringify({type:'input.rejected',error:'Input was not inserted. Wait for the attachment draft to finish, then paste again.'}));
     }
     else if (message.type === 'resize') {
       session.resize(message.cols, message.rows);
@@ -1229,7 +1401,7 @@ class HeadlessServer {
   }
 
   replayLiveSession(socket, session) {
-    socket.send(JSON.stringify(session.snapshot()));
+    socket.send(JSON.stringify({ ...session.snapshot(), ...this.historyRetentionField(session.id) }));
     this.forkTransport.replayHistory(socket, session.id);
     this.replayContent(socket, session.id).catch(() => {});
     if (session.status) {
@@ -1279,6 +1451,73 @@ class HeadlessServer {
 
   async handleHttp(req, res) {
     const pathname = String(req.url || '').split('?')[0];
+    if (req.method === 'POST' && ['/api/session/backup', '/api/session/restore/preview', '/api/session/restore'].includes(pathname)) {
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      if (!isLoopbackAddress(req.socket?.remoteAddress)
+        || !isAllowedWebSocketOrigin(req.headers.origin, req.headers.host, this.host)
+        || req.headers['sec-fetch-site'] === 'cross-site') {
+        sendJson(res, 403, { error: 'local_only' });
+        return;
+      }
+      if (!/^application\/json\b/i.test(req.headers['content-type'] || '')) {
+        sendJson(res, 415, { error: 'Send a JSON backup.' });
+        return;
+      }
+      try {
+        const body = await readJson(req, MAX_BACKUP_BYTES + 64 * 1024);
+        if (pathname === '/api/session/backup') {
+          const backup = createBackup(this, body.browser);
+          res.setHeader('Content-Disposition', `attachment; filename="clideck-backup-${backup.createdAt.replace(/[:.]/g, '-')}.json"`);
+          sendJson(res, 200, backup);
+        } else if (pathname.endsWith('/preview')) {
+          sendJson(res, 200, previewBackup(this, body.backup));
+        } else {
+          if (this.restoringBackup) { sendJson(res, 409, { error: 'A restore is already in progress.' }); return; }
+          this.restoringBackup = true;
+          try {
+            const result = restoreBackup(this, body.backup, body.selection);
+            if (body.selection.settings.includes('plugins')) {
+              try { await this.pluginManager.applySavedSettings(); }
+              catch { result.warnings.push('Plugin settings were saved. Restart CliDeck to apply them.'); }
+            }
+            sendJson(res, 200, result);
+          } finally { this.restoringBackup = false; }
+        }
+      } catch (error) {
+        sendJson(res, 400, { error: error instanceof SyntaxError ? 'This file is not valid JSON.' : error.message });
+      }
+      return;
+    }
+    if (req.method === 'GET' && pathname === '/api/config/status') {
+      if (!this.allowLocalApi(req)) { sendJson(res, 403, { ok: false, error: 'local_only' }); return; }
+      const recovery = this.configStore.recoveryStatus();
+      sendJson(res, 200, { ok: true, recovery, writable: !recovery });
+      return;
+    }
+    if (req.method === 'POST' && pathname === '/api/config/recover') {
+      if (!this.allowLocalApi(req)) { sendJson(res, 403, { ok: false, error: 'local_only' }); return; }
+      try {
+        await readJson(req, 1024);
+        const result = this.configStore.recover();
+        if (result.recovered) this.broadcastConfig(result.config);
+        sendJson(res, 200, {
+          ok: true,
+          recovered: result.recovered,
+          preserved: result.preserved,
+          recovery: this.configStore.recoveryStatus(),
+        });
+      } catch (error) {
+        sendJson(res, 409, { ok: false, error: error.code || 'config_recovery_failed', message: error.message });
+      }
+      return;
+    }
+    if (req.method === 'GET' && pathname === '/api/session/resume') {
+      if (!this.allowLocalApi(req)) { sendJson(res, 403, { ok: false, error: 'local_only' }); return; }
+      const id = new URL(req.url, 'http://localhost').searchParams.get('id') || '';
+      sendJson(res, 200, diagnoseSessions(this.persistence, id));
+      return;
+    }
     if (req.method === 'GET' && pathname === '/api/health') {
       res.setHeader('Cache-Control', 'no-store');
       sendJson(res, 200, {ok:true,version:ENGINE_BUILD_VERSION,protocol:FORK_PROTOCOL}); return;
@@ -1304,7 +1543,29 @@ class HeadlessServer {
       }, null, 2));
       return;
     }
-    if (req.method === 'POST' && pathname === '/api/session/spawn') {
+    if (req.method === 'GET' && pathname === '/api/files/download') {
+      await this.handleFileDownload(req, res);
+      return;
+    }
+    if (req.method === 'POST' && pathname === '/api/files') {
+      if (!isLoopbackAddress(req.socket?.remoteAddress)
+        || !isAllowedWebSocketOrigin(req.headers.origin, req.headers.host, this.host)
+        || req.headers['sec-fetch-site'] === 'cross-site') {
+        sendJson(res, 403, { ok: false, error: 'local_only' }); return;
+      }
+      try {
+        // JSON escapes can take six bytes per text byte.
+        const body = await readJson(req, MAX_TEXT_BYTES * 6 + 8192);
+        if (!this.persistence.get(body?.sessionId)) {
+          sendJson(res, 404, { ok: false, error: 'unknown_session' }); return;
+        }
+        sendJson(res, 200, { ok: true, ...await this.files.request(body) });
+      } catch (error) {
+        sendJson(res, 400, { ok: false, error: error.code || 'files_failed', message: error.message });
+      }
+      return;
+    }
+    if (req.method === 'POST' && (pathname === '/api/session/spawn' || pathname === '/api/session/worker')) {
       if (!isLoopbackAddress(req.socket?.remoteAddress)
         || !isAllowedWebSocketOrigin(req.headers.origin, req.headers.host, this.host)) {
         sendJson(res, 403, { ok: false, error: 'local_only' }); return;
@@ -1313,7 +1574,7 @@ class HeadlessServer {
       try { body = await readJson(req, 260 * 1024); } catch {
         sendJson(res, 400, { ok: false, error: 'invalid_request' }); return;
       }
-      const result = await this.workers.spawn(body);
+      const result = await (pathname === '/api/session/spawn' ? this.workers.spawn(body) : this.workers.control(body));
       sendJson(res, result.ok ? 200 : 409, result);
       return;
     }
@@ -1358,7 +1619,7 @@ class HeadlessServer {
       return;
     }
 
-    if (req.method === 'POST' && /^\/hook\/grok\/(start|stop|session-start|session-end|menu)$/.test(pathname)) {
+    if (req.method === 'POST' && /^\/hook\/grok\/(start|stop|idle|stop-failure|stop-cancelled|session-start|session-end|menu)$/.test(pathname)) {
       await require('./fork/grok-provider').handleLegacyHook(this, req, res, pathname.split('/').at(-1), readJson);
       return;
     }
@@ -1371,7 +1632,8 @@ class HeadlessServer {
     }
 
     // A restarted terminal reuses its CliDeck ID; hooks from the old process do not.
-    if (session.provider.id === 'codex' && req.headers['x-clideck-launch'] !== session.hookToken) {
+    if ((session.provider.id === 'codex' || session.provider.id === 'claude-code')
+      && req.headers['x-clideck-launch'] !== session.hookToken) {
       res.writeHead(204).end();
       return;
     }
@@ -1485,7 +1747,7 @@ class HeadlessServer {
     );
     const statusCode = result.ok ? 200
       : result.error === 'timeout' ? 504
-        : ['busy', 'unavailable', 'target_closed'].includes(result.error) ? 409 : 500;
+        : ['busy', 'unavailable', 'target_closed', 'cancelled', 'provider_error', 'no_answer'].includes(result.error) ? 409 : 500;
     sendJson(res, statusCode, result);
   }
 
@@ -1595,7 +1857,8 @@ class HeadlessServer {
       sendJson(res, 403, { ok: false, error: 'local_only' });
       return;
     }
-    if (!isAllowedWebSocketOrigin(req.headers.origin, req.headers.host, this.host)) {
+    if (!isAllowedWebSocketOrigin(req.headers.origin, req.headers.host, this.host)
+      || req.headers['sec-fetch-site'] === 'cross-site') {
       sendJson(res, 403, { ok: false, error: 'origin_forbidden' });
       return;
     }
@@ -1609,13 +1872,15 @@ class HeadlessServer {
     }
     const sessionId = String(url.searchParams.get('sessionId') || '').trim();
     const name = url.searchParams.get('name');
-    const caller = resolveLiveCaller(this.persistence.list(), this.sessions, sessionId);
-    if (!caller) {
+    const destination = url.searchParams.get('directory');
+    const entry = destination !== null ? this.persistence.get(sessionId)
+      : resolveLiveCaller(this.persistence.list(), this.sessions, sessionId)?.entry;
+    if (!entry) {
       req.resume();
       sendJson(res, 404, {
         ok: false,
         error: 'unknown_session',
-        message: 'Caller session is not active.',
+        message: destination !== null ? 'Session is unavailable.' : 'Caller session is not active.',
       });
       return;
     }
@@ -1630,8 +1895,11 @@ class HeadlessServer {
       return;
     }
     try {
-      const upload = await saveUpload(req, caller.entry.cwd, name);
-      const event = { type: 'upload.done', sessionId: caller.entry.id, ...upload };
+      if (destination !== null && (!isAbsolute(destination) || destination.length > 4096 || destination.includes('\0'))) {
+        throw new UploadError('invalid_directory', 'Upload destination must be an absolute folder path.', 400);
+      }
+      const upload = await saveUpload(req, destination || entry.cwd, name);
+      const event = { type: 'upload.done', sessionId: entry.id, ...upload };
       this.broadcast(event);
       sendJson(res, 200, { ok: true, path: upload.path, name: upload.name });
     } catch (error) {
@@ -1799,6 +2067,7 @@ class HeadlessServer {
     this.autoSaveTimer = null;
     this.closePromise = (async () => {
       try {
+        await this.updates?.close();
         const sessions = [...this.sessions.values()];
         const closed = sessions.map((session) => session.waitForClose?.() || Promise.resolve());
         for (const session of sessions) session.close();
@@ -1896,6 +2165,19 @@ async function main(argv = process.argv.slice(2), env = process.env) {
     version: ENGINE_BUILD_VERSION, url: address.httpUrl, isTTY: process.stdout.isTTY,
   }));
   installShutdownHandlers(server);
+  const { Updates } = require('./updates');
+  let notifiedVersion = '';
+  server.updates = new Updates({ onChange: event => {
+    server.broadcast(event);
+    if (event.state === 'available' && event.latestVersion !== notifiedVersion) {
+      notifiedVersion = event.latestVersion;
+      void notifyUpdate({ currentVersion: event.currentVersion,
+        instruction: event.instruction,
+        sourceCheckout: existsSync(require('path').join(__dirname, '../.git')),
+        check: async () => event.latestVersion });
+    }
+  } });
+  void server.updates.check();
   return { server, address, lock };
 }
 

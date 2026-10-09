@@ -7,6 +7,40 @@ Updating npm does not replace a process that is already running.
 Requires Node.js 22.12 or newer. The default address is **http://127.0.0.1:4000**.
 `--port` takes precedence over `CLIDECK_PORT`, then `PORT`, then the default.
 
+## Update notices
+
+CliDeck checks for updates in the background when the engine starts and periodically
+while it runs. When a newer version is available, the app shows a small notification
+with an **Update** button. You can also check from Settings. Failed checks retry
+automatically and Settings shows when the registry could not be reached.
+
+For a recognized global npm installation, **Update** installs the advertised version
+into that installation. Running agent sessions stay open. When installation finishes,
+restart CliDeck when you are ready, then resume your sessions. The running engine
+version in Settings does not change until that restart. Updates are never installed
+without clicking **Update**.
+
+Source checkouts and installations that cannot be safely identified show manual
+instructions instead. Permission or installation failures are reported with a terminal
+command to finish the update. Interactive terminal startup also prints an update notice.
+
+Older releases without an update checker need one manual upgrade:
+`npm install -g clideck@latest`, then stop and start CliDeck.
+
+## Old agent hooks
+
+Before launching or resuming Claude Code or Codex, CliDeck removes obsolete v1
+CliDeck command hooks from that agent's profile. This also applies if you already
+upgraded to v2. Profiles selected through `CLAUDE_CONFIG_DIR` or `CODEX_HOME` are
+handled separately using the session's launch environment.
+
+Only recognized v1 hook registrations are removed. Other hooks and settings stay
+in place. The original file is saved beside it as a private
+`.clideck-v1-backup-…` file before replacement. Symlinks are preserved. If a file
+cannot be parsed or safely updated, CliDeck leaves it unchanged and prints a
+warning. Current v2 hooks are supplied automatically for the new agent process;
+already-running processes must be restarted to load the corrected configuration.
+
 ## Your sessions come with you
 
 On startup, CliDeck imports saved v1 sessions, projects, prompts, command settings,

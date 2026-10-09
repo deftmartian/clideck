@@ -1,7 +1,11 @@
 const {
+  constants,
+  copyFileSync,
+  chmodSync,
   existsSync,
   readFileSync,
   renameSync,
+  statSync,
   writeFileSync,
 } = require('fs');
 const { join } = require('path');
@@ -128,6 +132,17 @@ function isValidProviderArgs(value) {
       && !/[\0\r\n]/.test(args));
 }
 
+function recoveryMessage(reason) {
+  const why = {
+    malformed_json: 'config.json is not valid JSON',
+    invalid_entries: 'config.json has entries that fail validation',
+    too_large: 'config.json is larger than the 256 KiB settings limit',
+    unreadable: 'config.json could not be read',
+    not_a_file: 'config.json is not a regular file',
+  }[reason] || 'config.json could not be loaded';
+  return `${why}. The original file was left unchanged. Settings changes are blocked so a later save cannot replace it. Recover archives those original bytes as config.json.rejected-<time> and writes a new default config. Use the Recover action in CliDeck, or run \`clideck config recover\`.`;
+}
+
 function isValidConfigPatch(value) {
   if (!isObject(value)
     || Object.keys(value).length > MAX_CONFIG_KEYS
@@ -167,6 +182,7 @@ class ConfigStore {
     this.dataDir = options.dataDir;
     if (!this.dataDir) throw new Error('ConfigStore requires a dataDir.');
     this.path = join(this.dataDir, 'config.json');
+    this.recovery = null;
     const freshInstall = options.freshInstall ?? !existsSync(this.dataDir);
     ensurePrivateDataDir(this.dataDir);
     this.document = this.load();
@@ -175,16 +191,47 @@ class ConfigStore {
     }
   }
 
+  holdRecovery(reason, byteLength) {
+    this.recovery = Object.freeze({
+      reason,
+      byteLength: Number(byteLength) || 0,
+      message: recoveryMessage(reason),
+    });
+    return clone(EMPTY_CONFIG);
+  }
+
   load() {
+    this.recovery = null;
     if (!existsSync(this.path)) return clone(DEFAULT_CONFIG);
+    let stat;
     try {
-      const value = JSON.parse(readFileSync(this.path, 'utf8'));
-      if (!isValidConfigPatch(value)) return clone(EMPTY_CONFIG);
-      const document = { ...clone(EMPTY_CONFIG), ...value };
-      return jsonSize(document) <= MAX_CONFIG_BYTES ? document : clone(EMPTY_CONFIG);
+      stat = statSync(this.path);
     } catch {
-      return clone(EMPTY_CONFIG);
+      return this.holdRecovery('unreadable', 0);
     }
+    if (!stat.isFile()) return this.holdRecovery('not_a_file', stat.size);
+    if (stat.size > MAX_CONFIG_BYTES) return this.holdRecovery('too_large', stat.size);
+    let bytes;
+    try {
+      bytes = readFileSync(this.path);
+    } catch {
+      return this.holdRecovery('unreadable', stat.size);
+    }
+    let value;
+    try {
+      value = JSON.parse(bytes.toString('utf8'));
+    } catch {
+      return this.holdRecovery('malformed_json', bytes.length);
+    }
+    if (!isValidConfigPatch(value)) return this.holdRecovery('invalid_entries', bytes.length);
+    const document = { ...clone(EMPTY_CONFIG), ...value };
+    if (jsonSize(document) > MAX_CONFIG_BYTES) return this.holdRecovery('too_large', bytes.length);
+    return document;
+  }
+
+  recoveryStatus() {
+    if (!this.recovery) return null;
+    return { ...this.recovery };
   }
 
   get() {
@@ -192,6 +239,7 @@ class ConfigStore {
   }
 
   update(patch) {
+    this.assertWritable();
     if (!isValidConfigPatch(patch)) {
       const error = new Error('Invalid config update.');
       error.code = 'invalid_config';
@@ -202,7 +250,48 @@ class ConfigStore {
     if (patch.onboarding !== undefined) {
       document.onboarding = mergeOnboarding(this.document.onboarding, patch.onboarding);
     }
-    if (jsonSize(document) > MAX_CONFIG_BYTES) {
+    return this.replace(document);
+  }
+
+  assertWritable() {
+    if (!this.recovery) return;
+    const error = new Error(this.recovery.message);
+    error.code = 'config_recovery_required';
+    throw error;
+  }
+
+  // Keep the original in place until the replacement succeeds, including on disk errors.
+  recover() {
+    if (!this.recovery) return { recovered: false, preserved: null, config: this.get() };
+    const stat = statSync(this.path);
+    if (!stat.isFile()) {
+      const error = new Error('config.json is not a regular file, so it was not moved.');
+      error.code = 'config_recovery_required';
+      throw error;
+    }
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    let preserved = join(this.dataDir, `config.json.rejected-${stamp}`);
+    let suffix = 0;
+    while (existsSync(preserved)) {
+      suffix += 1;
+      preserved = join(this.dataDir, `config.json.rejected-${stamp}-${suffix}`);
+    }
+    copyFileSync(this.path, preserved, constants.COPYFILE_EXCL);
+    chmodSync(preserved, 0o600);
+    const recovery = this.recovery;
+    this.recovery = null;
+    try {
+      this.replace(clone(DEFAULT_CONFIG));
+    } catch (error) {
+      this.recovery = recovery;
+      throw error;
+    }
+    return { recovered: true, preserved, config: this.get() };
+  }
+
+  replace(document) {
+    this.assertWritable();
+    if (!isValidConfigPatch(document)) {
       const error = new Error('Config exceeds the size limit.');
       error.code = 'config_too_large';
       throw error;
@@ -210,7 +299,7 @@ class ConfigStore {
     const temporary = `${this.path}.${process.pid}.tmp`;
     writeFileSync(temporary, `${JSON.stringify(document, null, 2)}\n`);
     renameSync(temporary, this.path);
-    this.document = document;
+    this.document = clone(document);
     return this.get();
   }
 }
@@ -223,4 +312,5 @@ module.exports = {
   isValidCommand,
   isValidProject,
   isValidConfigPatch,
+  recoveryMessage,
 };

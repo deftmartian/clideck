@@ -158,4 +158,4 @@ async function servePluginStatic(req, res, pluginManager) {
   return true;
 }
 
-module.exports = { CONTENT_TYPES, servePluginStatic, serveStatic };
+module.exports = { publicFile, CONTENT_TYPES, servePluginStatic, serveStatic };

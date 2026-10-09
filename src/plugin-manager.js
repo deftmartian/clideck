@@ -531,6 +531,25 @@ class PluginManager {
     return this.snapshot();
   }
 
+  // The restore has already persisted its validated settings in one config write.
+  async applySavedSettings() {
+    const saved = this.config().plugins || {};
+    for (const [id, record] of this.records) {
+      if (!saved[id]) continue;
+      record.settings = defaultSettings(record.manifest, saved[id].settings);
+      if (record.worker) record.worker.postMessage({ type: 'settings', settings: record.settings });
+      if (typeof saved[id].enabled !== 'boolean' || record.enabled === saved[id].enabled) continue;
+      record.enabled = saved[id].enabled;
+      if (record.enabled) await this.load(record);
+      else {
+        await this.stopRecord(record);
+        record.status = 'disabled';
+        record.error = '';
+      }
+    }
+    this.emitChange();
+  }
+
   async install(sourcePath) {
     let source;
     try {
@@ -560,8 +579,8 @@ class PluginManager {
     try {
       cpSync(source, temporary, { recursive: true, errorOnExist: true });
       readPluginManifest(temporary, { requireFolderName: false });
+      chmodSync(temporary, 0o700);
       renameSync(temporary, destination);
-      chmodSync(destination, 0o700);
     } catch (error) {
       rmSync(temporary, { recursive: true, force: true });
       throw error;

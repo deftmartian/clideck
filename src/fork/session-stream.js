@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const { splitUtf8Chunks } = require('./replay-ring');
 const { normalizeTerminalSize } = require('./terminal-size');
 
+const BATCH_DELAY_MS = 16;
 const BATCH_MAX_BYTES = 32 * 1024;
 const APPLICATION_CREDIT_BYTES = 128 * 1024;
 const FAST_DELTA_BYTES = 64 * 1024;
@@ -44,7 +45,7 @@ function createMetrics() {
   };
 }
 
-function createSessionStream({ clients, getSession, snapshot, applyResize }) {
+function createSessionStream({ clients, getSession, snapshot, applyResize, batchDelayMs = BATCH_DELAY_MS }) {
   const resizeOwners = new Map();
   let recoveryTimer = null;
   let heartbeatTimer = null;
@@ -609,15 +610,47 @@ function createSessionStream({ clients, getSession, snapshot, applyResize }) {
     }
   }
 
-  // Session.flushPending already batches PTY output. ReplayRing owns byte-safe
-  // frame segmentation; do not split and queue the same output a second time.
-  function queueOutput(id, data, startSeq, endSeq) {
-    if (!getSession(id)) return;
-    if (startSeq + data.length !== endSeq) throw new RangeError('output sequence does not match data');
+  function flush(session, id) {
+    const batch = session._networkBatch;
+    if (!batch) return;
+    clearTimeout(batch.timer);
+    session._networkBatch = null;
     deliverOutput(id);
   }
 
+  function queueSegment(session, id, segment, startSeq, endSeq) {
+    let batch = session._networkBatch;
+    if (!batch || batch.endSeq !== startSeq || batch.bytes + segment.bytes > BATCH_MAX_BYTES) {
+      if (batch) flush(session, id);
+      batch = session._networkBatch = {
+        bytes: 0, startSeq, endSeq: startSeq, timer: null,
+      };
+      if (batchDelayMs > 0) {
+        batch.timer = setTimeout(() => flush(session, id), batchDelayMs);
+        batch.timer.unref?.();
+      }
+    }
+    batch.bytes += segment.bytes;
+    batch.endSeq = endSeq;
+    if (batch.bytes >= BATCH_MAX_BYTES) flush(session, id);
+  }
+
+  function queueOutput(id, data, startSeq, endSeq) {
+    const session = getSession(id);
+    if (!session) return;
+    let segmentStart = startSeq;
+    for (const segment of splitUtf8Chunks(data, BATCH_MAX_BYTES)) {
+      const segmentEnd = segmentStart + segment.data.length;
+      queueSegment(session, id, segment, segmentStart, segmentEnd);
+      segmentStart = segmentEnd;
+    }
+    if (segmentStart !== endSeq) throw new RangeError('output sequence does not match data');
+    if (batchDelayMs === 0) flush(session, id);
+  }
+
   function clearSession(id) {
+    const session = getSession(id);
+    if (session?._networkBatch) flush(session, id);
     resizeOwners.delete(id);
     for (const ws of clients) {
       if (stateFor(ws).sessionId === id) unsubscribe(ws, id);
@@ -707,6 +740,7 @@ function createSessionStream({ clients, getSession, snapshot, applyResize }) {
     unregister,
     _stateFor: stateFor,
     _resizeOwner: id => resizeOwners.get(id),
+    _flush: id => { const session = getSession(id); if (session) flush(session, id); },
   };
 }
 
@@ -721,6 +755,7 @@ module.exports = {
   APPLICATION_CREDIT_BYTES,
   BACKLOG_HIGH_WATER,
   BACKLOG_RECOVERY,
+  BATCH_DELAY_MS,
   BATCH_MAX_BYTES,
   CONTROL_COMPRESSION_MIN_BYTES,
   FAST_DELTA_BYTES,

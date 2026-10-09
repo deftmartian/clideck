@@ -1,8 +1,6 @@
 'use strict';
 
-// The headless buffer/serialization API is deliberately contained in this adapter.
-// The rest of the server deals only in ordered writes, plain screen lines, and
-// bounded serialized snapshots.
+const { installScrollbackPreservation } = require(require('../static').publicFile('/js/terminal-scrollback.js'));
 const { Terminal } = require('@xterm/headless');
 const { SerializeAddon } = require('@xterm/addon-serialize');
 const { requireTerminalSize } = require('./terminal-size');
@@ -25,8 +23,9 @@ class ServerCapture {
       cols: size.cols,
       rows: size.rows,
       scrollback: SCROLLBACK_LINES,
-      allowProposedApi: false,
+      allowProposedApi: true,
     });
+    installScrollbackPreservation(this.terminal);
     this.serializer = new SerializeAddon();
     this.terminal.loadAddon(this.serializer);
     this.processedSeq = 0;
@@ -203,7 +202,11 @@ class ServerCapture {
       Math.max(0, integer(requestedScrollback, SNAPSHOT_SCROLLBACK_LINES)),
     );
     while (true) {
-      const data = this.serializer.serialize({ scrollback });
+      // SerializeAddon preserves tracking but omits the mouse wire encoding.
+      // Read the pinned xterm service so reconnect cannot turn SGR reports into legacy bytes.
+      const encoding = this.terminal._core.mouseStateService.activeEncoding;
+      const mouseMode = encoding === 'SGR' ? '\x1b[?1006h' : encoding === 'SGR_PIXELS' ? '\x1b[?1016h' : '';
+      const data = this.serializer.serialize({ scrollback }) + '\x1b[?1006l\x1b[?1016l' + mouseMode;
       const bytes = Buffer.byteLength(data);
       if (bytes <= MAX_SNAPSHOT_BYTES) {
         return {

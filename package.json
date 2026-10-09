@@ -1,12 +1,10 @@
 {
   "name": "clideck",
-  "version": "2.1.1-fork.7",
+  "version": "2.4.0-fork.7",
   "description": "Run AI agents from different providers, let them work with you and each other, and view their work in one place",
   "main": "src/server.js",
   "bin": {
-    "clideck": "bin/clideck.js",
-    "clideck-update": "bin/clideck-update.py",
-    "clideck-voice-setup": "bin/clideck-voice-setup.js"
+    "clideck": "bin/clideck.js"
   },
   "files": [
     "bin/",
@@ -39,9 +37,14 @@
     "test:backend": "node --test test/*.test.js",
     "build:client": "node tools/build-client.js",
     "prepack": "npm run build:client",
-    "test:browser:fork": "node test-ui/xterm-replies-browser.mjs && node test-ui/xterm-scroll-browser.mjs && node test-ui/fork-integration-browser.mjs && node test-ui/draft-integration-browser.mjs && node test-ui/terminal-cursor-browser.mjs",
+    "test:browser:fork": "node test-ui/xterm-replies-browser.mjs && node test-ui/xterm-scroll-browser.mjs && node test-ui/fork-integration-browser.mjs && node test-ui/draft-integration-browser.mjs && node test-ui/snapshot-reset-browser.mjs && node test-ui/terminal-cursor-browser.mjs",
     "check:client": "node tools/check-client.js",
-    "test:browser:mobile": "node test-ui/mobile-restoration-browser.mjs"
+    "test:browser:mobile": "node test-ui/mobile-restoration-browser.mjs",
+    "test:ui": "node tools/run-ui-tests.js",
+    "test:browser:files": "node test-ui/files-browser.mjs",
+    "test:browser:hardening": "node test-ui/photo-queue-browser.mjs && node test-ui/config-recovery-browser.mjs",
+    "test:browser:attachments": "node test-ui/attachments-browser.mjs",
+    "test:browser:mouse": "node test-ui/mouse-input-browser.mjs"
   },
   "dependencies": {
     "@xterm/addon-serialize": "0.15.0-beta.301",
@@ -50,7 +53,7 @@
     "@xterm/xterm": "6.1.0-beta.304",
     "mermaid": "^11.16.0",
     "node-pty": "1.2.0-beta.15",
-    "smol-toml": "1.7.1",
+    "smol-toml": "1.9.0",
     "ws": "8.21.1"
   },
   "engines": {
@@ -69,5 +72,7 @@
   "devDependencies": {
     "esbuild": "0.28.2",
     "playwright-core": "1.61.1"
-  }
+  },
+  "clideckUpdatePolicy": "local",
+  "clideckUpstreamVersion": "2.4.0"
 }

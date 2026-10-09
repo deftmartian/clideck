@@ -1,4 +1,4 @@
-const { spawn } = require('node:child_process');
+const { spawn, execFileSync } = require('node:child_process');
 const { join } = require('node:path');
 const { readFileSync, existsSync, statSync } = require('node:fs');
 const TIMEOUT_MS = 15 * 60_000;
@@ -20,7 +20,7 @@ function floatAudio(pcm) {
 function createTranscriber(api) {
   let worker = null, startup = null, readyWorker = null, nextId = 0, closed = false;
   let replacements = [], replMtime = null, replPath = null;
-  const pending = new Map();
+  const pending = new Map(), setupProcesses = new Set();
   const pyDir = join(api.dir, 'python'), venv = join(api.dataDir, '.venv');
   const python = process.platform === 'win32' ? join(venv, 'Scripts', 'python.exe') : join(venv, 'bin', 'python3');
   const wantsLocal = () => !closed && api.getSetting('backend') === 'local';
@@ -60,15 +60,44 @@ function createTranscriber(api) {
       return text;
     }
 
-    function processText(raw) {
-      // Only user-authored replacements may change recognized words.
-      return applyReplacements(String(raw).trim());
+
+    function cleanText(text) {
+      text = text.replace(/\s*Продолжение следует\.{3}.*$/i, '').replace(/\s*Thank you[.!]*\s*$/i, '').trim();
+      const l = text.toLowerCase();
+      const gLen = ['clears throat', 'cough', 'ahem'].reduce((s, p) => s + (l.split(p).length - 1) * p.length, 0);
+      const hLen = (l.split('hmm').length - 1) * 3;
+      if (text.length > 0 && hLen / text.length > 0.6) return '';
+      if (text.length > 0 && gLen / text.length > 0.5) return '';
+      return text;
     }
 
-  const setupHint = `Run clideck-voice-setup --voice-dir ${JSON.stringify(api.dataDir)} to prepare local voice.`;
-  function ensureEnv() {
-    if (process.platform !== 'linux') throw new Error('Local voice in this fork requires Linux. The OpenAI backend remains available.');
-    if (!existsSync(python)) throw new Error(setupHint);
+    function processText(raw) {
+      const cleaned = cleanText(raw);
+      if (!cleaned || cleaned.toLowerCase() === 'you') return null;
+      return applyReplacements(cleaned);
+    }
+
+
+  function run(command, args) {
+    return new Promise((resolve, reject) => {
+      if (closed) return reject(new Error('Voice backend stopped.'));
+      const child = spawn(command, args, {stdio:['ignore','ignore','pipe']});
+      setupProcesses.add(child); let error = '', settled = false;
+      const finish = reason => { if (settled) return; settled = true; clearTimeout(timer); setupProcesses.delete(child); reason ? reject(reason) : resolve(); };
+      const timer = setTimeout(() => { child.kill(); finish(new Error('Python setup timed out.')); }, 5 * 60_000);
+      child.stderr.on('data', chunk => { error = (error + chunk).slice(-8192); });
+      child.on('error', finish); child.on('close', code => finish(code === 0 ? null : new Error(error.trim() || `Python exited (${code}).`)));
+    });
+  }
+  async function ensureEnv() {
+    if (!existsSync(python)) {
+      const systemPython = ['python3','python'].find(command => { try { execFileSync(command,['--version'],{stdio:'ignore'}); return true; } catch { return false; } });
+      if (!systemPython) throw new Error('Install Python 3 to use local voice.');
+      api.log('creating venv'); await run(systemPython, ['-m','venv',venv]);
+    }
+    const packages = process.platform === 'darwin' ? ['numpy','mlx','tiktoken','huggingface_hub'] : ['numpy','faster-whisper'];
+    try { await run(python, ['-c', `import ${packages.map(p => p.replaceAll('-','_')).join(', ')}`]); }
+    catch (error) { if (closed) throw error; api.log('installing local voice dependencies'); await run(python,['-m','pip','install','--quiet',...packages]); }
   }
   function stopWorker(reason = new Error('Voice backend stopped.')) {
     const previous = worker; worker = null; readyWorker = null;
@@ -77,9 +106,9 @@ function createTranscriber(api) {
   }
   function spawnWorker() {
     if (worker) return;
-    const child = spawn(python,['-u',join(pyDir,'worker.py')],{cwd:pyDir,stdio:['pipe','pipe','pipe'],env:{...process.env,HF_HUB_OFFLINE:'1',HF_HUB_DISABLE_TELEMETRY:'1'}});
+    const child = spawn(python,['-u',join(pyDir,'worker.py')],{cwd:pyDir,stdio:['pipe','pipe','pipe']});
     worker = child; let buffer = '';
-    const failed = error => { if (worker === child) stopWorker(new Error(`${error.message} ${readyWorker === child ? '' : setupHint}`.trim())); };
+    const failed = error => { if (worker === child) stopWorker(error); };
     child.on('error', failed); child.stdin.on('error', failed);
     child.on('close', code => failed(new Error(`Voice worker exited (${code}).`)));
     child.stderr.on('data', chunk => api.log(String(chunk).trim().slice(0,4096)));
@@ -114,7 +143,7 @@ function createTranscriber(api) {
       const result = await command('warmup');
       if (worker !== child || result.status !== 'ready') throw new Error('Voice model did not become ready.');
       readyWorker = child; api.log('local model ready');
-    })().catch(error=>{throw new Error(`${error.message} ${error.message.includes(setupHint) ? '' : setupHint}`.trim());}).finally(()=>{startup=null;});
+    })().finally(()=>{startup=null;});
     return startup;
   }
   async function transcribe(pcm, {signal} = {}) {
@@ -136,7 +165,7 @@ function createTranscriber(api) {
     return {text:processText(result.text||'')||'',language:result.language};
   }
   api.onSettingsChange(()=>{stopWorker(new Error('Voice settings changed.')); if(wantsLocal())ready().catch(e=>api.log(e.message));});
-  api.onShutdown(()=>{closed=true;stopWorker();});
+  api.onShutdown(()=>{closed=true;stopWorker();for(const process of setupProcesses)process.kill();});
   if(wantsLocal())ready().catch(e=>api.log(e.message));
   return {ready,transcribe};
 }
