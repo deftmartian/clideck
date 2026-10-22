@@ -87,6 +87,7 @@ pickerItem._fire("click"); await tick();
 ok("picker choice returns through the originating request", workers[0].sent.some((message) => message.type === "response" && message.requestId === "picker-choose" && message.success && message.value === "calm"));
 
 workers[0].emit({ type: "register-action", definition: { id: "inspect", label: "Inspect", placements: ["terminal.header", "terminal.context"], hasWhen: true, icon: "\u263a" } });
+workers[0].emit({ type: "register-action", definition: { id: "glyph", label: "Glyph", placements: ["terminal.header"], icon: "★" } });
 workers[0].emit({ type: "register-action", definition: { id: "slow", label: "Slow", placements: ["terminal.context"], hasWhen: true } });
 workers[0].emit({ type: "register-action", definition: { id: "long-action", label: "Long action", placements: ["terminal.header"], icon: "waveform" } });
 workers[0].emit({ type: "register-action", definition: { id: "stop-action", label: "Stopped action", placements: ["terminal.header"], icon: "no-such-icon" } });
@@ -97,11 +98,13 @@ ok("worker registration reaches the host-owned header", actionButton.hidden === 
 actionButton._fire("click"); await tick();
 const pluginRows = [...document.querySelectorAll(".menu .menu-item")];
 const rowFor = (label) => pluginRows.find((row) => row.querySelector(".menu-lb")?.textContent === label);
-ok("the plugin menu opened with a row per header action", pluginRows.length === 3 && !!rowFor("Inspect") && !!rowFor("Long action"));
+ok("the plugin menu opened with a row per header action", pluginRows.length === 4 && !!rowFor("Inspect") && !!rowFor("Long action") && !!rowFor("Glyph"));
 ok("an iconed menu declares itself, so every row shares one label column",
   document.querySelector(".menu").classList.contains("menu-iconed") && pluginRows.every((row) => !!row.querySelector(".menu-ic")));
-ok("a single-glyph icon renders as that glyph", rowFor("Inspect").querySelector(".menu-ic").textContent === "\u263a");
+ok("an unnamed single-glyph icon renders as that glyph", rowFor("Glyph").querySelector(".menu-ic").textContent === "★");
 const markOf = (label) => rowFor(label).querySelector(".menu-ic").firstElementChild.innerHTML;
+ok("the recognized smile glyph renders as the deck's outline icon",
+  /^<svg /.test(markOf("Inspect")) && /<circle /.test(markOf("Inspect")) && !rowFor("Inspect").querySelector(".menu-ic").textContent.includes("\u263a"));
 ok("a named icon renders as one of the deck's own marks, never the literal word",
   /^<svg /.test(markOf("Long action")) && !/waveform/.test(rowFor("Long action").textContent));
 ok("an unknown icon name degrades to the plugin mark rather than to text",

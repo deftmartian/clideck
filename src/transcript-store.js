@@ -11,11 +11,45 @@ const {
   statSync,
 } = require('fs');
 const { basename, join } = require('path');
+const { open } = require('fs/promises');
 const { ensurePrivateDataDir } = require('./private-data-dir');
 
 const DEFAULT_CACHE_LIMIT = 50 * 1024;
 const PAGE_READ_SIZE = 64 * 1024;
 const SAFE_SESSION_ID = /^[a-zA-Z0-9_-]+$/;
+const MAX_SEARCH_LINE_BYTES = 16 * 1024 * 1024;
+const MAX_SEARCH_PAGE_BYTES = 4 * 1024 * 1024;
+
+// Search reads the saved file, not the short sidebar cache. Scan backwards in
+// bounded async reads, keeping only one line and the matching page in memory.
+async function* searchLines(handle, end, signal) {
+  let position = end;
+  let parts = [], bytes = 0, terminated = false;
+  const add = piece => {
+    if (!terminated || !piece.length) return;
+    bytes += piece.length;
+    if (bytes > MAX_SEARCH_LINE_BYTES) throw new Error('A saved message is too large to search safely.');
+    parts.push(piece);
+  };
+  while (position > 0) {
+    signal?.throwIfAborted();
+    const length = Math.min(PAGE_READ_SIZE, position);
+    position -= length;
+    const buffer = Buffer.allocUnsafe(length);
+    const { bytesRead } = await handle.read(buffer, 0, length, position);
+    if (bytesRead !== length) throw new Error('Saved conversation changed while searching. Try again.');
+    let finish = length;
+    for (let index = length - 1; index >= 0; index--) {
+      if (buffer[index] !== 10) continue;
+      add(buffer.subarray(index + 1, finish));
+      if (terminated && bytes) yield { offset: position + index + 1, raw: Buffer.concat(parts.reverse(), bytes) };
+      parts = []; bytes = 0; terminated = true;
+      finish = index;
+    }
+    add(buffer.subarray(0, finish));
+  }
+  if (terminated && bytes) yield { offset: 0, raw: Buffer.concat(parts.reverse(), bytes) };
+}
 
 function tailUtf8(value, limit) {
   const buffer = Buffer.from(String(value || ''));
@@ -190,6 +224,39 @@ class TranscriptStore {
       cursor: hasMore ? page[0].offset : null,
       hasMore,
     };
+  }
+
+  async searchPage(sessionId, query, before, count = 30, signal) {
+    const path = this.path(sessionId);
+    const needle = String(query || '').trim();
+    const empty = { turns: [], cursor: null, hasMore: false };
+    if (!path || !needle) return empty;
+    const pattern = new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'iu');
+    let handle;
+    try {
+      signal?.throwIfAborted();
+      try { handle = await open(path, 'r'); }
+      catch (error) { if (error.code === 'ENOENT') return empty; throw error; }
+      const { size } = await handle.stat();
+      const end = before === undefined ? size : Math.min(size, Math.max(0, Math.floor(before)));
+      const limit = Math.min(100, Math.max(1, Math.floor(Number(count) || 30)));
+      const matches = [];
+      let bytes = 0;
+      for await (const line of searchLines(handle, end, signal)) {
+        signal?.throwIfAborted();
+        let entry;
+        try { entry = JSON.parse(line.raw.toString('utf8')); } catch { continue; }
+        if (!['user', 'agent'].includes(entry?.role) || typeof entry.text !== 'string'
+          || !pattern.test(entry.text)) continue;
+        const entryBytes = Buffer.byteLength(JSON.stringify(entry));
+        if (matches.length && (matches.length === limit || bytes + entryBytes > MAX_SEARCH_PAGE_BYTES)) {
+          return { turns: matches.map(item => item.entry).reverse(), cursor: matches.at(-1).offset, hasMore: true };
+        }
+        if (entryBytes > MAX_SEARCH_PAGE_BYTES) throw new Error('A matching message is too large to display in search.');
+        matches.push({ entry, offset: line.offset }); bytes += entryBytes;
+      }
+      return { turns: matches.map(item => item.entry).reverse(), cursor: null, hasMore: false };
+    } finally { await handle?.close(); }
   }
 
   delete(sessionId) {

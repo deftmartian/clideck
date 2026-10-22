@@ -92,6 +92,13 @@ class PromptCoordinator {
     return true;
   }
 
+  cancel(promptId) {
+    const pending = this.active.get(String(promptId || ''));
+    if (!pending) return false;
+    pending.finish({ ok: false, error: 'cancelled' });
+    return true;
+  }
+
   cancelSession(sessionId) {
     const ids = [...(this.bySession.get(String(sessionId || '')) || [])];
     for (const promptId of ids) {

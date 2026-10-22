@@ -16,12 +16,15 @@ let cursor;
 let requestedBefore = null;
 let loading = false;
 let hasMore = true;
-let failed = false;           // last page errored; cleared by scrolling up again (no retry button)
+let failed = false;           // retry explicitly or scroll upward again
 let lastError = "";
 let returnFocus = null;
 let offPage = null;
 let offActive = null;
-let offRemove = null;
+let offRemove = null, offAppend = null, offConnection = null, offReset = null, offReplay = null;
+let replaying = false;
+let search = null, clear = null, updates = null, query = "", searchTimer = null;
+let requestId = null, requestSequence = 0, interrupted = false;
 
 export function initHistory(terminalFocusTarget) {
   const trigger = document.getElementById("th-history");
@@ -36,7 +39,7 @@ function openHistory(focusTarget) {
   const session = store.active();
   if (!session) return;
   closeHistory(false);
-  sessionId = session.id;
+  sessionId = session.id; query = ""; interrupted = false; replaying = false;
   cursor = undefined;
   loading = false;
   hasMore = true;
@@ -45,6 +48,7 @@ function openHistory(focusTarget) {
 
   overlay = h("div", "hist-overlay");
   const modal = h("div", "hist-modal");
+  modal.setAttribute("role", "dialog"); modal.setAttribute("aria-modal", "true"); modal.setAttribute("aria-label", "Conversation history");
   const head = h("div", "hist-head");
   const heading = h("div", "hist-heading");
   heading.append(h("div", "hist-title", "Conversation history"));
@@ -54,16 +58,25 @@ function openHistory(focusTarget) {
   const close = h("button", "hist-close", CLOSE_ICON);
   close.type = "button"; close.title = "Close"; close.setAttribute("aria-label", "Close");
   close.onclick = () => closeHistory();
-  head.append(heading, close);
+  const field = h("div", "hist-search");
+  search = h("input", "hist-search-input"); search.type = "search"; search.maxLength = 256;
+  search.placeholder = "Search saved conversation"; search.setAttribute("aria-label", search.placeholder);
+  clear = h("button", "hist-search-clear", CLOSE_ICON); clear.type = "button"; clear.hidden = true; clear.setAttribute("aria-label", "Clear search");
+  clear.onclick = () => { search.value = ""; refresh(); search.focus(); };
+  search.addEventListener("input", () => { if (!search.isComposing) refresh(200); });
+  search.addEventListener("compositionstart", () => { search.isComposing = true; clearTimeout(searchTimer); requestId = null; });
+  search.addEventListener("compositionend", () => { search.isComposing = false; refresh(200); });
+  field.append(search, clear); head.append(heading, field, close);
+  updates = h("button", "hist-updates"); updates.type = "button"; updates.hidden = true;
+  updates.onclick = () => refresh();
 
   list = h("div", "hist-list");
-  // Status strip, NOT a control: older turns arrive by scrolling, the way image lazy-loading works. There is
-  // nothing to click here — it only ever reports loading / end-of-history / a failed page.
+  // Older turns arrive by scrolling; failures offer an explicit retry even when the list is empty.
   more = h("div", "hist-more");
   more.setAttribute("aria-live", "polite");
   list.append(more);
   list.addEventListener("scroll", onScroll);
-  modal.append(head, list);
+  modal.append(head, updates, list);
   overlay.append(modal);
   overlay.addEventListener("mousedown", (event) => {
     event.stopPropagation();
@@ -74,14 +87,38 @@ function openHistory(focusTarget) {
   document.body.classList.add("cd-modal-open");
   document.addEventListener("keydown", onKey, true);
   offPage = store.on("transcript:page", onPage);
-  offActive = store.on("active", (id) => { if (id !== sessionId) closeHistory(); });
+  offActive = store.on("active", (id) => { if (!replaying && id !== sessionId) closeHistory(); });
   offRemove = store.on("session:remove", (id) => { if (id === sessionId) closeHistory(); });
-  requestAnimationFrame(() => overlay && overlay.classList.add("show"));
+  offReset = store.on("reset", () => { replaying = true; });
+  offReplay = store.on("transcripts", () => { replaying = false; if (!store.sessions.has(sessionId)) closeHistory(); });
+  offAppend = store.on("transcript:append", (id) => { if (id === sessionId) showUpdates(); });
+  offConnection = store.on("connection", (connected) => {
+    if (!connected) { interrupted = interrupted || loading; requestId = null; loading = false; renderMore(); return; }
+    if (interrupted || cursor === undefined) { interrupted = false; failed = false; loadOlder(); }
+    else { showUpdates("Reconnected"); renderMore(); }
+  });
+  const opened = overlay;
+  requestAnimationFrame(() => { if (overlay === opened) { overlay.classList.add("show"); search.focus(); } });
   loadOlder();
 }
 
+function showUpdates(prefix = "New messages") {
+  updates.textContent = prefix + (query ? " · Refresh search" : " · Jump to latest");
+  updates.hidden = false;
+}
+function refresh(delay = 0) {
+  clearTimeout(searchTimer); searchTimer = null; requestId = null;
+  query = search.value.slice(0, 256).trim(); clear.hidden = !search.value;
+  cursor = undefined; requestedBefore = null; loading = false; hasMore = true; failed = false; lastError = "";
+  list.replaceChildren(more); updates.hidden = true;
+  if (delay) {
+    loading = true; renderMore();
+    searchTimer = setTimeout(() => { searchTimer = null; loading = false; loadOlder(); }, delay);
+  } else loadOlder();
+}
+
 // Nearing the top pulls the next page in. A failed page is not a dead end: `failed` is cleared here, so simply
-// scrolling up again retries — no retry button, no backoff machinery.
+// scrolling up again retries; the status also offers a Retry button.
 function onScroll() {
   if (!list || list.scrollTop >= NEAR_TOP) return;
   if (failed) { failed = false; renderMore(); }
@@ -90,10 +127,12 @@ function onScroll() {
 
 function loadOlder() {
   if (!overlay || loading || !hasMore || failed) return;
+  if (!store.connected) { renderMore(); return; }
   loading = true;
   requestedBefore = Number.isSafeInteger(cursor) ? cursor : null;
   renderMore();
-  requestTranscriptPage(sessionId, cursor, PAGE_SIZE);
+  requestId = "history-" + Date.now().toString(36) + "-" + (++requestSequence);
+  requestTranscriptPage(sessionId, cursor, PAGE_SIZE, { query, requestId });
 }
 
 // Lazy loading needs something to scroll. If a page doesn't overflow the panel there is no scrollbar and no
@@ -104,8 +143,14 @@ function fillViewport() {
 }
 
 function onPage(result) {
-  if (!overlay || result.sessionId !== sessionId || !loading
+  if (!overlay || result.sessionId !== sessionId || !loading || !requestId
     || (result.before ?? null) !== requestedBefore) return;
+  if (typeof result.requestId !== "string") {
+    loading = false; failed = true;
+    lastError = "Restart the CliDeck engine, then refresh this page to use updated conversation history.";
+    renderMore(); return;
+  }
+  if (result.requestId !== requestId || (result.query ?? "") !== query) return;
   loading = false;
   if (!result.success) {
     failed = true;                       // scrolling up again clears this and retries (onScroll)
@@ -125,8 +170,9 @@ function onPage(result) {
   cursor = Number.isSafeInteger(result.cursor) ? result.cursor : null;
   hasMore = result.hasMore === true;
   renderMore(turns.length === 0 && initial);
+  const paintedRequest = requestId;
   requestAnimationFrame(() => {
-    if (!list) return;
+    if (!list || requestId !== paintedRequest) return;
     // Anchor the reader: on the first page land at the newest turn, afterwards keep the turn they were looking
     // at exactly where it was while older content is prepended above it.
     if (initial) list.scrollTop = list.scrollHeight;
@@ -147,25 +193,43 @@ function turnElement(turn) {
     if (time.textContent) meta.append(time);
   }
   const text = h("pre", "hist-text");
-  text.textContent = String(turn.text || "");
-  row.append(meta, text);
+  const value = String(turn.text || "");
+  let highlightNote = null;
+  if (!query) text.textContent = value;
+  else {
+    const pattern = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "giu");
+    let offset = 0, highlights = 0, capped = false;
+    for (const match of value.matchAll(pattern)) {
+      if (highlights++ === 200) { capped = true; break; }
+      text.append(document.createTextNode(value.slice(offset, match.index)));
+      const mark = h("mark"); mark.textContent = match[0]; text.append(mark); offset = match.index + match[0].length;
+    }
+    text.append(document.createTextNode(value.slice(offset)));
+    if (capped) highlightNote = h("div", "hist-highlight-note", "First 200 matches highlighted.");
+  }
+  row.append(meta, text); if (highlightNote) row.append(highlightNote);
   return row;
 }
 
 function renderMore(empty = false) {
   if (!more) return;
+  empty = empty || (!loading && !failed && !hasMore && !list.querySelector(".hist-turn"));
   more.classList.remove("error");
-  // Pure status. "Load older messages" is gone — scrolling is the affordance, so the resting state says what
-  // to do rather than offering a control.
-  if (loading) more.textContent = "Loading older messages…";
+  // Scrolling loads older pages; errors also offer Retry.
+  if (!store.connected) more.textContent = "Offline — reconnect to load conversation history.";
+  else if (loading) more.textContent = query ? "Searching saved conversation…" : "Loading older messages…";
   else if (failed) more.textContent = lastError || "Couldn't load older messages — scroll up to retry";
-  else if (empty) more.textContent = "No saved conversation yet";
-  else if (hasMore) more.textContent = "Scroll up for older messages";
-  else more.textContent = "Beginning of conversation";
+  else if (empty) more.textContent = query ? "No matching saved messages" : "No saved conversation yet";
+  else if (hasMore) more.textContent = query ? "Scroll up for older matches" : "Scroll up for older messages";
+  else more.textContent = query ? "All saved matches loaded" : "Beginning of conversation";
+  if (failed && store.connected) {
+    const retry = h("button", "hist-retry", "Retry"); retry.type = "button";
+    retry.onclick = () => { failed = false; loadOlder(); }; more.append(retry);
+  }
 }
 
 function onKey(event) {
-  if (event.key !== "Escape") return;
+  if (event.key !== "Escape" || event.isComposing || search?.isComposing) return;
   event.preventDefault(); event.stopPropagation(); closeHistory();
 }
 
@@ -173,10 +237,13 @@ function closeHistory(restore = true) {
   if (!overlay) return;
   document.removeEventListener("keydown", onKey, true);
   if (offPage) offPage(); if (offActive) offActive(); if (offRemove) offRemove();
+  offAppend?.(); offConnection?.(); offReset?.(); offReplay?.();
+  offAppend = offConnection = offReset = offReplay = null;
+  clearTimeout(searchTimer); searchTimer = null; requestId = null;
   offPage = offActive = offRemove = null;
   const node = overlay;
   const focus = returnFocus;
-  overlay = list = more = null;
+  overlay = list = more = search = clear = updates = null;
   sessionId = null; cursor = undefined; requestedBefore = null;
   loading = false; hasMore = true; failed = false; lastError = ""; returnFocus = null;
   node.classList.remove("show");

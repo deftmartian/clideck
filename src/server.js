@@ -41,6 +41,7 @@ const { servePluginStatic, serveStatic } = require('./static');
 const { ServerLock } = require('./server-lock');
 const { alreadyRunningLine, startupBanner, notifyUpdate } = require('./startup');
 const { TranscriptStore } = require('./transcript-store');
+const { SessionArchive } = require('./session-archive');
 const { MAX_UPLOAD_BYTES, UploadError, saveUpload } = require('./upload');
 const { checkCommandAvailability } = require('./availability');
 const { ENGINE_BUILD_VERSION } = require('./build-version');
@@ -97,7 +98,9 @@ function sendPromptResult(res, result) {
     ...result,
     message: timeout
       ? 'Prompt timed out.'
-      : 'Session closed before the prompt was answered.',
+      : result.error === 'cancelled'
+        ? 'User dismissed the question without answering. No option was selected.'
+        : 'Session closed before the prompt was answered.',
   });
 }
 
@@ -144,6 +147,10 @@ class HeadlessServer {
       }
     }
     this.clients = new Set();
+    this.transcriptSearches = new WeakMap();
+    this.archive = new SessionArchive({ dataDir: this.persistence.dataDir,
+      now: this.now, onStatus: event => this.broadcast(event) });
+    this.archive.configure(this.configStore.get().archive);
     this.updates = options.updates || null;
     this.pluginManager = options.pluginManager || new PluginManager({
       dataDir: this.persistence.dataDir,
@@ -250,6 +257,8 @@ class HeadlessServer {
     try {
       this.persistAssets(sessionId);
       this.broadcast({ type: 'content.show', ...content });
+      const asset = this.contentStore.get(content.contentId);
+      if (asset) this.archive.asset(this.sessions.get(sessionId), { ...asset, origin: 'content.show' });
       return content;
     } catch (error) {
       this.contentStore.remove(sessionId, content.contentId);
@@ -550,6 +559,8 @@ class HeadlessServer {
     this.sessions.set(session.id, session);
     if (register) this.persistence.register(session);
     const onEvent = (event) => {
+      if (event.type === 'session.created') this.archive.start(session, this.archiveInfo(session));
+      this.archive.event(session, event);
       if (event.type === 'session.closed' && event.restarting) return;
       let outbound = event;
       if (event.type === 'output') this.persistence.appendHistory(session.id, event.data);
@@ -573,6 +584,7 @@ class HeadlessServer {
     session.on('event', onEvent);
     session.on('resume-metadata', (metadata) => {
       this.persistence.recordResumeMetadata(session.id, metadata);
+      this.archive.hook(session, 'resume-metadata', {}, metadata);
     });
     try {
       session.start(createdFields);
@@ -583,6 +595,18 @@ class HeadlessServer {
       throw error;
     }
     return session;
+  }
+
+  archiveInfo(session) {
+    const entry = this.persistence.get(session.id);
+    const project = this.configStore.get().projects?.find(item => item.id === session.projectId);
+    return { sessionId: session.id, name: session.name, provider: session.provider.id,
+      projectId: session.projectId || null, projectName: project?.name || '',
+      cwd: session.cwd, pid: session.terminal?.pid || null, model: session.model || null,
+      commandId: session.commandId || null, profileRoot: session.archiveProfileRoot || '',
+      nativeId: entry?.resumeHandle || session.resumeHandle || '',
+      transcriptPath: entry?.transcriptPath || session.resumeTranscriptPath || '',
+      suppliedCliDeckGuide: session.launchOptions?.agentGuide || null };
   }
 
   storeTranscriptEntry(sessionId, role, text, timestamp) {
@@ -856,6 +880,8 @@ class HeadlessServer {
   }
 
   broadcastConfig(config) {
+    this.archive.configure(config.archive, [...this.sessions.values()]
+      .filter(session => !session.closed).map(session => ({ session, info: this.archiveInfo(session) })));
     this.broadcast({ type: 'config', config: this.configForClient(config) });
   }
 
@@ -982,6 +1008,7 @@ class HeadlessServer {
       else this.replayDormantSession(socket, entry);
     }
     socket.send(JSON.stringify({ type: 'plugins', plugins: this.pluginManager.snapshot() }));
+    socket.send(JSON.stringify(this.archive.snapshot()));
     socket.send(JSON.stringify({ type: 'transcript.cache', cache: this.transcriptStore.getCache() }));
     if (this.updates) socket.send(JSON.stringify(this.updates.snapshot()));
 
@@ -993,7 +1020,11 @@ class HeadlessServer {
         socket.close(1011, 'control failed');
       }
     });
-    socket.on('close', () => this.clients.delete(socket));
+    socket.on('close', () => {
+      this.transcriptSearches.get(socket)?.abort();
+      this.transcriptSearches.delete(socket);
+      this.clients.delete(socket);
+    });
     socket.on('error', () => this.clients.delete(socket));
   }
 
@@ -1142,28 +1173,52 @@ class HeadlessServer {
       }
       return;
     }
+    if (message.type === 'prompt.cancel') {
+      this.promptCoordinator.cancel(message.promptId);
+      return;
+    }
     if (message.type === 'prompt.answer') {
       this.promptCoordinator.answer(message.promptId, message.value);
       return;
     }
     if (message.type === 'transcript.page') {
+      this.transcriptSearches.get(socket)?.abort();
+      this.transcriptSearches.delete(socket);
+      const response = {
+        type: 'transcript.page.result', sessionId: message.sessionId, before: message.before ?? null,
+        ...(message.query !== undefined && { query: message.query }),
+        ...(message.requestId !== undefined && { requestId: message.requestId }),
+      };
       if (!this.persistence.has(message.sessionId)) {
         this.sendControlResult(socket, {
-          type: 'transcript.page.result',
-          sessionId: message.sessionId,
-          before: message.before ?? null,
+          ...response,
           success: false,
           error: 'Unknown session.',
         });
         return;
       }
-      this.sendControlResult(socket, {
-      type: 'transcript.page.result',
-        sessionId: message.sessionId,
-        before: message.before ?? null,
-        success: true,
-        ...this.transcriptStore.getPage(message.sessionId, message.before, message.limit),
-      });
+      if (message.query?.trim()) {
+        const controller = new AbortController();
+        this.transcriptSearches.set(socket, controller);
+        const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]);
+        this.transcriptStore.searchPage(message.sessionId, message.query, message.before, message.limit, signal)
+          .then(page => {
+            if (!controller.signal.aborted) this.sendControlResult(socket, this.persistence.has(message.sessionId)
+              ? { ...response, success: true, ...page } : { ...response, success: false, error: 'Unknown session.' });
+          }).catch(error => {
+            if (!controller.signal.aborted) this.sendControlResult(socket, { ...response, success: false,
+              error: error.name === 'TimeoutError' ? 'Searching this conversation took too long. Please try again.' : error.message });
+          }).finally(() => {
+            if (this.transcriptSearches.get(socket) === controller) this.transcriptSearches.delete(socket);
+          });
+      } else {
+        try {
+          this.sendControlResult(socket, { ...response, success: true,
+            ...this.transcriptStore.getPage(message.sessionId, message.before, message.limit) });
+        } catch {
+          this.sendControlResult(socket, { ...response, success: false, error: 'Could not read saved conversation. Try again.' });
+        }
+      }
       return;
     }
     if (message.type === 'content.open') {
@@ -1384,6 +1439,7 @@ class HeadlessServer {
 
     try {
       const payload = await readJson(req);
+      this.archive.hook(session, match[2], payload, session.provider.resumeMetadata?.(payload));
       // Clear the previous conversation before attaching this hook's new
       // transcript, or the clear handler would stop the new context monitor.
       session.handleHook(match[2], payload);
@@ -1633,6 +1689,7 @@ class HeadlessServer {
     try {
       const upload = await saveUpload(req, caller.entry.cwd, name);
       const event = { type: 'upload.done', sessionId: caller.entry.id, ...upload };
+      this.archive.asset(this.sessions.get(caller.entry.id), { ...upload, origin: 'upload' });
       this.broadcast(event);
       sendJson(res, 200, { ok: true, path: upload.path, name: upload.name });
     } catch (error) {
@@ -1805,6 +1862,7 @@ class HeadlessServer {
         const closed = sessions.map((session) => session.waitForClose?.() || Promise.resolve());
         for (const session of sessions) session.close();
         await Promise.all(closed);
+        await this.archive.close();
         await this.pluginManager.close();
         this.saveState('shutdown');
         for (const client of this.clients) client.close();

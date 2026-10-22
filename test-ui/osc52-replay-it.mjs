@@ -29,6 +29,8 @@ class FakeTerminal {
   resize(cols, rows) { this.cols = cols; this.rows = rows; } scrollToBottom() {} focus() { this.textarea.focus(); }
 }
 window.Terminal = FakeTerminal;
+window.Unicode11Addon = { Unicode11Addon: class { activate(term) { term.unicode = { activeVersion: "6" }; } } };
+FakeTerminal.prototype.loadAddon = function(addon) { addon.activate(this); };
 const checks = [];
 function ok(name, pass) { checks.push([name, !!pass]); console.log((pass ? "  ok   " : "  FAIL ") + name); }
 

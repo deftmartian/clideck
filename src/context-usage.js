@@ -5,6 +5,7 @@ const {
   readSync,
   watch,
 } = require('fs');
+const { createCodexTurnReader } = require('./codex-turns');
 
 const CODEX_BASELINE_TOKENS = 12_000;
 const CODEX_TAIL_BYTES = 256 * 1024;
@@ -110,12 +111,15 @@ function watchCodexContext(path, onUsage, options = {}) {
   const readUsage = options.readUsage || readLatestCodexUsage;
   const watchFile = options.watch || watch;
   const debounceMs = Number(options.debounceMs ?? CODEX_WATCH_DEBOUNCE_MS);
+  const readTurns = typeof options.onTurn === 'function'
+    ? createCodexTurnReader(path, options.onTurn, options.onReset) : () => false;
   let timer = null;
   let watcher = null;
   let signature = '';
   let stopped = false;
   const sample = () => {
     if (stopped) return;
+    if (readTurns()) schedule(0); // Drain bursts in bounded chunks, yielding between reads.
     const usage = readUsage(path);
     if (!usage) return;
     const next = `${usage.usedTokens}:${usage.windowTokens}:${usage.percent}`;
@@ -123,18 +127,23 @@ function watchCodexContext(path, onUsage, options = {}) {
     signature = next;
     onUsage(usage);
   };
-  const schedule = () => {
-    clearTimeout(timer);
-    timer = setTimeout(sample, debounceMs);
+  const schedule = (delay = debounceMs) => {
+    if (stopped || timer) return; // Continuous output must not postpone the sample forever.
+    timer = setTimeout(() => { timer = null; sample(); }, delay);
     timer.unref?.();
   };
-  sample();
   try {
-    watcher = watchFile(path, { persistent: false }, schedule);
+    watcher = watchFile(path, { persistent: false }, () => schedule());
     watcher.on?.('error', () => {});
   } catch {}
+  sample();
+  // fs.watch can coalesce/drop notifications or remain attached to a replaced inode.
+  const poll = typeof options.onTurn === 'function'
+    ? setInterval(() => schedule(0), options.pollMs ?? 1000) : null;
+  poll?.unref?.();
   return () => {
     stopped = true;
+    clearInterval(poll);
     clearTimeout(timer);
     timer = null;
     try { watcher?.close(); } catch {}

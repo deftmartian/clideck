@@ -64,12 +64,22 @@ const check = (name, yes, detail) => { yes ? passes++ : fails++; console.log(`${
     await key('ArrowUp','ArrowUp',38);check('ArrowUp returns to search',await focus()==='pk-input');
     await key('Escape','Escape',27);
     await js(`localStorage.setItem('clideck.picker.emoji.emoji.recent','["removed"]')`);await open();check('all invalid recents fall back to search',await focus()==='pk-input');await key('Escape','Escape',27);
-    await js(`localStorage.setItem('clideck.picker.emoji.emoji.recent','["rocket","smile"]')`);
+    await js(`localStorage.setItem('clideck.picker.emoji.emoji.recent','["rocket","smile","check","cross","warning","bug","eyes","bulb"]')`);
     for(const theme of ['dark','light']) {
       await js(`(async()=>{(await import('/js/theme.js')).setThemePref('${theme}')})()`);await open();await sleep(250);await snap('emoji-recent-'+theme+'.png');await key('Escape','Escape',27);
     }
-    await cmd('Emulation.setDeviceMetricsOverride',{width:420,height:800,deviceScaleFactor:1,mobile:false});await open();await sleep(250);await snap('emoji-recent-narrow.png');
-    check('narrow picker keeps recent focus and fits viewport',await focus()==='rocket'&&await js(`(()=>{const r=document.querySelector('.pk-modal').getBoundingClientRect();return r.left>=0&&r.right<=innerWidth})()`));
+    for(const width of [420,320]) {
+      await cmd('Emulation.setDeviceMetricsOverride',{width,height:800,deviceScaleFactor:1,mobile:false});await open();await sleep(250);
+      check(width+'px caps stored eight recents to five and focuses newest',await focus()==='rocket'&&await js(`document.querySelectorAll('.pk-recent .pk-item').length===5`));
+      check(width+'px picker has no horizontal overflow or clipped actions',await js(`(()=>{
+        const modal=document.querySelector('.pk-modal'), r=modal.getBoundingClientRect();
+        return r.left>=0&&r.right<=innerWidth&&[modal,...modal.querySelectorAll('.pk-results,.pk-grid,.pk-chips')].every(e=>e.scrollWidth<=e.clientWidth+1)
+          &&Array.from(modal.querySelectorAll('.pk-recent .pk-item,.pk-chip')).every(e=>{const b=e.getBoundingClientRect();return b.left>=r.left&&b.right<=r.right});
+      })()`));
+      await key('ArrowRight','ArrowRight',39);check(width+'px recent navigation remains usable',await focus()==='smile');
+      await snap('emoji-recent-'+width+'.png');await key('Escape','Escape',27);
+    }
+
   } finally {
     cws?.close();ctl?.close();chrome?.kill();await server.close();
     console.log(`${passes} passed, ${fails} failed; captures ${out}`);process.exitCode=fails?1:0;

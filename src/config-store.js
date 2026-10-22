@@ -4,7 +4,7 @@ const {
   renameSync,
   writeFileSync,
 } = require('fs');
-const { join } = require('path');
+const { join, isAbsolute } = require('path');
 const { ensurePrivateDataDir } = require('./private-data-dir');
 const { isValidProfile, mergeProfile } = require('./user-profile');
 const { isValidOnboarding, mergeOnboarding } = require('./onboarding');
@@ -157,6 +157,13 @@ function isValidConfigPatch(value) {
     return false;
   }
   if (value.providerArgs !== undefined && !isValidProviderArgs(value.providerArgs)) return false;
+  if (value.archive !== undefined && (!isObject(value.archive)
+    || typeof value.archive.enabled !== 'boolean'
+    || typeof value.archive.directory !== 'string'
+    || value.archive.directory.length > 4096
+    || /[\0\r\n]/.test(value.archive.directory)
+    || (value.archive.directory !== '' && !isAbsolute(value.archive.directory))
+    || (value.archive.enabled && !value.archive.directory.trim()))) return false;
   if (value.about !== undefined && !isValidProfile(value.about)) return false;
   if (value.onboarding !== undefined && !isValidOnboarding(value.onboarding)) return false;
   return true;

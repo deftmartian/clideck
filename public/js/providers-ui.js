@@ -103,12 +103,15 @@ const TERMINAL_GLYPH =
 function terminalMark() { return svgEl(TERMINAL_GLYPH); }
 function emojiMark(ch) { const s = document.createElement("span"); s.className = "pv-emoji"; s.textContent = ch; return s; }
 
-// A custom command's face: a provider-id icon → that provider's mark/tint; 'terminal' (or unknown) → the glyph;
-// any other short string → the emoji/char itself. `sig` folds the icon so a config recolor re-renders the avatar.
+// Generic/missing icons inherit a known native provider; explicit custom icons keep their own identity.
+// Other short strings render as emoji/characters. `sig` folds the icon so a config recolor re-renders the avatar.
+export function commandIcon(cmd) {
+  return (!cmd.icon || cmd.icon === "terminal") && PROVIDERS[cmd.providerId] ? cmd.providerId : cmd.icon;
+}
 function commandFace(cmd) {
   const label = cmd.label || "Custom";
   const terms = (label + " " + (cmd.command || "") + " custom").toLowerCase();
-  const icon = cmd.icon;
+  const icon = commandIcon(cmd);
   const base = { id: cmd.command || cmd.id, label, terms, sig: "cmd:" + cmd.id + ":" + (icon || "terminal") };
   if (icon && PROVIDERS[icon]) return { ...base, cls: PROVIDERS[icon].cls, mark: PROVIDERS[icon].mark };
   if (icon && icon !== "terminal") return { ...base, cls: "pv-custom", mark: () => emojiMark(icon) };

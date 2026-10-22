@@ -6,6 +6,7 @@ const { Screen } = require('./screen');
 const { migrateLegacyHooks } = require('./legacy-hooks');
 const { hasNonemptyFile, waitForNonemptyFile } = require('./transcript-file');
 const { augmentedPath } = require('./custom-command');
+const { nativeProfile } = require('./session-archive');
 
 const BRACKETED_PASTE_START = '\x1b[200~';
 const BRACKETED_PASTE_END = '\x1b[201~';
@@ -95,6 +96,7 @@ class AgentSession extends EventEmitter {
     this.model = null;
     this.hookToken = randomUUID();
     this.activeHookTurn = '';
+    this.observedCodexTurn = '';
     this.completedHookTurns = new Set();
     this.contextTranscriptPath = String(options.contextTranscriptPath || '');
     this.stopContextMonitor = () => {};
@@ -122,6 +124,8 @@ class AgentSession extends EventEmitter {
       : [];
     this.launchCleanup = launch.cleanup || (() => {});
     const env = sessionEnvironment(launch.env, this.id, this.port, this.colorfgbg, this.serverUrl);
+    // Keep only the transcript boundary, never the environment/credentials.
+    this.archiveProfileRoot = nativeProfile(this.provider.id, env, this.cwd);
     migrateLegacyHooks(this.provider.id, env, this.cwd);
     try {
       this.terminal = pty.spawn(launch.command, [...extraArgs, ...(launch.args || [])], {
@@ -258,10 +262,38 @@ class AgentSession extends EventEmitter {
     if (!value || !this.provider.watchContextUsage || value === this.contextTranscriptPathActive) return;
     this.stopContextMonitor();
     this.contextTranscriptPathActive = value;
-    this.stopContextMonitor = this.provider.watchContextUsage(
+    const stop = this.provider.watchContextUsage(
       value,
       (usage) => this.setContextUsage(usage),
+      { onReset: () => { this.observedCodexTurn = ''; }, onTurn: (event) => {
+        if (!this.closed && !this.closeRequested && this.contextTranscriptPathActive === value) {
+          this.handleCodexTurn(event);
+        }
+      } },
     );
+    this.stopContextMonitor = () => {
+      this.observedCodexTurn = '';
+      stop();
+    };
+  }
+
+  handleCodexTurn(event) {
+    if (this.provider.id !== 'codex' || !event?.turn_id) return;
+    if (event.type === 'task_started') {
+      if (this.completedHookTurns.has(event.turn_id)) return;
+      this.observedCodexTurn = event.turn_id;
+      this.handleHook('start', { turn_id: event.turn_id });
+    } else if (event.turn_id === this.activeHookTurn) {
+      if (event.type === 'task_complete') {
+        this.handleHook('stop', {
+          turn_id: event.turn_id,
+          last_assistant_message: event.last_agent_message,
+        });
+      } else if (event.type === 'turn_aborted') {
+        this.completeHookTurn(event.turn_id);
+        this.cancelTurn(); // An interrupted turn must not announce a stale final.
+      }
+    }
   }
 
   currentCandidate() {
@@ -386,6 +418,10 @@ class AgentSession extends EventEmitter {
   handleHook(route, payload = {}) {
     this.flushScreen();
     const turnId = this.provider.id === 'codex' && typeof payload.turn_id === 'string' ? payload.turn_id : '';
+    // Once a native continuation identifies the current turn, an untagged late
+    // hook cannot safely finish it. The matching rollout completion still can.
+    if (this.provider.id === 'codex' && this.observedCodexTurn && !turnId
+        && (route === 'stop' || route === 'idle')) return;
     if (turnId && this.completedHookTurns.has(turnId)) return;
     // Codex can submit several prompts (including steering) within one turn.
     // Record those before the duplicate-start lifecycle guard.
@@ -417,6 +453,7 @@ class AgentSession extends EventEmitter {
       return;
     }
     if (route === 'idle' || route === 'session-end') {
+      if (route === 'session-end') this.observedCodexTurn = '';
       this.completeHookTurn(turnId);
       this.analyzeScreen();
       this.finishTurn();
@@ -425,6 +462,7 @@ class AgentSession extends EventEmitter {
     if (route === 'session-start') {
       const source = String(payload.source || '').toLowerCase();
       if (source === 'clear') {
+        this.observedCodexTurn = '';
         this.stopContextMonitor();
         this.contextTranscriptPathActive = '';
         this.setContextUsage(null);
@@ -445,6 +483,7 @@ class AgentSession extends EventEmitter {
     this.completedHookTurns.add(turnId);
     if (this.completedHookTurns.size > 32) this.completedHookTurns.delete(this.completedHookTurns.values().next().value);
     if (this.activeHookTurn === turnId) this.activeHookTurn = '';
+    if (this.observedCodexTurn === turnId) this.observedCodexTurn = '';
   }
 
   recordNativePrompt(payload) {

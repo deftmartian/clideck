@@ -129,6 +129,9 @@ function oneLine(value, max = 160) {
 }
 
 function friendlyError(body, status, pathname) {
+  if (body.error === 'cancelled' && (pathname === '/prompt' || pathname === '/annotate')) {
+    return 'User dismissed the question without answering. No option was selected.';
+  }
   if (body.error === 'timeout' && (pathname === '/prompt' || pathname === '/annotate')) {
     return 'Timed out waiting for the user. Hint: the question is closed; ask again only if an answer is still needed.';
   }

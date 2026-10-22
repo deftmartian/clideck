@@ -86,7 +86,7 @@ const check = (name, yes, detail) => { yes ? passes++ : fails++; console.log(`${
       }
       const tabPoint=await js(`(()=>{const e=[...document.querySelectorAll('.cd-tab')].find(e=>e.textContent.includes(${JSON.stringify(file)}));const r=e.getBoundingClientRect();return{x:r.left+24,y:r.top+r.height/2}})()`);
       await mouse(tabPoint);
-      check(file+' tab menu only offers Copy file path',(await labels()).join('|')==='Copy file path',await labels());
+      check(file+' tab menu includes document close actions',(await labels()).join('|')==='Copy file path|Close this tab|Close tabs to the right|Close all tabs',await labels());
     }
     const urlPoint=await place('https://example.com/notes.md');
     const beforeUrl=await js('opened.length');
@@ -120,6 +120,21 @@ const check = (name, yes, detail) => { yes ? passes++ : fails++; console.log(`${
     await cmd('Emulation.setDeviceMetricsOverride',{width:420,height:800,deviceScaleFactor:1,mobile:false});await sleep(300);
     const point=await place(osc);await mouse(point);await snap('osc8-menu-narrow.png');
     check('narrow text menu fits viewport',await js(`(()=>{const r=document.querySelector('.menu').getBoundingClientRect();return r.left>=0&&r.right<=innerWidth&&r.bottom<=innerHeight})()`));
+    await cmd('Emulation.setDeviceMetricsOverride',{width:1240,height:820,deviceScaleFactor:1,mobile:false});
+    const tabMenu=async name=>{
+      await js(`(async()=>{(await import('/js/ui/menu.js')).closeMenu()})()`);
+      const p=await js(`(()=>{const t=Array.from(document.querySelectorAll('.cd-tab')).find(t=>t.textContent.includes(${JSON.stringify(name)}));const r=t.getBoundingClientRect();return{x:r.left+25,y:r.top+12}})()`);await mouse(p);
+    };
+    for(const theme of ['dark','light']) {
+      await js(`(async()=>{(await import('/js/theme.js')).setThemePref('${theme}')})()`);await tabMenu('notes.md');await snap('document-tab-menu-'+theme+'.png');
+    }
+    await tabMenu('notes.html');await js(`Array.from(document.querySelectorAll('.menu-item')).find(b=>b.textContent==='Close this tab').click()`);await sleep(200);
+    check('Close this tab removes only chosen document',await js(`document.querySelectorAll('.cd-tab').length===3`));
+    await tabMenu('notes.md');await js(`Array.from(document.querySelectorAll('.menu-item')).find(b=>b.textContent==='Close tabs to the right').click()`);await sleep(200);
+    check('Close tabs to right preserves chosen document and terminal',await js(`document.querySelectorAll('.cd-tab').length===2&&Array.from(document.querySelectorAll('.cd-tab')).some(t=>t.textContent.includes('notes.md'))`));
+    await tabMenu('notes.md');await js(`Array.from(document.querySelectorAll('.menu-item')).find(b=>b.textContent==='Close all tabs').click()`);await sleep(200);
+    check('Close all tabs returns to intact terminal',await js(`document.getElementById('pane-tabs').hidden&&!document.getElementById('term-panel').hidden&&store.active().live`));
+
   } finally {
     cws?.close();ctl?.close();chrome?.kill();await server.close();
     console.log(`${passes} passed, ${fails} failed; captures ${out}`);

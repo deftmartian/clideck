@@ -1,3 +1,4 @@
+import { initArchiveStatus } from "./ui/archive-status.js";
 import { initUpdates } from "./ui/updates.js";
 // Bootstrap: wire the store to the components and open the socket.
 import { initSidebar } from "./ui/sidebar.js";
@@ -16,6 +17,7 @@ import { initTour } from "./ui/tour.js";
 import { connectWs } from "./ws.js";
 
 initUpdates();
+initArchiveStatus();
 initSidebar();
 initSidebarResize();   // E1: drag handle on the sidebar/terminal divider
 initTerminal();

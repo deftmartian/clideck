@@ -1,6 +1,6 @@
 {
   "name": "clideck",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "description": "Run AI agents from different providers, let them work with you and each other, and view their work in one place",
   "main": "src/server.js",
   "bin": {
@@ -17,6 +17,7 @@
     "plugins/smart-dictation/",
     "PLUGIN-SDK.md",
     "SESSION-BACKUP.md",
+    "SESSION-ARCHIVE.md",
     "UPGRADING.md"
   ],
   "scripts": {
@@ -35,6 +36,7 @@
     "test:backend": "node --test test/*.test.js"
   },
   "dependencies": {
+    "@xterm/addon-unicode11": "0.9.0",
     "@xterm/xterm": "^6.0.0",
     "mermaid": "^11.16.0",
     "node-pty": "1.2.0-beta.15",

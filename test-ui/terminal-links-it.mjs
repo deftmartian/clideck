@@ -24,6 +24,8 @@ class FakeTerminal {
   scrollToBottom() {} focus() {}
 }
 window.Terminal = FakeTerminal;
+window.Unicode11Addon = { Unicode11Addon: class { activate(term) { term.unicode = { activeVersion: "6" }; } } };
+FakeTerminal.prototype.loadAddon = function(addon) { addon.activate(this); };
 
 const { store } = await import("../public/js/store.js");
 const { initTerminal, __termForTest, __linkProvidersForTest } = await import("../public/js/ui/terminal.js");

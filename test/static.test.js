@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { mkdtempSync, rmSync } = require('fs');
+const { mkdtempSync, readFileSync, rmSync } = require('fs');
 const { tmpdir } = require('os');
 const { join } = require('path');
 const { HeadlessServer } = require('../src/server');
@@ -21,6 +21,15 @@ test('server exposes the app and xterm runtime assets', async (context) => {
   const xterm = await fetch(`${httpUrl}/vendor/xterm.js`);
   assert.equal(xterm.status, 200);
   assert.match(xterm.headers.get('content-type'), /^text\/javascript/);
+
+  const unicode = await fetch(`${httpUrl}/vendor/addon-unicode11.js`);
+  assert.equal(unicode.status, 200);
+  assert.match(unicode.headers.get('content-type'), /^text\/javascript/);
+  assert.equal(await unicode.text(), readFileSync(require.resolve('@xterm/addon-unicode11'), 'utf8'));
+  const html = await app.text();
+  const addonScript = html.indexOf('src="/vendor/addon-unicode11.js"');
+  assert.ok(addonScript > html.indexOf('src="/vendor/xterm.js"'));
+  assert.ok(addonScript < html.indexOf('src="/js/app.js"'));
 
   const mermaid = await fetch(`${httpUrl}/vendor/mermaid.js`);
   assert.equal(mermaid.status, 200);

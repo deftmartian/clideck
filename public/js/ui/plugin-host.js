@@ -1,3 +1,4 @@
+import { actionIcon } from "./action-icon.js";
 // Browser plugin host. client.js runs in a module Worker, never in CliDeck's window. The host owns every
 // visible surface and converts Worker registrations into action/viewer/workspace records with deterministic
 // teardown on disable, failure, replacement, or reconnect.
@@ -194,26 +195,6 @@ async function paintHeader() {
   headerBtn._actions = actions;
 }
 
-// A plugin declares `icon` as a SHORT STRING, never markup: either one of the deck's named marks below, or a
-// single glyph it draws itself. Anything else falls back to the plugin mark, so an unknown name degrades to a
-// row that still lines up rather than to the literal word "waveform" sitting where an icon belongs.
-const NAMED_ICONS = {
-  mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><line x1="12" y1="18" x2="12" y2="21"/>',
-  waveform: '<path d="M3 12h2"/><path d="M8 7v10"/><path d="M12 4v16"/><path d="M16 8v8"/><path d="M20 11v2"/>',
-  speaker: '<path d="M11 5L6 9H3v6h3l5 4V5z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/>',
-  text: '<path d="M4 7V5h16v2"/><path d="M12 5v14"/><path d="M9 19h6"/>',
-  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
-  terminal: '<path d="M5 7l4 4-4 4"/><path d="M12 17h7"/>',
-  plugin: '<rect x="4" y="4" width="6" height="6" rx="1.5"/><rect x="14" y="4" width="6" height="6" rx="1.5"/><rect x="4" y="14" width="6" height="6" rx="1.5"/><rect x="14" y="14" width="6" height="6" rx="1.5"/>',
-};
-function actionIcon(icon) {
-  const name = String(icon || "");
-  const node = document.createElement("span");
-  if (name && !NAMED_ICONS[name] && [...name].length <= 2 && !/^[\w-]+$/.test(name)) { node.textContent = name; return node; }
-  node.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">'
-    + (NAMED_ICONS[name] || NAMED_ICONS.plugin) + "</svg>";
-  return node;
-}
 
 function openHeaderMenu(event) {
   const actions = headerBtn && headerBtn._actions || []; if (!actions.length) return;

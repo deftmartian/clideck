@@ -2,6 +2,7 @@
 // terminal context-menu. Order mirrors v1 [terminals.js:416-470]: Copy / Paste (terminal clipboard),
 // then the session actions, then Delete. Rename, selection and liveness are supplied by the opener
 // via opts, so this module stays decoupled from the terminal (no import cycle).
+import { actionIcon } from "./action-icon.js";
 import { openMenu } from "./menu.js";
 import { store } from "../store.js";
 import { closeSession, setMute, send, setSessionProject } from "../ws.js";
@@ -25,8 +26,8 @@ export function openTerminalMenu(point, id, opts = {}) {
   const plugin = Array.isArray(opts.pluginItems) && opts.pluginItems.length
     ? [{ separator: true }, ...opts.pluginItems] : [];
   openMenu(point, [
-    { label: "Copy", disabled: !sel, onSelect: (c) => { copyText(sel); c.close(); } },
-    { label: "Paste", disabled: !live, onSelect: (c) => { c.close(); pasteInto(id); } },
+    { label: "Copy", icon: actionIcon("copy"), disabled: !sel, onSelect: (c) => { copyText(sel); c.close(); } },
+    { label: "Paste", icon: actionIcon("paste"), disabled: !live, onSelect: (c) => { c.close(); pasteInto(id); } },
     ...plugin,
   ], {
     align: opts.align || "start",

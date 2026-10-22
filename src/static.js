@@ -10,6 +10,7 @@ const MERMAID_JS = resolve(
 );
 const VENDOR_FILES = new Map([
   ['/vendor/xterm.js', XTERM_JS],
+  ['/vendor/addon-unicode11.js', require.resolve('@xterm/addon-unicode11')],
   ['/vendor/xterm.css', resolve(dirname(XTERM_JS), '../css/xterm.css')],
   ['/vendor/mermaid.js', MERMAID_JS],
 ]);

@@ -1,10 +1,39 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { hasValidControlFields, isKnownControlType } = require('../src/control');
 const {
   PromptCoordinator,
   parseAnnotateRequest,
   parsePromptRequest,
 } = require('../src/prompt-coordinator');
+
+test('user dismissal resolves only its question, never an answer, and ignores late controls', async () => {
+  const events = [];
+  let id = 0;
+  const coordinator = new PromptCoordinator(event => events.push(event), { createId: () => `${++id}` });
+  const first = coordinator.prompt('same-session', { question: 'Rent?', options: ['Yes', 'No'] }, 1000);
+  const second = coordinator.prompt('same-session', { question: 'Other?' }, 1000);
+  assert.equal(coordinator.cancel('1'), true);
+  assert.deepEqual(await first, { ok: false, error: 'cancelled' });
+  assert.equal(coordinator.cancel('1'), false);
+  assert.equal(coordinator.answer('1', 'Yes'), false);
+  assert.equal(coordinator.active.size, 1);
+  assert.deepEqual([...coordinator.bySession.get('same-session')], ['2']);
+  assert.equal(coordinator.answer('2', 'Kept'), true);
+  assert.equal(coordinator.cancel('2'), false);
+  assert.deepEqual(await second, { ok: true, value: 'Kept' });
+  assert.equal(coordinator.active.size, 0);
+  assert.equal(coordinator.bySession.size, 0);
+  assert.deepEqual(events.filter(e => e.type === 'prompt.resolved').map(e => e.promptId), ['1', '2']);
+});
+
+test('prompt cancellation accepts only a valid bounded prompt id', () => {
+  assert.equal(isKnownControlType('prompt.cancel'), true);
+  assert.equal(hasValidControlFields({ type: 'prompt.cancel', promptId: 'question-id' }), true);
+  for (const promptId of [undefined, null, '', ' ', 123, 'bad\0id', 'x'.repeat(201)]) {
+    assert.equal(hasValidControlFields({ type: 'prompt.cancel', promptId }), false);
+  }
+});
 
 test('prompt requests preserve validated options and reject oversized fields', () => {
   assert.deepEqual(parsePromptRequest({

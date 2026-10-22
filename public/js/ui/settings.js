@@ -8,7 +8,7 @@ import { h, esc } from "../util.js";
 import { updateConfig, checkAvailability, refreshPlugins, installPlugin, removePlugin, openPluginFolder, setPluginEnabled, updatePluginSettings } from "../ws.js";
 import { openFolderPicker } from "./folder-picker.js";
 import { openMenu, closeMenu, isMenuOpen } from "./menu.js";
-import { providerOf, PROVIDER_LIST } from "../providers-ui.js";
+import { commandIcon, providerOf, PROVIDER_LIST } from "../providers-ui.js";
 import { AGENT_PRESETS, providerHealth } from "../agent-presets.js";
 import { allThemes, getTheme, defaultThemeId, setDefaultTheme } from "../terminal-themes.js";
 import { previewHtml } from "./theme-picker.js";
@@ -44,6 +44,7 @@ const genId = () => "c" + Date.now().toString(36) + Math.random().toString(36).s
 export function openSettings() {
   if (overlay) { close(); return; }
   build();
+  offs.push(store.on("archive.status", paintArchiveStatus), store.on("connection", () => { settingsSection("archive")?._syncArchive?.(); paintArchiveStatus(); }));
   offs.push(store.on("engine.update", renderFooter), store.on("connection", renderFooter));
   offs.push(store.on("availability", () => { if (cat === "agents") renderBody(); }));
   offs.push(store.on("plugins", () => {
@@ -63,7 +64,8 @@ export function openSettings() {
     // A debounced About me save comes back as a config echo. Rebuilding the pane under a caret would drop the
     // user mid-word, so an echo that lands while they are still typing in that section is a no-op for the body.
     const active = document.activeElement;
-    if (cat === "general" && active && active.closest && active.closest('[data-sec="about"]')) return;
+    if (cat === "general" && active?.closest?.('[data-sec="archive"]')) { settingsSection("archive")?._syncArchive?.(true); paintArchiveStatus(); return; }
+    if (cat === "general" && active?.closest?.('[data-sec="about"]')) return;
     renderBody();
   }));
   checkAvailability();
@@ -207,6 +209,8 @@ function renderGeneral() {
   data.append(backupRow);
   els.body.append(data);
 
+  renderArchive();
+
   const started = section("Getting started", "started");
   started.append(buttonRow("Take the tour",
     "A short tour of CliDeck. Tips you have already dismissed stay dismissed.",
@@ -233,6 +237,41 @@ const ABOUT_NO_CHANNEL = new Set(["shell", "antigravity"]);
 // would type over them. The draft wins until Settings closes; untouched fields still repaint from the store.
 let aboutDirty = {};
 let aboutTimer = null;
+
+function paintArchiveStatus() {
+  const status = settingsSection("archive")?.querySelector(".archive-status"); if (!status) return;
+  const snapshot = store.archiveStatus;
+  status.textContent = !store.connected ? "Reconnect to see archive status." : snapshot?.state === "error"
+    ? "Archiving paused: " + (snapshot.error || "Could not write the archive.")
+    : snapshot?.state === "recording" ? "Recording new records to the archive." + (snapshot.warning ? " Warning: " + snapshot.warning : "")
+    : store.archive.enabled ? "Waiting for archive status…" : "Off";
+}
+function renderArchive() {
+  const sec = section("Session archive", "archive"), saved = store.archive;
+  const input = h("input", "set-input mono"); input.value = saved.directory; input.placeholder = "/path/to/archive";
+  input.setAttribute("aria-label", "Archive folder"); input.spellcheck = false;
+  const hint = h("div", "set-hint"); hint.id = "archive-folder-hint"; input.setAttribute("aria-describedby", hint.id);
+  const absolute = () => /^(?:\/|[A-Za-z]:[\\/]|\\\\)/.test(input.value.trim());
+  const save = (enabled) => {
+    if (!store.connected || (enabled && !absolute())) { button.classList.toggle("on", store.archive.enabled); button.setAttribute("aria-checked", String(store.archive.enabled)); return; }
+    updateConfig({ archive: { enabled, directory: absolute() ? input.value.trim() : store.archive.directory } });
+  };
+  const toggle = toggleRow("Save session records", "Off by default. Saves JSONL files from enablement, including available provider tool and reasoning records. Archives may contain sensitive conversation data.", saved.enabled, save);
+  const button = toggle.querySelector("[role=switch]"); button.setAttribute("aria-label", "Save session records");
+  const sync = (fromConfig = false) => {
+    if (fromConfig === true) { button.classList.toggle("on", store.archive.enabled); button.setAttribute("aria-checked", String(store.archive.enabled)); }
+    button.disabled = !store.connected || (button.getAttribute("aria-checked") !== "true" && !absolute());
+    hint.textContent = absolute() ? "Organized by project, session, day and run. Earlier or unavailable content is not included. This setting stays on this machine and is not part of workspace backups." : "Choose an absolute folder path before enabling.";
+    input.setAttribute("aria-invalid", input.value.trim() && !absolute() ? "true" : "false");
+  };
+  input.addEventListener("input", sync);
+  input.addEventListener("change", () => { if (absolute()) save(button.getAttribute("aria-checked") === "true"); });
+  const browse = h("button", "set-browse", FOLDER); browse.type = "button"; browse.title = "Choose archive folder"; browse.setAttribute("aria-label", browse.title);
+  browse.addEventListener("click", () => openFolderPicker(absolute() ? input.value.trim() : store.defaultCwd || "/", (path) => { input.value = path; sync(); save(button.getAttribute("aria-checked") === "true"); }));
+  const path = h("div", "set-path-row"); path.append(input, browse);
+  const status = h("div", "set-hint archive-status"); status.setAttribute("role", "status");
+  sec._syncArchive = sync; sec.append(toggle, labeled("Archive folder", path), hint, status); els.body.append(sec); sync(); paintArchiveStatus();
+}
 
 function renderAboutMe() {
   const about = store.about || {};
@@ -464,7 +503,7 @@ function showInstall(label, installCmd) {
 function agentCard(c, i, avail) {
   const card = h("div", "set-card");
   const head = h("div", "set-card-head");
-  const iconBtn = h("button", "set-card-ic"); iconBtn.type = "button"; iconBtn.title = "Change icon"; renderIconMark(iconBtn, c.icon);
+  const iconBtn = h("button", "set-card-ic"); iconBtn.type = "button"; iconBtn.title = "Change icon"; renderIconMark(iconBtn, commandIcon(c));
   iconBtn.addEventListener("click", (e) => { e.stopPropagation(); openIconMenu(iconBtn, i); });
   const name = h("input", "set-card-name"); name.value = c.label || ""; name.placeholder = "Agent name"; name.spellcheck = false;
   name.addEventListener("input", () => { cmds[i].label = name.value; scheduleSave(); });
@@ -535,7 +574,8 @@ function openIconMenu(anchor, i) {
   if (iconHandle) { iconHandle.close(); return; }   // toggle off on the same trigger
   const grid = h("div", "set-icon-menu");
   const pick = (icon) => { cmds[i].icon = icon; renderBody(); saveNow(); if (iconHandle) iconHandle.close(); };
-  const term = h("button", "set-icon-cell", TERMINAL); term.type = "button"; term.title = "Terminal"; term.addEventListener("click", () => pick("terminal"));
+  const defaultIcon = commandIcon({ ...cmds[i], icon: "terminal" });
+  const term = h("button", "set-icon-cell"); renderIconMark(term, defaultIcon); term.type = "button"; term.title = defaultIcon === "terminal" ? "Terminal" : "Default (" + providerOf(defaultIcon).label + ")"; term.addEventListener("click", () => pick("terminal"));
   grid.append(term);
   for (const p of PROVIDER_LIST) { const cell = h("button", "set-icon-cell " + p.cls); cell.type = "button"; cell.title = p.label; cell.appendChild(p.mark()); cell.addEventListener("click", () => pick(p.id)); grid.append(cell); }
   iconHandle = openMenu(anchor, [{ render: () => grid }], { align: "start", className: "menu-form", returnFocus: anchor, onClose: () => { iconHandle = null; } });
@@ -570,6 +610,7 @@ function serialize() {
   return (cmds || []).map((c) => ({
     id: c.id, label: String(c.label || "").trim(), icon: c.icon || "terminal",
     command: String(c.command || "").trim(),
+    ...(c.providerId ? { providerId: c.providerId } : {}),
     enabled: c.enabled !== false, isAgent: !!c.isAgent, canResume: !!(c.isAgent && c.canResume),
     env: c.env && typeof c.env === "object" ? c.env : {},
     resumeCommand: c.isAgent && c.canResume && c.resumeCommand ? String(c.resumeCommand) : null,

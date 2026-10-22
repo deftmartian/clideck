@@ -23,6 +23,10 @@ already be installed. Plugin secrets and provider login files are not included;
 custom commands and their environment values are, so keep the backup private.
 Browser notification and microphone permissions remain under the browser's control.
 
+Optional [session archives](SESSION-ARCHIVE.md) separately record new conversation
+events, available native tool/reasoning records and attachments as JSONL. Their
+files and machine-local enablement/folder setting are not included in this backup.
+
 ## Automatic recovery
 
 CliDeck writes `sessions.json` atomically and keeps its previous valid snapshot as

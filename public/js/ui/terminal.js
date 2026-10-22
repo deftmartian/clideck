@@ -1,3 +1,4 @@
+import { actionIcon } from "./action-icon.js";
 // The right pane: a real, themed xterm terminal you type into directly.
 // Keystrokes go out as {type:'input', sessionId} raw controls. Output events feed
 // term.write(). Focusing a session resets the terminal and rewrites its buffer.
@@ -74,6 +75,8 @@ export function initTerminal() {
   mount = document.getElementById("term");
   if (!window.Terminal) { mount.textContent = "xterm failed to load (/vendor/xterm.js)"; return; }
 
+  if (!window.Unicode11Addon?.Unicode11Addon) { mount.textContent = "Terminal Unicode support failed to load — restart CliDeck and refresh this page."; return; }
+
   term = new window.Terminal({
     fontFamily: FONT_FAMILY, fontSize: FONT_SIZE, lineHeight: LINE_HEIGHT, letterSpacing: 0.3,
     cursorStyle: "block", cursorBlink: true, theme: appliedXterm(store.activeId),
@@ -86,6 +89,8 @@ export function initTerminal() {
       if (window.confirm(`Do you want to navigate to ${uri}?\n\nWARNING: This link could potentially be dangerous`)) openUrl(uri);
     } },
   });
+  term.loadAddon(new window.Unicode11Addon.Unicode11Addon());
+  term.unicode.activeVersion = "11";
   term.open(mount);
   installScrollbackPreservation(term);
   onTheme(applyActiveTheme);                    // app light/dark flip re-applies the active session's theme (mode default may change)
@@ -122,7 +127,7 @@ export function initTerminal() {
     openTerminalMenu({ x: e.clientX, y: e.clientY }, s.id, {
       returnFocus: term.textarea || mount,
       selection, live: s.live !== false,
-      pluginItems: pluginActions.map((action) => ({ label: action.label, onSelect: (ctl) => { ctl.close(); runAction(action, action.context); } })),
+      pluginItems: pluginActions.map((action) => ({ label: action.label, icon: actionIcon(action.icon), onSelect: (ctl) => { ctl.close(); runAction(action, action.context); } })),
     });
   });
 

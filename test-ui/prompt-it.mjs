@@ -5,12 +5,14 @@
 import { installFakeDom, installFakeWs } from "./fakedom.mjs";
 const dom = installFakeDom();
 const ws = installFakeWs();
+let socket;
+globalThis.WebSocket = class extends WebSocket { constructor(url) { super(url); socket = this; } };
 // mounts prompt.js needs
 const main = document.createElement("div"); main.className = "main"; document.body.appendChild(main);
 const frame = document.createElement("div"); frame.className = "term-frame"; main.appendChild(frame);
 
 const { store } = await import("../public/js/store.js");
-const { connectWs } = await import("../public/js/ws.js");
+const { connectWs, cancelPrompt } = await import("../public/js/ws.js");
 const { initPrompt } = await import("../public/js/ui/prompt.js");
 
 let pass = 0, fail = 0;
@@ -51,6 +53,41 @@ try {
   ok("card present before external resolve", !!card());
   resolved("p3");
   ok("prompt.resolved dismissed the card (no answer sent by us)", !card() && !ws.sent.some((m) => m.type === "prompt.answer" && m.promptId === "p3"));
+
+  const prior = document.createElement("button"); frame.appendChild(prior); prior.focus();
+  show({ sessionId: "A", promptId: "cancel", question: "Proceed?", options: ["Yes"] });
+  const close = document.querySelector(".pcard-close");
+  ok("visible close has accessible label", close?.getAttribute("aria-label") === "Dismiss question");
+  close.focus(); ws.clear(); close._fire("click");
+  ok("close sends cancel only and waits for resolution", ws.last("prompt.cancel")?.promptId === "cancel" && !ws.last("prompt.answer") && !!card());
+  resolved("cancel");
+  ok("resolved cancellation closes and restores prior focus", !card() && document.activeElement === prior);
+
+  show({ sessionId: "A", promptId: "external", options: ["Yes"] });
+  const elsewhere = document.createElement("input"); frame.appendChild(elsewhere); elsewhere.focus();
+  resolved("external");
+  ok("external resolution does not steal focus", document.activeElement === elsewhere);
+
+  show({ sessionId: "A", promptId: "older", options: ["Yes"] });
+  show({ sessionId: "A", promptId: "newer", question: "New question", options: ["No"] });
+  resolved("older");
+  ok("older resolution keeps newer question", document.querySelector(".pcard-q")?.textContent === "New question");
+  resolved("newer");
+
+  show({ sessionId: "A", promptId: "escape", question: "Type something" });
+  const escapeInput = document.querySelector(".pcard-input"); ws.clear();
+  escapeInput._fire("keydown", { key: "Escape", isComposing: true });
+  ok("composition Escape does not cancel", !ws.last("prompt.cancel"));
+  escapeInput._fire("keydown", { key: "Escape" });
+  ok("Escape within card requests cancel without answer", ws.last("prompt.cancel")?.promptId === "escape" && !ws.last("prompt.answer") && !!card());
+  resolved("escape"); prior.focus(); await sleep(5);
+  ok("delayed input focus cannot focus dismissed card", document.activeElement === prior);
+
+  socket.readyState = 3; ws.clear();
+  show({ sessionId: "A", promptId: "offline", options: ["Yes"] });
+  document.querySelector(".pcard-close")._fire("click");
+  ok("offline cancel fails honestly and keeps question", cancelPrompt("offline") === false && !!card() && !ws.last("prompt.cancel") && !!document.querySelector(".toast"));
+  socket.readyState = 1; resolved("offline");
 
   // ── other-session prompt → sticky toast, no card; switching reveals the card ──
   show({ sessionId: "B", promptId: "p4", question: "Merge?", options: ["Merge"] });

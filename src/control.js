@@ -10,6 +10,7 @@ const CONTROL_TYPES = new Set([
   'session.create',
   'prompt',
   'prompt.answer',
+  'prompt.cancel',
   'input',
   'resize',
   'session.close',
@@ -96,6 +97,7 @@ function hasValidControlFields(message) {
       && isString(message.event, 63)
       && Buffer.byteLength(JSON.stringify(message.data ?? null)) <= MAX_CONTROL_TEXT;
   }
+  if (message.type === 'prompt.cancel') return isString(message.promptId, 200);
   if (message.type === 'prompt.answer') {
     return isString(message.promptId, 200)
       && isString(message.value, MAX_CONTROL_TEXT, true);
@@ -123,7 +125,9 @@ function hasValidControlFields(message) {
   if (message.type === 'transcript.page') {
     return (message.before === undefined
       || (Number.isSafeInteger(message.before) && message.before >= 0))
-      && (message.limit === undefined || isDimension(message.limit, 1, 100));
+      && (message.limit === undefined || isDimension(message.limit, 1, 100))
+      && (message.query === undefined || isString(message.query, 256, true))
+      && hasValidRequestId(message);
   }
   if (message.type === 'content.open') {
     const path = isString(message.path, 4096)

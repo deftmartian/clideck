@@ -35,8 +35,10 @@ counts, and activity times let you follow many sessions while working in one.
 - **Resume and history.** Reopen saved sessions, read earlier conversations, and
   see when stopped sessions were last used. Back up your setup and restore selected
   settings, projects or sessions.
-- **Search.** Find sessions and search their conversation text. Filter to unread
-  sessions when catching up.
+- **Search.** Find sessions and search their conversation text. Conversation
+  History searches the full saved conversation with highlighted matches, and
+  offers Jump to latest when new messages arrive without moving your reading
+  position. Filter to unread sessions when catching up.
 - **Saved prompts.** Type `//` to reuse a prompt. `{{session_name}}` and
   `{{project_name}}` fill in the current context.
 - **Controls.** Light and dark themes and configurable shortcuts.

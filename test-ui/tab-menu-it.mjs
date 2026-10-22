@@ -17,7 +17,9 @@ let copied = "";
 Object.defineProperty(globalThis, "navigator", { configurable: true, value: { clipboard: { writeText: async (t) => { copied = t; } } } });
 
 store.applyEvent({ type: "session.created", sessionId: "S", provider: "shell", cwd: "/tmp", live: true, pid: 1 });
-initContentDock();
+store.applyEvent({ type: "session.created", sessionId: "OTHER", provider: "shell", cwd: "/tmp", live: true, pid: 2 });
+store.select('S');initContentDock();
+presentInDock({sessionId:'OTHER',contentId:'other-doc',kind:'text',name:'Unrelated',url:'/content/other-doc'});
 presentInDock({ sessionId: "S", contentId: "doc-file", kind: "markdown", name: "Plan.md", url: "/content/doc-file", sourcePath: "/Users/or/notes/Plan.md" });
 presentInDock({ sessionId: "S", contentId: "doc-inline", kind: "markdown", name: "Reply", url: "/content/doc-inline" });
 
@@ -26,7 +28,7 @@ ok("both documents have a tab", tabs.length === 2);
 
 const menuFor = (tab) => { tab._fire("contextmenu", { clientX: 40, clientY: 20 }); return [...document.querySelectorAll(".menu-item")]; };
 let items = menuFor(tabs[0]);
-ok("right-clicking a tab opens a menu offering the file path", items.length === 1 && items[0].textContent.includes("Copy file path") && !items[0].disabled);
+ok("right-clicking a tab opens a menu offering the file path", items.length === 4 && items[0].textContent.includes("Copy file path") && !items[0].disabled);
 items[0]._fire("click");
 await new Promise((r) => setTimeout(r, 0));
 ok("choosing it copies the document's real source path, not its /content URL", copied === "/Users/or/notes/Plan.md");
@@ -35,12 +37,30 @@ copied = "";
 items = menuFor(tabs[1]);
 // A payload the agent sent inline has no file. Saying so is the point: a disabled row with a reason beats a
 // row that quietly copies a URL, and beats a menu that changes shape between tabs.
-ok("a preview with no file on disk still offers the row, disabled", items.length === 1 && items[0].disabled === true);
+ok("a preview with no file on disk still offers the row, disabled", items.length === 4 && items[0].disabled === true);
 ok("and explains why, in the menu itself",
   [...document.querySelectorAll(".menu-cap")].some((n) => /no file on disk/i.test(n.textContent)));
 items[0]._fire("click");
 await new Promise((r) => setTimeout(r, 0));
 ok("and copies nothing at all", copied === "");
+
+ok("last tab disables close-to-right", items[2].disabled === true);
+items = menuFor(tabs[0]);
+ok("tab menu offers requested close actions in order", items.slice(1).map(n=>n.textContent).join('|') === 'Close this tab|Close tabs to the right|Close all tabs');
+items[2]._fire('click');
+ok("close-to-right keeps selected tab and terminal", document.querySelectorAll('.cd-tab').length === 2 && document.querySelector('.cd-tab-name').textContent.includes('Terminal'));
+let remaining=[...document.querySelectorAll('.cd-tab')].find(t=>!t.className.includes('cd-tab-term'));
+menuFor(remaining)[1]._fire('click');
+ok("close-this keeps terminal", document.getElementById('pane-tabs').hidden && !document.getElementById('term-panel').hidden);
+presentInDock({sessionId:'S',contentId:'fresh1',kind:'text',name:'One',url:'/content/fresh1'});
+presentInDock({sessionId:'S',contentId:'fresh2',kind:'text',name:'Two',url:'/content/fresh2'});
+remaining=[...document.querySelectorAll('.cd-tab')].find(t=>!t.className.includes('cd-tab-term'));
+menuFor(remaining)[3]._fire('click');
+ok("close-all removes documents and preserves terminal", document.getElementById('pane-tabs').hidden && !document.getElementById('term-panel').hidden);
+
+store.select('OTHER');
+ok("closing tabs leaves other session documents untouched", document.querySelectorAll('.cd-tab').length === 2 && document.querySelector('.cd-tab.on').textContent.includes('Unrelated'));
+store.select('S');
 
 // ── a click inside a sandboxed preview never reaches this document ───────────────────────────────────────
 const anchor = mk("button", "anchor");

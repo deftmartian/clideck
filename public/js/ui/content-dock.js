@@ -534,7 +534,12 @@ function docTab(it, on, entry) {
       label: "Copy file path",
       disabled: !path,
       onSelect: (ctl) => { ctl.close(); copyText(path); },
-    }, ...(path ? [] : [{ caption: true, label: "This preview was sent inline — it has no file on disk." }])],
+    }, ...(path ? [] : [{ caption: true, label: "This preview was sent inline — it has no file on disk." }]),
+    { separator: true },
+    { label: "Close this tab", onSelect: (ctl) => { ctl.close(); closeItem(it.sessionId, it.id); } },
+    { label: "Close tabs to the right", disabled: entry.items.indexOf(it) === entry.items.length - 1,
+      onSelect: (ctl) => { ctl.close(); const right = entry.items.slice(entry.items.indexOf(it) + 1); for (const item of right) closeItem(it.sessionId, item.id); } },
+    { label: "Close all tabs", onSelect: (ctl) => { ctl.close(); for (const item of [...entry.items]) closeItem(it.sessionId, item.id); } }],
     { align: "start", returnFocus: tab });
   });
   return tab;

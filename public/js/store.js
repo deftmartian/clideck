@@ -46,6 +46,7 @@ const transcripts = new Map();   // sessionId -> lowercased, tail-capped convers
 let order = 0;
 let activeId = null;
 let engineUpdate = null;
+let archive = { enabled: false, directory: "" }, archiveStatus = null;
 let pendingLocalCreate = false;     // one-shot: this client just asked to create a session (ws.createSession armed it).
                                     // The next brand-new LIVE session.created adopts selection+focus. Cleared on reset()
                                     // so a reconnect/replay burst can never consume it, and on a create-error snapshot.
@@ -160,9 +161,11 @@ function appendBuf(s, data) {
 function applyEvent(ev) {
   if (!ev || !ev.type) return;
   switch (ev.type) {                                  // session-less broadcasts (no sessionId)
+    case "archive.status": archiveStatus = { ...ev }; emit("archive.status", archiveStatus); return;
     case "engine.update": engineUpdate = { ...ev }; emit("engine.update", engineUpdate); return;
     case "config": {
       const c = ev.config || {};
+      archive = { enabled: c.archive?.enabled === true, directory: typeof c.archive?.directory === "string" ? c.archive.directory : "" };
       notifyPrefs = c.notify || {};
       voicePrefs = (c.voice && typeof c.voice === "object") ? c.voice : {};   // R2 voice prefs ride config unknown-keys (like notify)
       promptMru = (c.promptMru && typeof c.promptMru === "object") ? c.promptMru : {};
@@ -338,6 +341,7 @@ function unreadCount() { let n = 0; for (const s of sessions.values()) if (s.unr
 
 function reset() {
   engineUpdate = null;
+  archive = { enabled: false, directory: "" }; archiveStatus = null;
   sessions.clear(); transcripts.clear(); pluginsList = []; pluginsSeen = false; activeId = null; pendingLocalCreate = false;
   emit("plugins", pluginsList); emit("reset"); emit("chrome");
 }
@@ -349,6 +353,8 @@ export const store = {
   sessions,
   get activeId() { return activeId; },
   get connected() { return connected; },
+  get archive() { return archive; },
+  get archiveStatus() { return archiveStatus; },
   get engineUpdate() { return engineUpdate; },
   get filter() { return filter; },
   get search() { return search; },

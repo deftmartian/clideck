@@ -28,12 +28,14 @@ class FakeTerminal {
     this._core = { _renderService: { dimensions: { css: { cell: { width: 8, height: 16 } } } }, viewport: { scrollBarWidth: 0 } };
     this.parser = { registerOscHandler() {} };
   }
-  open(host) { const vp = add("div", "", host); vp.className = "xterm-viewport"; this.textarea = add("textarea", "", host); }
+  open(host) { if (this.unicode?.activeVersion !== "11") throw new Error("Unicode11 must precede open/output"); const vp = add("div", "", host); vp.className = "xterm-viewport"; this.textarea = add("textarea", "", host); }
   attachCustomKeyEventHandler() {} onData() {} onScroll() {} onResize() { return { dispose() {} }; } registerLinkProvider() {} reset() {} clear() {}
   write(_data, done) { done?.(); } resize(cols, rows) { this.cols = cols; this.rows = rows; }
   scrollToBottom() {} focus() {}
 }
 window.Terminal = FakeTerminal;
+window.Unicode11Addon = { Unicode11Addon: class { activate(term) { term.unicode = { activeVersion: "6" }; } } };
+FakeTerminal.prototype.loadAddon = function(addon) { addon.activate(this); };
 
 const { store } = await import("../public/js/store.js");
 const { initTerminal } = await import("../public/js/ui/terminal.js");
@@ -46,7 +48,12 @@ const renameBtn = () => document.getElementById("th-rename");
 const errMsg = () => document.getElementById("th-rename-msg");
 const input = () => name().querySelector(".name-input");
 
+const addon = window.Unicode11Addon; delete window.Unicode11Addon;
 initTerminal();
+ok("missing Unicode addon shows recovery message instead of silent fallback", /restart CliDeck/.test(document.getElementById("term").textContent));
+window.Unicode11Addon = addon;
+initTerminal();
+ok("Unicode11 activates before terminal opens", true);
 store.applyEvent({ type: "session.created", sessionId: "A", provider: "claude-code", name: "architecture", cwd: "/work", projectId: "p1", live: true, pid: 4321 });
 store.applyEvent({ type: "session.created", sessionId: "B", provider: "codex", name: "programmer", cwd: "/work", projectId: "p1", live: true, pid: 4322 });
 store.applyEvent({ type: "config", config: { projects: [{ id: "p1", name: "clideck", cwd: "/work" }] } });

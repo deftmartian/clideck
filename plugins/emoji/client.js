@@ -44,7 +44,7 @@ async function openEmoji(api, candidateSession) {
     title: 'Emoji',
     placeholder: 'Search smile, angry, thumbs up…',
     items: ITEMS,
-    recentLimit: 8,
+    recentLimit: 5,
   });
   const item = ITEM_BY_ID.get(selected);
   if (!item) return false;

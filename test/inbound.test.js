@@ -133,6 +133,19 @@ test('real CLI prompt, annotate, and upload flows round-trip through the engine'
     (event) => event.type === 'prompt.resolved' && event.promptId === shown.promptId,
   );
 
+  // A dismissed question unblocks the CLI with no answer; the agent session lives on.
+  const dismissedCli = startCli(['prompt', 'Dismiss me', '--options', 'Yes,No'], env, cwd);
+  const dismissed = await waitFor(messages,
+    event => event.type === 'prompt.show' && event.question === 'Dismiss me');
+  socket.send(JSON.stringify({ type: 'prompt.cancel', promptId: dismissed.promptId }));
+  const dismissal = await dismissedCli.result;
+  assert.equal(dismissal.code, 1);
+  assert.equal(dismissal.stdout, '');
+  assert.match(dismissal.stderr, /dismissed.*without answering.*No option was selected/);
+  assert.doesNotMatch(dismissal.stderr, /Hint:/);
+  await waitFor(messages, event => event.type === 'prompt.resolved' && event.promptId === dismissed.promptId);
+  assert.equal(server.sessions.get(created.sessionId).closed, false);
+
   const annotateCli = startCli(
     ['annotate', 'canvas.png', '--timeout', '10m'],
     env,
