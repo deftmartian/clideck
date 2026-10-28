@@ -697,9 +697,14 @@ class HeadlessServer {
   seedShellHistory(session) {
     const history = this.persistence.historyTail(session.id);
     const at = new Date().toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
-    const marker = `\r\n\x1b[2m── shell restarted ${at} in ${session.cwd} ──\x1b[0m\r\n`;
-    // Leave any full-screen app, mouse mode or hidden cursor the old process left behind.
-    const reset = '\x1b[?1049l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?25h\x1b[0m';
+    const home = require('os').homedir();
+    const where = session.cwd === home || session.cwd.startsWith(`${home}/`) ? `~${session.cwd.slice(home.length)}` : session.cwd;
+    const marker = `\r\n\x1b[2m── shell restarted ${at} in ${where} ──\x1b[0m\r\n`;
+    // Leave any full-screen app, mouse mode or hidden cursor the old process left behind. Only leave the
+    // alternate screen if the history ended inside it: ?1049l also restores a saved cursor position.
+    const screens = [...history.matchAll(/\x1b\[\?(?:1049|1047|47)([hl])/g)];
+    const inAlternate = screens.at(-1)?.[1] === 'h';
+    const reset = `${inAlternate ? '\x1b[?1049l' : ''}\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?25h\x1b[0m`;
     if (history) this.forkTransport.output(session, history + reset + marker);
     this.persistence.appendHistory(session.id, reset + marker);
   }

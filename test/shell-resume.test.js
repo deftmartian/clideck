@@ -53,3 +53,21 @@ test('shell resume falls back to home when its folders are gone, and reports spa
   assert.equal(errors[0].error.code, 'resume_failed');
   assert.match(errors[0].error.message, /spawn failed/);
 });
+
+test('the resume seed leaves the alternate screen only when the old output ended inside it', async (context) => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'clideck-next-shell-seed-'));
+  const server = new HeadlessServer({ port: 0, dataDir });
+  context.after(async () => { await server.close(); rmSync(dataDir, { recursive: true, force: true }); });
+  await server.listen();
+  const seeds = [];
+  server.forkTransport.output = (session, data) => seeds.push(data);
+  server.persistence.register(shellEntry('plain', dataDir));
+  server.persistence.appendHistory('plain', 'ls\r\n\x1b[?1049hvim\x1b[?1049l$ ');
+  server.persistence.register(shellEntry('in-vim', dataDir));
+  server.persistence.appendHistory('in-vim', '$ vim\r\n\x1b[?1049h~\r\n~');
+  server.seedShellHistory({ id: 'plain', cwd: dataDir });
+  server.seedShellHistory({ id: 'in-vim', cwd: dataDir });
+  const tail = seed => seed.slice(seed.lastIndexOf('$'));
+  assert.equal(tail(seeds[0]).includes('\x1b[?1049l'), false);
+  assert.match(seeds[1], /\x1b\[\?1049h~\r\n~\x1b\[\?1049l/);
+});
