@@ -33,6 +33,7 @@ const MAX_QUEUE = 200;
 let queue = [];            // offline actions, in issue order
 let queuedConfig = null;   // the single coalesced config.update entry (also referenced inside `queue`)
 let overflowed = false;
+let overflowToast = null;
 
 function enqueue(obj) {
   const t = obj && obj.type;
@@ -44,13 +45,14 @@ function enqueue(obj) {
     return;
   }
   if (queue.length >= MAX_QUEUE) {                     // sane cap — drop the newest + warn once
-    if (!overflowed) { overflowed = true; toast.warn({ id: "queue-full", title: "Too many offline changes", body: "Some queued actions were dropped — reconnect to sync.", duration: 0 }); }
+    if (!overflowed) { overflowed = true; overflowToast = toast.warn({ id: "queue-full", title: "Too many offline changes", body: "Some queued actions were dropped — reconnect to sync.", duration: 0 }); }
     return;
   }
   queue.push(obj);
 }
 function flushQueue() {
   overflowed = false;
+  overflowToast?.dismiss(); overflowToast = null;   // the warning is sticky; it is stale once we are back
   if (!queue.length) return;
   const pending = queue; queue = []; queuedConfig = null;
   for (const m of pending) if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(m));
