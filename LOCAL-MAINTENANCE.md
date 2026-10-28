@@ -1,15 +1,52 @@
 # CliDeck v2 fork maintenance
 
-This branch ports the retained fork features onto upstream `70f6b9c`
-(CliDeck 2.4.0 plus clipboard fixes). The old `integration/full-stack` history is preserved separately.
+This branch carries the retained fork features on upstream `cb83166` (CliDeck
+2.5.0). The old `integration/full-stack` history is preserved separately.
 The v2 engine and plugin SDK replace v1; Autopilot is retired.
 
 ## Local upstream integration
 
-`local/upstream-2.4` rebases the installed `2.1.1-fork.5` source (`ea4c003`)
-onto upstream `70f6b9c`; the original restoration branch remains available.
-The candidate is `2.4.0-fork.7`. Build and package it locally; this branch does
-not describe a live deployment.
+`rebase/upstream-2.5` is upstream 2.5.0 plus one fork commit, followed by the
+2.5.0-fork.8 changes. The fork commit was rebuilt from the installed
+`2.4.0-fork.7` package and re-parented onto `70f6b9c`, the upstream commit it
+was built from, before rebasing onto 2.5.0. When rebasing again, rebase the
+fork commit range onto the new upstream release and bump `version` and
+`clideckUpstreamVersion` in `package.json`.
+
+`integration/v2` (`364f8b0`) imported the fork.7 package, which ships `src/`
+but only the built `dist/public`, so its `public/` stayed at the 2.1.1-fork
+tree. The client sources here are the unbundled copies from fork.7's
+`dist/public`; rebuilding them reproduces fork.7's bundle byte for byte. Always
+commit `public/` itself: the package cannot restore client sources or tests.
+The package also never carried these fork test lanes, which are lost:
+`test-ui/{files,photo-queue,config-recovery,attachments,mouse-input}-browser.mjs`
+and the `src/fork/package-check` preflight. Their npm scripts were removed;
+sections below that mention them describe coverage that must be rewritten.
+`tools/run-ui-tests.js` was recreated.
+
+## 2.5.0-fork.8
+
+- Trimmed terminal output (the 2 MiB stored-output cap) is a quiet header pill
+  with the explanation in its tooltip, not a banner over the terminal.
+- Plain shells still running when the engine stops restart on the next start
+  in the folder they were last in (sampled from `/proc/<pid>/cwd` after each
+  command), with their previous output above a dimmed restart marker. A shell
+  the user exited stays dormant. `resumeShellsOnStart: false` in config.json
+  turns this off. Resume spawn failures are reported as `resume_failed`.
+- PTYs fill missing `DISPLAY`, `WAYLAND_DISPLAY`, `SSH_AUTH_SOCK` and related
+  desktop variables from `systemctl --user show-environment`, because the user
+  service starts before the graphical login. `CLIDECK_NO_DESKTOP_ENV=1` opts out.
+- `CLAUDE_CODE_*` variables set explicitly in a CLI Agents command's env are
+  passed through; inherited Claude nesting state is still stripped.
+- Fresh Claude launches pass `--session-id` with a CliDeck-chosen UUID and
+  record it as the resume handle at launch. The CliDeck status line shows
+  `model · N% context`, or runs the user's own `statusLine` (local, project,
+  then profile settings). `permission_prompt` and `elicitation_dialog`
+  notifications trigger menu detection.
+- Session backup, resume diagnostics, Ask agent listing and content GETs check
+  the Host header against DNS rebinding.
+- Finished workers no longer occupy a worker slot; an uncollected one closes
+  after 30 minutes.
 
 Upstream update checks remain available, but `clideckUpdatePolicy: local` in
 the package disables registry installation, including direct installer calls.
@@ -122,7 +159,7 @@ The pinned xterm serializer omits SGR/SGR-pixel encoding, which otherwise makes
 mouse-tracking harnesses ignore wheel input after selection or reconnect.
 Ordinary mouse dragging selects text; Alt-click/drag sends application mouse
 events, and the wheel remains application-controlled when tracking is enabled.
-`npm run test:browser:mouse` verifies selection and real PTY wheel input across
+`test-ui/mouse-input-browser.mjs` (lost, see above) verified selection and real PTY wheel input across
 connect/reload, Alt-click, and SGR-pixel/legacy encoding transitions. Firefox is
 also supported through `BROWSER=firefox`.
 
@@ -190,12 +227,11 @@ Download streams a regular file (symlinks are followed, directories/devices/FIFO
 refused) from `GET /api/files/download`; it requires a loopback or allowed Host and a
 same-origin fetch, and the UI preflights with `stat` so failures show in the status line.
 Downloads have no Range support, so interrupted transfers restart. A file removed
-after the preflight appears as a failed browser download. Known gap, not
-changed here: `/api/session/backup` and other GETs without an Origin accept any Host.
+after the preflight appears as a failed browser download. Since 2.5.0-fork.8 the
+backup, resume diagnostics, agents and content GETs share the Host check.
 
-Run `npm run test:browser:files
-npm run test:browser:hardening` (also `BROWSER=firefox` / `BROWSER=webkit`) for the
-Files browser acceptance lane, after building the client. It covers desktop and
+The Files browser acceptance lane (`files-browser.mjs` and the hardening suites,
+lost, see above) ran after building the client, after building the client. It covers desktop and
 390/320px layouts, navigation, upload destination, preview, draft insertion,
 phone Attach, edit conflicts, CRLF, creation, rename, Move, deletion confirmation,
 unsaved editor protection/reconnect, binary/Unicode downloads, rejected special
@@ -294,7 +330,6 @@ BROWSER=webkit npm run test:browser:mobile
 npm audit --omit=dev --audit-level=high
 npm pack --pack-destination /tmp/clideck-release
 # After installing the tarball into a throwaway prefix:
-node tools/preflight-package.js /path/to/prefix/node_modules/clideck
 CLIDECK_PACKAGE_ROOT=/path/to/prefix/node_modules/clideck node test-ui/fork-integration-browser.mjs
 ```
 
@@ -405,7 +440,6 @@ npm test
 npm run test:ui
 npm run build:client
 npm run check:client
-node test-ui/photo-queue-browser.mjs
 node test-ui/terminal-cursor-browser.mjs
 node test-ui/xterm-scroll-browser.mjs
 ```
@@ -469,7 +503,7 @@ file references, not embedded model attachments. Native permissions still apply.
 
 Verification:
 
-- `npm run test:browser:attachments` exercises real HTTP uploads, WebSocket
+- `test-ui/attachments-browser.mjs` (lost, see above) exercised real HTTP uploads, WebSocket
   acceptance/rejection and a real PTY child on desktop and phone layouts. It
   covers reload, thumbnails, drop/Attach, missing files, cancellation, failure,
   rapid repeat Send, overflowing input and Escape during image insertion.
