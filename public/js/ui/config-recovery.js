@@ -16,6 +16,7 @@ function show(body) {
 
 export function initConfigRecovery() {
   store.on("config", (event) => {
+    if (!event) return;   // local optimistic setters emit without an engine config event
     if (event.recovery?.message) show(event.recovery.message);
     else {
       recoveryNotice?.dismiss();
