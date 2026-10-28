@@ -132,6 +132,10 @@ class AgentSession extends EventEmitter {
     const extraArgs = Array.isArray(suppliedExtraArgs)
       ? suppliedExtraArgs.filter((value) => typeof value === 'string')
       : [];
+    if (launch.resumeHandle && !this.resumeHandle) {
+      this.resumeHandle = launch.resumeHandle;
+      this.emit('resume-metadata', { handle: launch.resumeHandle });
+    }
     this.nativeScroll = launch.nativeScroll === true;
     this.launchCleanup = launch.cleanup || (() => {});
     const env = sessionEnvironment(launch.env, this.id, this.port, this.colorfgbg, this.serverUrl);

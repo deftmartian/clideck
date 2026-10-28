@@ -1,4 +1,6 @@
 const { basename } = require('path');
+const { randomUUID } = require('crypto');
+const { parseCommand } = require('./custom-command');
 const { AGENT_SESSION_GUIDE, hasClaudeSystemPrompt } = require('./agent-session-guide');
 const screen = require('./claude-screen');
 const { createClaudeSettings, removeClaudeSettings } = require('./claude-settings');
@@ -45,14 +47,26 @@ const claudeProvider = {
     if (!hasClaudeSystemPrompt(command, extraArgs)) {
       args.push('--append-system-prompt', agentGuide || AGENT_SESSION_GUIDE);
     }
+    // Choose the conversation id up front so the session is resumable even if no hook reaches CliDeck.
+    let sessionHandle = '';
     if (resumeHandle) args.push('--resume', resumeHandle);
+    else if (!selectsConversation(command, extraArgs)) {
+      sessionHandle = randomUUID();
+      args.push('--session-id', sessionHandle);
+    }
     return {
       command: command || this.command,
       args,
       cleanup: () => removeClaudeSettings(settingsPath),
       env: { CLIDECK_HOOK_TOKEN: hookToken || '' },
+      ...(sessionHandle && { resumeHandle: sessionHandle }),
     };
   },
 };
+
+function selectsConversation(command, extraArgs = []) {
+  return [...parseCommand(command), ...extraArgs].some((arg) => typeof arg === 'string'
+    && /^(?:--(?:resume|continue|session-id|from-pr)(?:=|$)|-[rc]$)/.test(arg));
+}
 
 module.exports = { claudeProvider };

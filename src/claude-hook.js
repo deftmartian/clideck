@@ -24,5 +24,9 @@ process.stdin.on('end', () => {
   }, process.argv[5] || process.env.CLIDECK_URL);
   request.on('error', () => {});
   request.end(input || '{}');
+  if (route === 'context') {
+    const line = require('./claude-statusline').renderStatusLine(input);
+    if (line) process.stdout.write(line.endsWith('\n') ? line : `${line}\n`);
+  }
 });
 process.stdin.resume();
