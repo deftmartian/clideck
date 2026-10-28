@@ -36,7 +36,9 @@ function renderStatusLine(input, env = process.env, run = spawnSync) {
   const custom = userStatusLine(payload, env);
   if (custom) {
     const result = run(custom.command, { shell: true, cwd: custom.cwd, input, encoding: 'utf8', timeout: 3000, env });
-    if (!result.error && typeof result.stdout === 'string' && result.stdout.trim()) return result.stdout;
+    // A command that ignores stdin can exit before the payload is written; EPIPE still leaves valid output.
+    const failed = result.error && result.error.code !== 'EPIPE';
+    if (!failed && result.status === 0 && typeof result.stdout === 'string' && result.stdout.trim()) return result.stdout;
   }
   return defaultStatusLine(payload);
 }
