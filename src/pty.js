@@ -4,10 +4,12 @@ const pty = require('node-pty');
 
 let helperChecked = false;
 
-function sanitizeProviderEnv(env) {
+// Inherited Claude nesting state must not leak into agents, but variables a CLI Agents command sets
+// explicitly (e.g. CLAUDE_CODE_USE_BEDROCK) are user configuration and pass through.
+function sanitizeProviderEnv(env, keep = []) {
   return Object.fromEntries(Object.entries(env || {}).filter(([key]) => {
     const name = key.toUpperCase();
-    return name !== 'CLAUDECODE'
+    return keep.includes(key) || name !== 'CLAUDECODE'
       && name !== 'CLAUDE_EFFORT'
       && !name.startsWith('CLAUDE_CODE_');
   }));
@@ -28,9 +30,10 @@ function ensureHelperExecutable() {
 
 function spawn(file, args, options) {
   ensureHelperExecutable();
+  const { keepEnv, ...rest } = options || {};
   return pty.spawn(file, args, {
-    ...options,
-    ...(options?.env && { env: sanitizeProviderEnv(options.env) }),
+    ...rest,
+    ...(rest.env && { env: sanitizeProviderEnv(rest.env, keepEnv) }),
   });
 }
 

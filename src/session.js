@@ -3,6 +3,7 @@ const { EventEmitter } = require('events');
 const { randomUUID } = require('crypto');
 const { delimiter, join } = require('path');
 const pty = require('./pty');
+const { desktopEnvironment } = require('./desktop-env');
 const { Screen } = require('./screen');
 const { migrateLegacyHooks } = require('./legacy-hooks');
 const { hasNonemptyFile, waitForNonemptyFile } = require('./transcript-file');
@@ -21,6 +22,7 @@ const COLORFGBG_BY_THEME = {
 
 function sessionEnvironment(launchEnv, sessionId, port, colorfgbg, serverUrl = `http://127.0.0.1:${port}`) {
   return {
+    ...desktopEnvironment({ ...process.env, ...launchEnv }),
     ...process.env,
     ...launchEnv,
     PATH: [join(__dirname, 'bin'), augmentedPath(launchEnv?.PATH || process.env.PATH)].join(delimiter),
@@ -143,6 +145,7 @@ class AgentSession extends EventEmitter {
         rows: this.rows,
         cwd: this.cwd,
         env,
+        keepEnv: Object.keys(launch.env || {}),
       });
     } catch (error) {
       this.launchCleanup();
