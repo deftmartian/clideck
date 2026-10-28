@@ -84,6 +84,8 @@ function normalizeEntry(value) {
     ...(value.resumeHandle && { resumeHandle: String(value.resumeHandle) }),
     ...(value.transcriptPath && { transcriptPath: String(value.transcriptPath) }),
     ...(value.commandId && { commandId: String(value.commandId) }),
+    ...(value.shellCwd && { shellCwd: String(value.shellCwd) }),
+    ...(value.resumeOnStart === true && { resumeOnStart: true }),
     ...(value.commandLabel && { commandLabel: String(value.commandLabel) }),
     ...(Object.prototype.hasOwnProperty.call(value, 'projectId') && {
       projectId: value.projectId ? String(value.projectId) : null,

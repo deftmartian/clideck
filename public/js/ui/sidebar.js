@@ -108,7 +108,7 @@ export function initSidebar() {
   store.on("session:setProjectRejected", onSetProjectRejected);
   // a restart respawn failed — the store already flipped the row dormant; surface why.
   store.on("session:restartFailed", (id, msg) => toast.error({ id: "restart:" + id, title: "Restart failed", body: msg || "The session could not be restarted." }));
-  store.on("session:resumeFailed", (id, msg) => toast.error({ id: "resume:" + id, title: "Resume blocked", body: msg || "This session has no saved native conversation handle." }));
+  store.on("session:resumeFailed", (id, msg) => toast.error({ id: "resume:" + id, title: "Could not resume", body: msg || "This session has no saved native conversation handle." }));
   store.on("session:notice", (ev) => toast.warn({ id: "notice:" + (ev.code || "resume") + ":" + ev.sessionId, title: "Resume warning", body: ev.message || "", duration: 8000 }));
   // config.projects changed (create / rename / recolour / reorder / delete cascade) → reconcile project groups.
   store.on("config", reconcileProjects);

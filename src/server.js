@@ -5,7 +5,7 @@ const { WorkerManager, canAskSession, workerMetadata } = require('./fork-workers
 const { Files, MAX_TEXT_BYTES, openDownload, pathValue } = require('./files');
 const { pipeline } = require('stream/promises');
 const { serverUrl } = require('./hook-url');
-const { existsSync, accessSync, statSync, constants:fsConstants } = require('fs');
+const { existsSync, accessSync, statSync, readlinkSync, constants:fsConstants } = require('fs');
 const { WebSocketServer, WebSocket } = require('ws');
 const { AgentSession } = require('./session');
 const {
@@ -410,7 +410,11 @@ class HeadlessServer {
     this.warnResume(id, launch);
     const { providerOptions } = launch;
     providerOptions.touchUi = touchUi;
-    return this.startSession({
+    const shell = provider.id === 'shell' && !customCommand;
+    const cwd = shell ? shellResumeCwd(entry) : entry.cwd;
+    let session;
+    try {
+      session = this.startSession({
       id: entry.id,
       ...workerMetadata(entry),
       provider,
@@ -419,7 +423,7 @@ class HeadlessServer {
       command: customCommand?.command || this.commands[provider.id],
       commandId: entry.commandId,
       commandLabel: entry.commandLabel || customCommand?.label,
-      cwd: entry.cwd,
+      cwd,
       cols: entry.cols,
       rows: entry.rows,
       port: this.port,
@@ -428,7 +432,14 @@ class HeadlessServer {
       lastAgentAt: entry.lastAgentAt,
       contextTranscriptPath: entry.transcriptPath,
       ...(hasProjectId(entry) && { projectId: entry.projectId }),
-    }, false);
+      ...(shell && { seedHistory: true }),
+    }, false, {}, true);
+    } catch (error) {
+      this.broadcastSessionError(id, { code: 'resume_failed', operation: 'session.resume',
+        message: `Could not start ${provider.id === 'shell' ? 'the shell' : 'this session'} in ${cwd}: ${error.message}` });
+      return null;
+    }
+    return session;
   }
 
   resumeLaunch(provider, entry) {
@@ -624,7 +635,14 @@ class HeadlessServer {
     this.sessions.set(session.id, session);
     this.forkTransport.attach(session);
     if (register) this.persistence.register(session);
+    if (options.seedHistory) this.seedShellHistory(session);
+    const shell = session.provider.id === 'shell' && !session.commandId;
+    if (shell) this.persistence.update(session.id, { resumeOnStart: true });
     const onEvent = (event) => {
+      if (shell && event.type === 'status' && event.state === 'idle') this.recordShellCwd(session);
+      if (shell && event.type === 'session.closed' && !this.closing && !event.restarting) {
+        this.persistence.update(session.id, { resumeOnStart: false });
+      }
       if (event.type === 'session.created') this.archive.start(session, this.archiveInfo(session));
       this.archive.event(session, event);
       if (event.type === 'session.closed') this.forkTransport.detach(session);
@@ -672,6 +690,38 @@ class HeadlessServer {
       throw error;
     }
     return session;
+  }
+
+  // A resumed shell is a new process, so show what the old one printed above a marker instead of a
+  // blank screen. The bytes are already in the persisted history; only the marker is appended there.
+  seedShellHistory(session) {
+    const history = this.persistence.historyTail(session.id);
+    const at = new Date().toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+    const marker = `\r\n\x1b[2m── shell restarted ${at} in ${session.cwd} ──\x1b[0m\r\n`;
+    // Leave any full-screen app, mouse mode or hidden cursor the old process left behind.
+    const reset = '\x1b[?1049l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?25h\x1b[0m';
+    if (history) this.forkTransport.output(session, history + reset + marker);
+    this.persistence.appendHistory(session.id, reset + marker);
+  }
+
+  recordShellCwd(session) {
+    const pid = session.terminal?.pid;
+    if (!pid || process.platform !== 'linux') return;
+    let cwd;
+    try { cwd = readlinkSync(`/proc/${pid}/cwd`); } catch { return; }
+    if (cwd && this.persistence.get(session.id)?.shellCwd !== cwd) this.persistence.update(session.id, { shellCwd: cwd });
+  }
+
+  // Plain shells cannot be resumed like agent conversations; start the ones that were still running
+  // when the engine stopped (reboot, service restart) so they are back where they were.
+  resumeShellsOnStart() {
+    if (this.configStore.get().resumeShellsOnStart === false) return [];
+    const started = [];
+    for (const entry of this.persistence.list()) {
+      if (entry.provider !== 'shell' || entry.commandId || !entry.resumeOnStart || this.sessions.has(entry.id)) continue;
+      if (this.resumeSession(entry.id)) started.push(entry.id);
+    }
+    return started;
   }
 
   archiveInfo(session) {
@@ -2151,6 +2201,17 @@ class HeadlessServer {
   }
 }
 
+function isDirectory(path) {
+  try { return Boolean(path) && statSync(path).isDirectory(); } catch { return false; }
+}
+
+// Where the shell last was, then where it was created, then home if both folders are gone.
+function shellResumeCwd(entry) {
+  if (isDirectory(entry.shellCwd)) return entry.shellCwd;
+  if (isDirectory(entry.cwd)) return entry.cwd;
+  return require('os').homedir();
+}
+
 function parseArgs(argv, env = process.env) {
   const options = {};
   const flags = { '--port': 'port', '--host': 'host', '--cwd': 'cwd', '--command': 'command', '--data-dir': 'dataDir' };
@@ -2225,6 +2286,7 @@ async function main(argv = process.argv.slice(2), env = process.env) {
     version: ENGINE_BUILD_VERSION, url: address.httpUrl, isTTY: process.stdout.isTTY,
   }));
   installShutdownHandlers(server);
+  server.resumeShellsOnStart();
   const { Updates } = require('./updates');
   let notifiedVersion = '';
   server.updates = new Updates({ onChange: event => {
