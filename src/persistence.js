@@ -109,12 +109,12 @@ function writeRegistry(path, text) {
 }
 
 function retentionMessage(state, limit) {
-  const cap = `${limit} bytes`;
+  const cap = `${Math.round(limit / 1024 / 1024 * 10) / 10} MiB`;
   if (state === 'truncated') {
-    return `Terminal output kept for this session is capped at ${cap}. The oldest output was removed and cannot be restored. This is terminal output, separate from the native conversation. Conversation History does not recover removed terminal bytes.`;
+    return `Only the latest ${cap} of terminal output is kept; older output was trimmed. The agent's conversation is unaffected.`;
   }
   if (state === 'uncertain') {
-    return `This terminal history file is at the ${cap} cap and has no retention flag, so it is uncertain whether older output was removed. Terminal output and conversation History are separate. History does not recover missing terminal bytes.`;
+    return `This terminal output is at the ${cap} cap; older output may have been trimmed. The agent's conversation is unaffected.`;
   }
   return '';
 }

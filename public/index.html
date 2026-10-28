@@ -114,6 +114,7 @@ if(w>=240&&w<=560)document.documentElement.style.setProperty('--sidebar-w',w+'px
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
             <span id="th-last-value"></span>
           </div>
+          <div class="th-trimmed th-pill" id="history-retention" tabindex="0" hidden>trimmed</div>
           <div class="th-meta" id="th-meta"></div>
         </div>
         <div class="th-div" aria-hidden="true"></div>
@@ -136,7 +137,6 @@ if(w>=240&&w<=560)document.documentElement.style.setProperty('--sidebar-w',w+'px
       <div class="cd-tabs" id="pane-tabs" role="tablist"></div>
       <div class="pane-body" id="pane-body">
       <div class="term-frame" id="term-panel" role="tabpanel">
-        <div id="history-retention" class="history-retention" role="status" hidden></div>
         <div id="term"></div>
         <button class="scroll-btn" id="scroll-btn" title="Jump to latest" aria-label="Jump to latest">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
