@@ -1050,6 +1050,11 @@ class HeadlessServer {
   allowFileDownload(req) {
     const site = req.headers['sec-fetch-site'];
     if (!this.allowLocalApi(req) || (site && site !== 'same-origin' && site !== 'none')) return false;
+    return this.allowLocalHost(req);
+  }
+
+  // GETs that return session data: a rebound DNS name reaches loopback with no Origin, so check Host too.
+  allowLocalHost(req) {
     if (!isLoopbackHost(this.host)) return true;
     const host = String(req.headers.host || '').trim();
     try {
@@ -1614,9 +1619,7 @@ class HeadlessServer {
     if (req.method === 'POST' && ['/api/session/backup', '/api/session/restore/preview', '/api/session/restore'].includes(pathname)) {
       res.setHeader('Cache-Control', 'no-store');
       res.setHeader('X-Content-Type-Options', 'nosniff');
-      if (!isLoopbackAddress(req.socket?.remoteAddress)
-        || !isAllowedWebSocketOrigin(req.headers.origin, req.headers.host, this.host)
-        || req.headers['sec-fetch-site'] === 'cross-site') {
+      if (!this.allowLocalApi(req) || !this.allowLocalHost(req)) {
         sendJson(res, 403, { error: 'local_only' });
         return;
       }
@@ -1673,7 +1676,7 @@ class HeadlessServer {
       return;
     }
     if (req.method === 'GET' && pathname === '/api/session/resume') {
-      if (!this.allowLocalApi(req)) { sendJson(res, 403, { ok: false, error: 'local_only' }); return; }
+      if (!this.allowLocalApi(req) || !this.allowLocalHost(req)) { sendJson(res, 403, { ok: false, error: 'local_only' }); return; }
       const id = new URL(req.url, 'http://localhost').searchParams.get('id') || '';
       sendJson(res, 200, diagnoseSessions(this.persistence, id));
       return;
@@ -1683,9 +1686,7 @@ class HeadlessServer {
       sendJson(res, 200, {ok:true,version:ENGINE_BUILD_VERSION,protocol:FORK_PROTOCOL}); return;
     }
     if (req.method === 'GET' && pathname === '/api/session/backup') {
-      if (!isLoopbackAddress(req.socket?.remoteAddress)
-        || !isAllowedWebSocketOrigin(req.headers.origin, req.headers.host, this.host)
-        || req.headers['sec-fetch-site'] === 'cross-site') {
+      if (!this.allowLocalApi(req) || !this.allowLocalHost(req)) {
         sendJson(res, 403, { error: 'local_only' });
         return;
       }
@@ -2169,7 +2170,7 @@ class HeadlessServer {
       res.writeHead(403).end();
       return;
     }
-    if (!isAllowedWebSocketOrigin(req.headers.origin, req.headers.host, this.host)) {
+    if (!isAllowedWebSocketOrigin(req.headers.origin, req.headers.host, this.host) || !this.allowLocalHost(req)) {
       res.writeHead(403).end();
       return;
     }
@@ -2186,7 +2187,7 @@ class HeadlessServer {
   }
 
   handleAgents(req, res) {
-    if (!isLoopbackAddress(req.socket?.remoteAddress)) {
+    if (!isLoopbackAddress(req.socket?.remoteAddress) || !this.allowLocalHost(req)) {
       sendJson(res, 403, { ok: false, error: 'local_only' });
       return;
     }
