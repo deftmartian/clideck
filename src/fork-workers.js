@@ -10,6 +10,8 @@ const { resolveLiveCaller } = require('./session-agents');
 
 const exec = promisify(execFile);
 const MAX_WORKERS = 3;
+// A finished answer waits this long for `clideck worker wait` before the idle worker is closed.
+const FINISHED_WORKER_TTL_MS = 30 * 60 * 1000;
 const MAX_PROMPT = 256 * 1024;
 
 function workerMetadata(value = {}) {
@@ -55,7 +57,9 @@ function waitUntilReady(session, timeoutMs) {
 }
 
 class WorkerManager {
-  constructor(server) { this.server = server; this.reservations = 0; this.tasks = new Map(); }
+  constructor(server, { finishedTtlMs = FINISHED_WORKER_TTL_MS } = {}) {
+    this.server = server; this.reservations = 0; this.tasks = new Map(); this.finishedTtlMs = finishedTtlMs;
+  }
 
   track(session, identity) {
     const task = { session, identity, result: null };
@@ -64,6 +68,8 @@ class WorkerManager {
         if (task.result) return;
         task.result = result;
         session.off('event', onEvent);
+        task.expiry = setTimeout(() => { if (!session.closed) this.closeWorker(session).catch(() => {}); }, this.finishedTtlMs);
+        task.expiry.unref?.();
         resolve(result);
       };
       const onEvent = event => {
@@ -75,6 +81,7 @@ class WorkerManager {
     });
     const onClose = event => {
       if (event.type !== 'session.closed') return;
+      clearTimeout(task.expiry);
       this.tasks.delete(session.id);
       session.off('event', onClose);
     };
@@ -177,7 +184,9 @@ class WorkerManager {
     const caller = resolveLiveCaller(server.persistence.list(), server.sessions, request.callerSessionId);
     if (!caller) return { ok: false, error: 'unknown_caller' };
     if (caller.entry.spawnedBySessionId) return { ok: false, error: 'recursive_spawn_forbidden' };
-    const active = [...server.sessions.values()].filter(s => s.spawnedBySessionId && !s.closed).length;
+    // Finished workers only hold an answer for collection; they do not occupy a slot.
+    const active = [...server.sessions.values()]
+      .filter(s => s.spawnedBySessionId && !s.closed && !this.tasks.get(s.id)?.result).length;
     if (active + this.reservations >= MAX_WORKERS) return { ok: false, error: 'worker_limit' };
     const project = request.noProject ? null : resolveProject(server.configStore.get().projects, request.project);
     if (project?.error) return { ok: false, error: project.error };
