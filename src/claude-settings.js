@@ -26,7 +26,12 @@ function createClaudeSettings(port, sessionId, serverUrl = '') {
       SessionStart: [hook('session-start')],
       SessionEnd: [hook('session-end')],
       PreToolUse: [hook('menu')],
-      Notification: [{ matcher: 'idle_prompt', ...hook('idle') }],
+      // PreToolUse fires before a permission dialog is drawn; these fire once it is on screen.
+      Notification: [
+        { matcher: 'idle_prompt', ...hook('idle') },
+        { matcher: 'permission_prompt', ...hook('menu') },
+        { matcher: 'elicitation_dialog', ...hook('menu') },
+      ],
     },
   };
   const path = join(tmpdir(), `clideck-next-${process.pid}-${randomUUID()}.json`);
