@@ -40,3 +40,20 @@ test('provider PTY environment excludes inherited Claude nesting state', () => {
     }
   }
 });
+
+test('explicitly configured launch env keeps CLAUDE_CODE_ settings', () => {
+  const originalSpawn = nativePty.spawn;
+  let captured;
+  try {
+    nativePty.spawn = (file, args, options) => { captured = options; return {}; };
+    spawn('claude', [], {
+      env: { CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_CODE_SESSION_ID: 'parent' },
+      keepEnv: ['CLAUDE_CODE_USE_BEDROCK'],
+    });
+    assert.equal(captured.env.CLAUDE_CODE_USE_BEDROCK, '1');
+    assert.equal(Object.hasOwn(captured.env, 'CLAUDE_CODE_SESSION_ID'), false);
+    assert.equal(Object.hasOwn(captured, 'keepEnv'), false);
+  } finally {
+    nativePty.spawn = originalSpawn;
+  }
+});
