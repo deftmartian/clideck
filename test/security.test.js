@@ -256,3 +256,11 @@ test('malformed controls close only their client and leave the engine available'
   healthyClient.close();
   assert.equal((await fetch(`${address.httpUrl}/`)).status, 200);
 });
+
+test('explicit gateway origin must match Host and cannot authorize another origin', () => {
+ const gateway='https://clideck.example';
+ assert.equal(isAllowedWebSocketOrigin(gateway,'clideck.example','127.0.0.1',gateway),true);
+ assert.equal(isAllowedWebSocketOrigin('https://other.example','other.example','127.0.0.1',gateway),false);
+ assert.equal(isAllowedWebSocketOrigin(gateway,'other.example','127.0.0.1',gateway),false);
+ assert.equal(hasValidControlFields({type:'session.subscribe',id:'one',cols:80,rows:24,cursor:{generation:'g',seq:-1}}),false);
+});

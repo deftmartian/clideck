@@ -105,3 +105,12 @@ test('structured provider telemetry preserves its precision marker', () => {
   assert.equal(usage.percent, 25);
   assert.equal(usage.estimated, true);
 });
+
+test('Codex resume model comes from newest turn metadata without token usage',t=>{
+ const {readLatestCodexModel}=require('../src/context-usage');
+ const dir=mkdtempSync(join(tmpdir(),'codex-model-test-'));t.after(()=>rmSync(dir,{recursive:true,force:true}));
+ const path=join(dir,'rollout.jsonl');
+ writeFileSync(path,[{type:'turn_context',payload:{model:'old-model'}},{type:'response_item',payload:{model:'not-turn-metadata'}},{type:'turn_context',payload:{model:'current-model'}}].map(x=>JSON.stringify(x)).join('\n')+'\n{"partial":');
+ assert.equal(readLatestCodexModel(path),'current-model');
+ const models=[];const stop=watchCodexContext(path,()=>assert.fail('no usage expected'),{onModel:model=>models.push(model)});stop();assert.deepEqual(models,['current-model']);
+});

@@ -39,7 +39,7 @@ const claudeProvider = {
       transcriptPath,
     };
   },
-  createLaunch({ command, port, sessionId, resumeHandle, agentGuide, extraArgs = [], serverUrl }) {
+  createLaunch({ command, port, sessionId, resumeHandle, agentGuide, extraArgs = [], serverUrl, hookToken }) {
     const settingsPath = createClaudeSettings(port, sessionId, serverUrl);
     const args = ['--settings', settingsPath];
     if (!hasClaudeSystemPrompt(command, extraArgs)) {
@@ -50,6 +50,7 @@ const claudeProvider = {
       command: command || this.command,
       args,
       cleanup: () => removeClaudeSettings(settingsPath),
+      env: { CLIDECK_HOOK_TOKEN: hookToken || '' },
     };
   },
 };

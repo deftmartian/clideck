@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <script>
 /* no-FOUC theme pre-stamp: resolve auto|light|dark and stamp <html> before first paint */
 (function(){try{var p=localStorage.getItem('clideck.theme');
@@ -17,8 +17,13 @@ if(w>=240&&w<=560)document.documentElement.style.setProperty('--sidebar-w',w+'px
 <link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180">
 <link rel="stylesheet" href="/vendor/xterm.css">
 <link rel="stylesheet" href="/css/app.css">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icons/clideck-apple-180.png">
+<link rel="stylesheet" href="/css/fork-mobile.css">
+<link rel="stylesheet" href="/css/files.css">
 </head>
 <body>
+<div id="pwa-update-banner" hidden><span id="pwa-update-message"></span><button id="pwa-update-action">Prepare update</button><button id="pwa-update-dismiss">Later</button></div>
 <!-- stale/outdated-engine banner — shown by ws.js after repeated instant socket closes (see store 'stale' event) -->
 <div class="engine-banner" id="engine-banner" role="alert" hidden>
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
@@ -113,6 +118,7 @@ if(w>=240&&w<=560)document.documentElement.style.setProperty('--sidebar-w',w+'px
         </div>
         <div class="th-div" aria-hidden="true"></div>
         <div class="th-actions">
+          <button class="th-history" id="th-files" title="Files" aria-label="Files">▤</button>
           <button class="th-history" id="th-history" title="Conversation history" aria-label="Conversation history">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/></svg>
           </button>
@@ -130,6 +136,7 @@ if(w>=240&&w<=560)document.documentElement.style.setProperty('--sidebar-w',w+'px
       <div class="cd-tabs" id="pane-tabs" role="tablist"></div>
       <div class="pane-body" id="pane-body">
       <div class="term-frame" id="term-panel" role="tabpanel">
+        <div id="history-retention" class="history-retention" role="status" hidden></div>
         <div id="term"></div>
         <button class="scroll-btn" id="scroll-btn" title="Jump to latest" aria-label="Jump to latest">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>

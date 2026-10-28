@@ -8,14 +8,71 @@
 
   ⚠️ THIS RUNS IN A SANDBOXED, OPAQUE ORIGIN (`sandbox="allow-scripts allow-forms allow-downloads"` — no
   allow-same-origin). So it cannot import CliDeck's ES modules, and it does not try to. What it CAN do is load
-  a plain stylesheet, which is why it links the host's own app.css and then emits exactly the class names the
-  host's diff renderer emits (.diff / .diff-grid / .diff-row add|del|ctx|hunk / .diff-gutter / .diff-code).
-  That is the reuse that matters here: one visual language, one set of tokens, no second diff library.
+  styles embedded in this document. A separate CSS request can fail behind the authenticated
+  gateway because this frame has an opaque origin. Shared theme and diff rules are embedded below,
+  generated from app.css; the client build checks they stay in sync. No separate CSS request is needed.
 
   Everything crosses the boundary by postMessage: `clideck.ready` up, `clideck.init` / `clideck.message` /
   `clideck.theme` / `clideck.visible` down, and `clideck.send` up to reach the plugin's server half.
 -->
-<link rel="stylesheet" href="/css/app.css">
+<!-- BEGIN SHARED GIT STYLES -->
+<!-- Generated from public/css/app.css by tools/sync-git-styles.js. -->
+<style>
+:root {
+  /* chrome depth re-tuned to v1's family (13a): was near-black (#08–0d); now a warm-neutral charcoal like
+     v1's sidebar #161717 / surfaces, with the terminal gutter matching the mocha default (#1e1e2e). */
+  --bg:#191a1e; --bg-side:#141519; --term-bg:#1e1e2e;
+  --surface-1:#212229; --surface-2:#292b33; --surface-3:#33353f;
+  --border:rgba(255,255,255,.07); --border-strong:rgba(255,255,255,.13);
+  --text:#e9eaee; --dim:#a1a4ad; --faint:#686b74;
+  --accent:#e18063; --accent-ink:#1a0d09; --accent-soft:rgba(225,128,99,.14); --accent-glow:rgba(225,128,99,.35);
+  --working:#e6b04a; --idle:#74b98f; --danger:#e06a6a;
+  /* theming tokens — dark values; the light block below overrides them (these were hardcoded literals) */
+  --accent-deep:#c25a3c;
+  --hairline:rgba(255,255,255,.07); --fill-subtle:rgba(255,255,255,.14); --fill-strong:rgba(255,255,255,.2);
+  --shadow:rgba(0,0,0,.45); --avatar-a:#33363f; --avatar-b:#212329; --avatar-ink:#c7cad2;
+  --tour-dim:rgba(6,6,9,.62);
+  --mono:"SF Mono","JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","Inter",Roboto,sans-serif;
+}
+:root[data-theme="light"] {
+  /* light chrome re-tuned to v1's family (13a): was a near-white warm off-white (#faf9f7) that read stark;
+     now a soft cool-gray like v1's base #edeef1 / sidebar #f9fafa, terminal gutter = github-light #f6f8fa. */
+  --bg:#ebedf0; --bg-side:#f6f7f9; --term-bg:#f6f8fa;
+  --surface-1:#f1f2f5; --surface-2:#e7e9ed; --surface-3:#dee1e6;
+  --border:rgba(28,24,20,.10); --border-strong:rgba(28,24,20,.17);
+  --text:#1b1c20; --dim:#5c5f66; --faint:#7c7f86;
+  --accent:#b3452a; --accent-ink:#fff8f4; --accent-soft:rgba(179,69,42,.10); --accent-glow:rgba(179,69,42,.22);
+  --working:#8c610e; --idle:#2f7d55; --danger:#b5342a;
+  --accent-deep:#9c3a22;
+  --hairline:rgba(28,24,20,.07); --fill-subtle:rgba(28,24,20,.12); --fill-strong:rgba(28,24,20,.26);
+  --shadow:rgba(60,45,35,.18); --avatar-a:#e7e3dd; --avatar-b:#dad5cd; --avatar-ink:#4c4f57;
+  --tour-dim:rgba(30,26,22,.42);
+  /* provider identity — distinct branded chips (light): saturated tint disc, deep same-hue ink glyph */
+  --pv-claude-a:#f6d8c9; --pv-claude-b:#f0c1ac; --pv-claude-ink:#a2482a;   /* Anthropic clay — warm */
+  --pv-antigravity-a:#dddafa; --pv-antigravity-b:#c9d8f4; --pv-antigravity-ink:#51469e; /* antigravity orbital indigo */
+  --pv-codex-a:#cde9d4;  --pv-codex-b:#b6ddc0;  --pv-codex-ink:#2c6b3e;   /* codex green */
+  --pv-gemini-a:#d5e2f9; --pv-gemini-b:#c1d0f2; --pv-gemini-ink:#2c50ab;  /* Gemini blue */
+  --pv-opencode-a:#c9e8ea; --pv-opencode-b:#b1dddf; --pv-opencode-ink:#1b5e64;  /* opencode teal */
+  --pv-pi-a:#eed6f1;     --pv-pi-b:#e1c1e4;     --pv-pi-ink:#7b3d83;      /* pi plum-mauve */
+  --pv-shell-a:#e6e8eb;  --pv-shell-b:#d7dade;  --pv-shell-ink:#464b52;   /* neutral graphite — the deliberate non-provider treatment */
+}
+* { box-sizing:border-box; margin:0; padding:0; }
+body { font-family:var(--sans); background:var(--bg); color:var(--text); font-size:14px; line-height:1.6; -webkit-font-smoothing:antialiased; overflow:hidden; }
+/* diff */
+.diff { padding:12px; font-family:var(--mono); font-size:12px; }
+.diff-grid { border:1px solid var(--border); border-radius:9px; overflow:hidden; }
+.diff-row { display:grid; grid-template-columns:44px 44px 1fr; align-items:stretch; }
+.diff-gutter { padding:1px 8px; text-align:right; color:var(--faint); background:var(--surface-1); user-select:none; border-right:1px solid var(--border); }
+.diff-code { padding:1px 12px; white-space:pre-wrap; word-break:break-word; }
+.diff-row.add { background:color-mix(in srgb, var(--idle) 15%, transparent); }
+.diff-row.add .diff-code { color:color-mix(in srgb, var(--idle) 92%, var(--text)); }
+.diff-row.del { background:color-mix(in srgb, var(--danger) 13%, transparent); }
+.diff-row.del .diff-code { color:color-mix(in srgb, var(--danger) 90%, var(--text)); }
+.diff-row.hunk { background:var(--surface-1); } .diff-row.hunk .diff-code { color:var(--accent); }
+
+</style>
+<!-- END SHARED GIT STYLES -->
 <style>
   html, body { height:100%; }
   body { margin:0; background:var(--bg-side); color:var(--text); font-family:var(--sans); font-size:13px; display:flex; flex-direction:column; }
@@ -37,6 +94,15 @@
   .note li { margin:2px 0; font-family:var(--mono); font-size:11.5px; }
   .empty { display:grid; place-items:center; height:100%; color:var(--faint); text-align:center; padding:24px; }
   .empty div { max-width:34ch; line-height:1.6; }
+  .file-nav{display:flex;gap:6px;padding:6px 12px;border-bottom:1px solid var(--border);align-items:center;flex-wrap:wrap}
+  .file-nav select{flex:1;min-width:0;max-width:100%;min-height:44px;background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px}
+  .file-nav button{min-height:44px;padding:6px 10px;background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:8px}
+  .diff-file{margin:8px 0}.diff-file summary{cursor:pointer;padding:12px 8px;min-height:44px;overflow-wrap:anywhere;color:var(--text);background:var(--surface-1);font:12px var(--mono)}
+  .diff-file .diff{padding:0}.diff-grid{overflow:auto}.no-wrap .diff-code{white-space:pre;word-break:normal}.no-wrap .diff-row{min-width:max-content}
+  @media(max-width:620px),(pointer:coarse){
+    .bar{gap:6px;padding:6px}.bar button.act,.bar select,.seg button{min-height:44px;height:auto}.bar select{max-width:100%;min-width:0;flex:1 1 180px}.where{max-width:100%;width:100%;white-space:normal;overflow-wrap:anywhere}
+    .diff{padding:0 5px}.diff-row{grid-template-columns:30px 30px minmax(0,1fr)}.diff-gutter{padding:2px 3px;font-size:10px}.diff-code{padding:2px 5px;font-size:12px;line-height:1.5}.file-nav{padding:6px}.scroll{overscroll-behavior:contain}
+  }
 </style>
 </head>
 <body>
@@ -51,6 +117,7 @@
     <div class="spacer"></div>
     <div class="where" id="where"></div>
   </div>
+  <div class="file-nav"><select id="files" aria-label="Changed files"><option>No files</option></select><button type="button" id="wrap" aria-pressed="true">Wrap lines</button></div>
   <div class="scroll" id="scroll"><div class="empty"><div>Reading this folder…</div></div></div>
 
 <script>
@@ -168,6 +235,7 @@
     worktrees(payload.worktrees, payload.repoRoot);
 
     if (payload.ok === false) {
+      fileSelect.replaceChildren();fileSelect.disabled=true;
       copyBtn.hidden = true;
       const bad = node('div', 'note bad');
       bad.append(node('h4', null, 'Could not read this folder'), node('div', null, String(payload.error || 'Unknown error.')));
@@ -181,6 +249,7 @@
     // ⚠️ "No changes" IS A CLAIM, and it is false whenever something was left out. A file omitted for size,
     // a worktree that could not be read — any of those and this says what it could not see instead.
     if (!patch.trim() && !warnings.length) {
+      fileSelect.replaceChildren();fileSelect.disabled=true;
       copyBtn.hidden = true;
       const done = node('div', 'empty');
       done.appendChild(node('div', null, scope === 'base'
@@ -214,7 +283,11 @@
     copyBtn.hidden = !patch.trim();
     copyBtn.textContent = warnings.length ? 'Copy preview' : 'Copy patch';
 
+    const scrollTop=scrollEl.scrollTop;
     scrollEl.replaceChildren(...parts);
+    scrollEl.scrollTop=scrollTop;
+    fileSelect.replaceChildren(...[...scrollEl.querySelectorAll('details')].map(section=>new Option(section.dataset.file,section.dataset.file)));
+    fileSelect.disabled=!fileSelect.options.length;
   }
 
   function worktrees(list, payloadRoot) {
@@ -241,7 +314,7 @@
 
   // The host's own diff markup, emitted here because a sandboxed page cannot import the host's module. The
   // class names ARE the contract: app.css paints them, so this stays in step with the rest of the app.
-  function renderDiff(src) {
+  function renderFileDiff(src) {
     const root = node('div', 'diff');
     const grid = node('div', 'diff-grid'); root.appendChild(grid);
     const row = (cls, oldLine, newLine, text) => {
@@ -252,7 +325,7 @@
     let oln = 0, nln = 0;
     for (const raw of String(src).replace(/\r\n?/g, '\n').split('\n')) {
       if (/^(diff |index |old mode|new mode|similarity |rename |deleted file|new file|--- |\+\+\+ )/.test(raw)) {
-        if (/^diff /.test(raw)) row('hunk', '', '', raw.replace(/^diff --git a\/\S+ b\//, ''));
+        // File name is already the collapsible section heading.
         continue;
       }
       const hunk = raw.match(/^@@\s*-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s*@@(.*)$/);
@@ -264,6 +337,21 @@
     }
     return root;
   }
+
+  const closedFiles=new Set(),fileSelect=el('files');
+  function renderDiff(src){
+    const root=node('div','diff-files');
+    for(const patch of String(src).split(/(?=^diff --git )/m).filter(Boolean)){
+      const header=patch.split('\n')[0],name=header.replace(/^diff --git a\/\S+ b\//,'');
+      const section=node('details','diff-file');section.dataset.file=name;section.open=!closedFiles.has(header);
+      section.append(node('summary','',name),renderFileDiff(patch));
+      section.addEventListener('toggle',()=>{if(section.open)closedFiles.delete(header);else closedFiles.add(header);});
+      root.append(section);
+    }
+    return root;
+  }
+  fileSelect.addEventListener('change',()=>{const section=[...scrollEl.querySelectorAll('details')].find(el=>el.dataset.file===fileSelect.value);if(section){section.open=true;section.scrollIntoView({block:'start'});}});
+  el('wrap').addEventListener('click',()=>{const off=document.body.classList.toggle('no-wrap');el('wrap').setAttribute('aria-pressed',String(!off));});
 
   // ── controls ────────────────────────────────────────────────────────────────
   scopeBar.addEventListener('click', (event) => {

@@ -1,4 +1,5 @@
 const { randomUUID } = require('crypto');
+const { readText } = require('./files');
 const {
   createReadStream,
   existsSync,
@@ -214,7 +215,14 @@ class ContentStore {
   }
 
   async addOpenFile(sessionId, filePath) {
-    const content = await resolveFilePath(filePath);
+    let content;
+    try { content = await resolveFilePath(filePath); }
+    catch (error) {
+      if (error.code !== 'unsupported_type') throw error;
+      content = await resolveFilePath(filePath, 'text');
+      // User-opened source/extensionless files may use the text viewer; reject binary/large fallbacks.
+      await readText(content.path);
+    }
     return this.store(sessionId, { ...content, source: 'file', scope: 'user' });
   }
 

@@ -99,6 +99,16 @@ function contextUsage(value) {
 // The engine sends the active model as a string, or null when it does not know. Unknown stays EMPTY and the
 // header simply shows nothing — a guessed model name would be worse than an absent one.
 function modelName(value) { return typeof value === "string" ? value.trim().slice(0, 64) : ""; }
+function retentionFrom(event) {
+  const value = event && event.historyRetention;
+  if (!value || (value.state !== "truncated" && value.state !== "uncertain")) return null;
+  if (typeof value.message !== "string" || !value.message || value.message.length > 600) return null;
+  return { state: value.state, limit: Number(value.limit) || 0, bytes: Number(value.bytes) || 0, message: value.message };
+}
+function applyRetention(session, event) {
+  if (!event || !hasOwn(event, "historyRetention")) return;
+  session.historyRetention = retentionFrom(event);
+}
 function applySessionTelemetry(session, event) {
   if (hasOwn(event, "contextUsage")) session.contextUsage = contextUsage(event.contextUsage);
   if (hasOwn(event, "lastAgentAt")) session.lastAgentAt = epochMs(event.lastAgentAt);
@@ -131,12 +141,14 @@ function makeSession(ev) {
     status: null, menu: [], menuContext: "", latestAgent: "", lastAgentMessage: "",
     contextUsage: contextUsage(ev.contextUsage), lastAgentAt: epochMs(ev.lastAgentAt), model: modelName(ev.model),
     muted: ev.muted === true,
+    nativeScroll: ev.nativeScroll === true,
     bracketedPaste: typeof ev.bracketedPaste === "boolean" ? ev.bracketedPaste : null,
     workStartedAt: 0,
     // The ENGINE's last-activity stamp (persistence.js `lastActive`), epoch ms, or null when it did not send
     // one. Kept SEPARATE from lastActivity, which this client stamps: a dormant row must show a real time or
     // no time, never "now" for a session that has been asleep for a week.
     lastActive: engineActive(ev),
+    historyRetention: retentionFrom(ev),
     unread: 0, closed: false, lastActivity: engineActive(ev) || Date.now(), outputBuf: "",
     // derived needs-you / attention flag — computed in ONE place
     get attention() { return this.status === "idle" && this.menu.length > 0; },
@@ -163,6 +175,11 @@ function applyEvent(ev) {
   switch (ev.type) {                                  // session-less broadcasts (no sessionId)
     case "archive.status": archiveStatus = { ...ev }; emit("archive.status", archiveStatus); return;
     case "engine.update": engineUpdate = { ...ev }; emit("engine.update", engineUpdate); return;
+    case "config.update.result":
+      if (ev.success === false) emit("config:updateFailed", ev);
+      return;
+    case "config.recover.result":
+      emit("config:recovered", ev); return;
     case "config": {
       const c = ev.config || {};
       archive = { enabled: c.archive?.enabled === true, directory: typeof c.archive?.directory === "string" ? c.archive.directory : "" };
@@ -243,7 +260,9 @@ function applyEvent(ev) {
         known.lastActive = engineActive(ev) || known.lastActive;
         known.muted = ev.muted === true;
         if (typeof ev.bracketedPaste === "boolean") known.bracketedPaste = ev.bracketedPaste;
+        if (typeof ev.nativeScroll === "boolean") known.nativeScroll = ev.nativeScroll;
         known.projectId = ev.projectId || null;
+        applyRetention(known, ev);
         emit("session:update", known.id);
       }
       // content.open rides the same snapshot+error channel, so it MUST be routed explicitly: the catch-all below
@@ -253,6 +272,7 @@ function applyEvent(ev) {
       else if (op.endsWith("setProject")) emit("session:setProjectRejected", ev.sessionId, ev.error);   // name_conflict | unknown_project
       else if (op.endsWith("rename")) emit("session:renameRejected", ev.sessionId, ev.error.value || "");
       else if (op.endsWith("restart")) emit("session:restartFailed", ev.sessionId, ev.error.message || "");   // respawn failed → row already went dormant above
+      else if (op.endsWith("resume")) emit("session:resumeFailed", ev.sessionId, ev.error.message || "");
       else { pendingLocalCreate = false; emit("session:createRejected", ev.error.message || "That name is already taken in this project.", ev.error); }   // our create bounced → disarm the focus one-shot
       return;
     }
@@ -265,7 +285,9 @@ function applyEvent(ev) {
       known.lastActive = engineActive(ev) || known.lastActive;
       known.muted = ev.muted === true;   // mute toggles arrive as a session.created re-broadcast
       if (typeof ev.bracketedPaste === "boolean") known.bracketedPaste = ev.bracketedPaste;
+        if (typeof ev.nativeScroll === "boolean") known.nativeScroll = ev.nativeScroll;
       known.projectId = ev.projectId || null;   // setProject re-broadcasts the snapshot with the new projectId
+      applyRetention(known, ev);
       emit("session:update", known.id);
     }
     // Focus on create: a brand-new LIVE session THIS client just asked for (ws.createSession armed the one-shot)
@@ -275,7 +297,12 @@ function applyEvent(ev) {
     else if (activeId == null && ev.live !== false) select(ev.sessionId);   // else auto-open the first LIVE session (don't force a dormant one)
     emit("chrome"); return;
   }
+  if (ev.type === "session.notice") { emit("session:notice", ev); return; }
   const s = sessions.get(ev.sessionId);
+  if (ev.type === "session.historyRetention") {
+    if (s) { applyRetention(s, ev); emit("session:update", s.id); }
+    return;
+  }
   if (!s) return;                                  // event for a session we don't track
   s.lastActivity = Date.now();
   const active = activeId === s.id;
@@ -304,7 +331,7 @@ function applyEvent(ev) {
       if (!active) s.unread += 1;                   // unread = final while unfocused
       emit("session:update", s.id); emit("chrome"); break;
     case "menu": s.menu = ev.choices || []; s.menuContext = ev.context || ""; emit("session:update", s.id); break;
-    case "output": appendBuf(s, ev.data); emit("session:output", s.id, ev.data, ev.replay === true); break;
+    case "output": appendBuf(s, ev.data); emit("session:output", s.id, ev.data, ev.replay === true, ev.parsed); break;
     // turn.user is intentionally ignored — the terminal already echoes what you type.
   }
 }

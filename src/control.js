@@ -8,6 +8,8 @@ const CONTROL_TYPES = new Set([
   'engine.update.check',
   'engine.update.install',
   'session.create',
+  'session.history.get',
+  'session.subscribe', 'session.unsubscribe', 'session.ack', 'session.claimResize', 'transcript.cache.get',
   'prompt',
   'prompt.answer',
   'prompt.cancel',
@@ -29,6 +31,7 @@ const CONTROL_TYPES = new Set([
   'transcript.page',
   'config.get',
   'config.update',
+  'config.recover',
   'checkAvailability',
   'plugins.refresh',
   'plugin.install',
@@ -71,7 +74,22 @@ function hasValidControlFields(message) {
     return Object.keys(message).length === 1;
   }
   if (message.type === 'config.get') return hasValidRequestId(message);
+  if (message.type === 'config.recover') return hasValidRequestId(message)
+    && Object.keys(message).every((key) => key === 'type' || key === 'requestId');
   if (message.type === 'checkAvailability') return true;
+  if (message.type === 'transcript.cache.get') return true;
+  if (['session.subscribe', 'session.unsubscribe', 'session.ack', 'session.claimResize'].includes(message.type)) {
+    if (!isString(message.id, 200)) return false;
+    if (message.type === 'session.subscribe') return isDimension(message.cols, 20, 500)
+      && isDimension(message.rows, 5, 300)
+      && (message.claim === undefined || typeof message.claim === 'boolean')
+      && (message.cursor === undefined || (message.cursor && isString(message.cursor.generation, 200)
+        && Number.isSafeInteger(message.cursor.seq) && message.cursor.seq >= 0));
+    if (message.type === 'session.ack') return Number.isSafeInteger(message.streamId) && message.streamId >= 0
+      && isString(message.generation, 200)
+      && ((Number.isSafeInteger(message.seq) && message.seq >= 0) || (Number.isSafeInteger(message.part) && message.part >= 0));
+    return true;
+  }
   if (message.type === 'plugins.refresh' || message.type === 'plugin.openFolder') {
     return hasValidRequestId(message);
   }
@@ -111,13 +129,16 @@ function hasValidControlFields(message) {
   if (message.type === 'dirs.mkdir') {
     return isString(message.parent, 4096) && isString(message.name, 255, true);
   }
+  if (message.type === 'session.history.get') return typeof message.sessionId === 'string' && message.sessionId.length <= 200
+    && typeof message.requestId === 'string' && message.requestId.length <= 100;
   if (message.type === 'session.create') {
+    if (message.touchUi !== undefined && typeof message.touchUi !== 'boolean') return false;
     return (message.provider === undefined || isString(message.provider, 100))
       && (message.commandId === undefined || isString(message.commandId, 100))
       && (message.name === undefined || isString(message.name, 200, true))
       && (message.cwd === undefined || isString(message.cwd, 4096))
-      && (message.cols === undefined || isDimension(message.cols, 20, 1000))
-      && (message.rows === undefined || isDimension(message.rows, 5, 500))
+      && (message.cols === undefined || isDimension(message.cols, 20, 500))
+      && (message.rows === undefined || isDimension(message.rows, 5, 300))
       && (message.theme === undefined || isTheme(message.theme))
       && (message.projectId === undefined || isProjectId(message.projectId));
   }
@@ -146,10 +167,17 @@ function hasValidControlFields(message) {
   if (message.type === 'content.close') return isString(message.contentId, MAX_SESSION_ID);
   if (message.type === 'prompt') return isString(message.text, MAX_CONTROL_TEXT);
   if (message.type === 'input') {
-    return typeof message.data === 'string' && message.data.length <= MAX_CONTROL_TEXT;
+    const data = typeof message.data === 'string' && message.data.length <= MAX_CONTROL_TEXT;
+    const frames = Array.isArray(message.frames) && message.frames.length > 0 && message.frames.length <= 33
+      && typeof message.submit === 'boolean'
+      && message.frames.every(frame => typeof frame === 'string' && frame.startsWith('\x1b[200~') && frame.endsWith('\x1b[201~'))
+      && message.frames.reduce((bytes, frame) => bytes + Buffer.byteLength(frame), 0) <= 66 * 1024;
+    const paths = message.paths === undefined || (Array.isArray(message.paths) && message.paths.length <= 32
+      && message.paths.every(path => isString(path,8192)) && isString(message.requestId,100));
+    return paths && (data || frames);
   }
   if (message.type === 'resize') {
-    return isDimension(message.cols, 20, 1000) && isDimension(message.rows, 5, 500);
+    return isDimension(message.cols, 20, 500) && isDimension(message.rows, 5, 300);
   }
   if (message.type === 'session.rename') return isString(message.name, 200, true);
   if (message.type === 'session.resume') {
@@ -157,8 +185,8 @@ function hasValidControlFields(message) {
   }
   if (message.type === 'session.restart') {
     return (message.theme === undefined || isTheme(message.theme))
-      && (message.cols === undefined || isDimension(message.cols, 20, 1000))
-      && (message.rows === undefined || isDimension(message.rows, 5, 500));
+      && (message.cols === undefined || isDimension(message.cols, 20, 500))
+      && (message.rows === undefined || isDimension(message.rows, 5, 300));
   }
   if (message.type === 'session.mute') return typeof message.muted === 'boolean';
   if (message.type === 'session.setProject') return isProjectId(message.projectId);

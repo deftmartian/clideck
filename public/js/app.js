@@ -1,5 +1,11 @@
 import { initArchiveStatus } from "./ui/archive-status.js";
+import { initFiles } from "./ui/files.js";
 import { initUpdates } from "./ui/updates.js";
+import { initMobile } from './fork-mobile.js';
+import { registerPwa } from './pwa.js';
+import { initClipboard } from './fork-clipboard.js';
+import { initHistoryRetention } from './ui/history-retention.js';
+import { initConfigRecovery } from './ui/config-recovery.js';
 // Bootstrap: wire the store to the components and open the socket.
 import { initSidebar } from "./ui/sidebar.js";
 import { initSidebarResize } from "./ui/sidebar-resize.js";
@@ -31,4 +37,10 @@ initDrop();            // R2: drag a file onto the deck → upload → path past
 initVoice();           // plugin-owned dictation + the bundled Supertonic auto-read control
 initPluginHost();      // sandboxed client workers + host-owned actions/viewers/workspaces
 initTour();            // first-run walkthrough + unseen feature tips — decides ONCE, on the first config frame
+initMobile();
+initFiles();
+initClipboard();
+initHistoryRetention();
+initConfigRecovery();
+registerPwa();
 connectWs();

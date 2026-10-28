@@ -65,13 +65,13 @@ function sessionDefinition(v) {
   requireValid(object(v) && id(v.id) && id(v.provider) && text(v.cwd) && v.cwd.length > 0,
     'Invalid session in backup.');
   const out = { id: v.id, provider: v.provider, cwd: v.cwd };
-  for (const key of ['name', 'resumeHandle', 'transcriptPath', 'commandLabel', 'createdAt', 'lastActive']) {
+  for (const key of ['name', 'resumeHandle', 'transcriptPath', 'commandLabel', 'createdAt', 'lastActive', 'workerWorktree']) {
     if (v[key] !== undefined) {
       requireValid(text(v[key]));
       out[key] = v[key];
     }
   }
-  for (const key of ['commandId', 'projectId']) {
+  for (const key of ['commandId', 'projectId', 'spawnedBySessionId']) {
     if (v[key] !== undefined && v[key] !== null) requireValid(id(v[key]));
     if (v[key] !== undefined) out[key] = v[key];
   }

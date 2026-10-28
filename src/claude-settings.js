@@ -22,6 +22,7 @@ function createClaudeSettings(port, sessionId, serverUrl = '') {
     hooks: {
       UserPromptSubmit: [hook('start')],
       Stop: [hook('stop')],
+      StopFailure: [hook('stop-failure')],
       SessionStart: [hook('session-start')],
       SessionEnd: [hook('session-end')],
       PreToolUse: [hook('menu')],

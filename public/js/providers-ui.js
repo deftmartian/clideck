@@ -77,11 +77,15 @@ function piMark() {
   );
 }
 
+function grokMark() {
+  return svgEl('<circle cx="12" cy="12" r="7.8" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M5 19L19 5M12 12l6 7" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"/>');
+}
 const DEFAULT_ID = "claude-code";
 const PROVIDERS = {
   "claude-code": { id: "claude-code", label: "Claude",   cls: "pv-claude-code", terms: "claude", mark: claudeMark },
   "antigravity": { id: "antigravity", label: "Antigravity", cls: "pv-antigravity", terms: "antigravity agy", mark: antigravityMark },
   "codex":       { id: "codex",       label: "Codex",    cls: "pv-codex",       terms: "codex",  mark: codexMark },
+  "grok": { id: "grok", label: "Grok", cls: "pv-grok", terms: "grok xai", mark: grokMark },
   "gemini":      { id: "gemini",      label: "Gemini",   cls: "pv-gemini",      terms: "gemini google", mark: geminiMark },
   "opencode":    { id: "opencode",    label: "OpenCode", cls: "pv-opencode",    terms: "opencode oc", mark: opencodeMark },
   "pi":          { id: "pi",          label: "Pi",       cls: "pv-pi",          terms: "pi", mark: piMark },
@@ -89,7 +93,7 @@ const PROVIDERS = {
 };
 
 // Ordered for the new-session picker — default first, AI agents grouped, plain shell last.
-export const PROVIDER_LIST = [PROVIDERS["claude-code"], PROVIDERS["antigravity"], PROVIDERS["codex"], PROVIDERS["gemini"], PROVIDERS["opencode"], PROVIDERS["pi"], PROVIDERS["shell"]];
+export const PROVIDER_LIST = [PROVIDERS["claude-code"], PROVIDERS["antigravity"], PROVIDERS["codex"], PROVIDERS["gemini"], PROVIDERS["grok"], PROVIDERS["opencode"], PROVIDERS["pi"], PROVIDERS["shell"]];
 export const DEFAULT_PROVIDER = DEFAULT_ID;
 
 // Always resolves — a missing/unknown id falls back to claude-code (graceful vs a

@@ -18,6 +18,7 @@ process.stdin.on('end', () => {
     headers: {
       'Content-Type': 'application/json',
       'Content-Length': Buffer.byteLength(input),
+      'X-Clideck-Launch': process.env.CLIDECK_HOOK_TOKEN || '',
     },
     timeout: 2000,
   }, process.argv[5] || process.env.CLIDECK_URL);

@@ -27,6 +27,7 @@ function registrySession(id, cwd) {
 
 function fakeSocket(messages = []) {
   return {
+    readyState: 1,
     send(raw) {
       messages.push(JSON.parse(raw));
     },

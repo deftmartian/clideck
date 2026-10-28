@@ -1,13 +1,14 @@
 const { isIP } = require('net');
 
-function isAllowedWebSocketOrigin(origin, host, bindHost) {
+function isAllowedWebSocketOrigin(origin, host, bindHost, allowedOrigins = process.env.CLIDECK_ALLOWED_ORIGINS || '') {
   if (!origin) return true;
   if (typeof origin !== 'string' || typeof host !== 'string' || !host.trim()) return false;
   try {
     const parsed = new URL(origin);
     return (parsed.protocol === 'http:' || parsed.protocol === 'https:')
       && parsed.host.toLowerCase() === host.trim().toLowerCase()
-      && (!isLoopbackHost(bindHost) || isLoopbackHost(parsed.hostname));
+      && (!isLoopbackHost(bindHost) || isLoopbackHost(parsed.hostname)
+        || String(allowedOrigins).split(',').map(value => value.trim()).includes(parsed.origin));
   } catch {
     return false;
   }
