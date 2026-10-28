@@ -1,11 +1,16 @@
 // Connection presentation only. ws.js owns every retry and the active socket.
 let banner;
+let shown = '';
 export function connectionStatus(state, retry) {
   if (!banner) {
     banner = document.createElement('aside'); banner.className = 'connection-status';
     banner.setAttribute('role','status'); document.body.appendChild(banner);
   }
   banner.hidden = state === 'connected';
+  // Each retry reports 'connecting'; keep a diagnosis (and the focused button) on screen instead of flickering.
+  if (state === 'connecting' && shown && shown !== 'connecting' && shown !== 'connected') return;
+  if (state === shown) return;
+  shown = state;
   if (banner.hidden) return;
   const labels = {connecting:'Connecting…',offline:'You are offline. Drafts stay here.',auth:'Sign in again to reconnect.',incompatible:'CliDeck was updated. Reload this page.',unavailable:'Unable to reach CliDeck. Retrying…'};
   banner.replaceChildren(document.createTextNode(labels[state] || labels.unavailable));
