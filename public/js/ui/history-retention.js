@@ -1,14 +1,14 @@
 import { store } from "../store.js";
 
+// Long sessions routinely outgrow the stored terminal output cap. Say so in a header pill rather than
+// covering the terminal; the full explanation stays available on hover/focus.
 function paint() {
-  const banner = document.getElementById("history-retention");
-  const frame = document.getElementById("term-panel");
-  if (!banner || !frame) return;
-  const notice = store.active()?.historyRetention;
-  const text = notice?.message || "";
-  banner.hidden = !text;
-  banner.textContent = text;
-  frame.classList.toggle("has-history-notice", Boolean(text));
+  const pill = document.getElementById("history-retention");
+  if (!pill) return;
+  const text = store.active()?.historyRetention?.message || "";
+  pill.hidden = !text;
+  pill.title = text;
+  pill.setAttribute("aria-label", text ? `Older terminal output trimmed. ${text}` : "");
 }
 
 export function initHistoryRetention() {

@@ -855,10 +855,9 @@ body.resizing iframe { pointer-events:none; } /* Embedded documents must not tak
 }
 
 .term-frame { flex:1; position:relative; min-height:0; background:var(--term-bg); container-type:inline-size; }
-.history-retention { position:absolute; z-index:4; left:8px; right:8px; top:8px; max-height:4.5em; overflow:hidden;
-  padding:6px 8px; border:1px solid var(--border-strong); border-radius:6px; background:var(--surface-2); color:var(--text);
-  font-size:12px; line-height:1.35; }
-.term-frame.has-history-notice #term { top:58px; }
+/* Trimmed terminal output is routine for long sessions: a quiet header pill, with the details in its tooltip. */
+.th-trimmed { color:var(--faint); font:10.5px var(--mono); cursor:help; }
+.th-trimmed:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
 #term { position:absolute; inset:0; padding:16px 18px; }
 #term .xterm { height:100%; }
 #term .xterm-viewport::-webkit-scrollbar { width:9px; }
