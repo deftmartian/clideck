@@ -6,14 +6,14 @@ The v2 engine and plugin SDK replace v1; Autopilot is retired.
 
 ## Local upstream integration
 
-`rebase/upstream-2.5` is upstream 2.5.0 plus one fork commit, followed by the
-2.5.0-fork.8 changes. The fork commit was rebuilt from the installed
+`main` is the only fork branch: upstream 2.5.0 plus one fork commit, followed
+by the 2.5.0-fork.8 changes. The fork commit was rebuilt from the installed
 `2.4.0-fork.7` package and re-parented onto `70f6b9c`, the upstream commit it
 was built from, before rebasing onto 2.5.0. When rebasing again, rebase the
 fork commit range onto the new upstream release and bump `version` and
 `clideckUpstreamVersion` in `package.json`.
 
-`integration/v2` (`364f8b0`) imported the fork.7 package, which ships `src/`
+The former `integration/v2` branch (`364f8b0`) imported the fork.7 package, which ships `src/`
 but only the built `dist/public`, so its `public/` stayed at the 2.1.1-fork
 tree. The client sources here are the unbundled copies from fork.7's
 `dist/public`; rebuilding them reproduces fork.7's bundle byte for byte. Always
