@@ -64,7 +64,7 @@ test('unready workers receive no prompt and timed-out workers close and release 
 });
 
 test('server limits visible workers to three and refuses recursive spawning',async()=>{
-  const {manager,server}=fixture();
+  const {manager,server}=fixture({answer:false});
   const workers=await Promise.all([1,2,3].map(n=>manager.spawn({...request,name:`Worker ${n}`,wait:false})));
   assert.ok(workers.every(r=>r.ok));
   assert.equal((await manager.spawn({...request,wait:false})).error,'worker_limit');
@@ -82,4 +82,18 @@ test('server limits visible workers to three and refuses recursive spawning',asy
   assert.equal(worker.commandId,'codex-yolo');
   assert.equal(worker.commandLabel,'Codex Yolo');
   worker.close();
+});
+
+test('finished uncollected workers free their slot and close after the collection window',async()=>{
+  const {server}=fixture();
+  const manager=new WorkerManager(server,{finishedTtlMs:30});
+  const workers=await Promise.all([1,2,3].map(n=>manager.spawn({...request,name:`Worker ${n}`,wait:false})));
+  await new Promise(resolve=>setImmediate(resolve));
+  const fourth=await manager.spawn({...request,name:'Worker 4',wait:false});
+  assert.equal(fourth.ok,true);
+  const first=server.sessions.get(workers[0].sessionId);
+  assert.equal(first.closed,false);
+  await new Promise(resolve=>setTimeout(resolve,60));
+  assert.equal(first.closed,true);
+  assert.equal(first.removePersistenceOnClose,true);
 });
