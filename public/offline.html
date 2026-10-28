@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0f172a">
+  <title>CliDeck — server unavailable</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #020617;
+      color: #e2e8f0;
+    }
+    * { box-sizing: border-box; }
+    body {
+      min-height: 100vh;
+      min-height: 100dvh;
+      margin: 0;
+      display: grid;
+      place-items: center;
+      padding:
+        max(24px, env(safe-area-inset-top))
+        max(24px, env(safe-area-inset-right))
+        max(24px, env(safe-area-inset-bottom))
+        max(24px, env(safe-area-inset-left));
+      background:
+        radial-gradient(circle at 50% 20%, rgba(99, 102, 241, 0.14), transparent 38rem),
+        #020617;
+    }
+    main {
+      width: min(30rem, 100%);
+      padding: 2rem;
+      border: 1px solid #334155;
+      border-radius: 1.25rem;
+      background: rgba(15, 23, 42, 0.92);
+      box-shadow: 0 2rem 5rem rgba(0, 0, 0, 0.38);
+      text-align: center;
+    }
+    .mark {
+      display: grid;
+      place-items: center;
+      width: 4rem;
+      height: 4rem;
+      margin: 0 auto 1.25rem;
+      border-radius: 1rem;
+      background: #1e293b;
+      color: #c4b5fd;
+      font: 700 2rem/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    h1 { margin: 0; font-size: 1.25rem; }
+    p { margin: 0.75rem 0 0; color: #94a3b8; line-height: 1.55; }
+    .retry-link {
+      display: inline-block;
+      margin-top: 1.5rem;
+      padding: 0.7rem 1.1rem;
+      border: 1px solid #6366f1;
+      border-radius: 0.75rem;
+      background: #4f46e5;
+      color: white;
+      font: inherit;
+      font-weight: 650;
+      cursor: pointer;
+      text-decoration: none;
+    }
+    .retry-link:active { transform: translateY(1px); }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="mark" aria-hidden="true">&gt;_</div>
+    <h1>CliDeck cannot reach its server</h1>
+    <p>Your agents may still be running on the VM. Reconnect to the network or sign in again, then retry. Terminal input is never queued by this page.</p>
+    <a class="retry-link" href="/">Retry connection</a>
+  </main>
+</body>
+</html>

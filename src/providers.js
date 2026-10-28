@@ -1,6 +1,7 @@
 const { antigravityProvider } = require('./antigravity-provider');
 const { claudeProvider } = require('./claude-provider');
 const { codexProvider } = require('./codex-provider');
+const { grokProvider } = require('./fork/grok-provider');
 const { geminiProvider } = require('./gemini-provider');
 const { opencodeProvider } = require('./opencode-provider');
 const { piProvider } = require('./pi-provider');
@@ -11,6 +12,7 @@ const providers = new Map([
   [antigravityProvider.id, antigravityProvider],
   [codexProvider.id, codexProvider],
   [geminiProvider.id, geminiProvider],
+  [grokProvider.id, grokProvider],
   [opencodeProvider.id, opencodeProvider],
   [piProvider.id, piProvider],
   [shellProvider.id, shellProvider],

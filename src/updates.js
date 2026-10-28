@@ -1,14 +1,18 @@
 const { getUpdateStatus } = require('./update-check');
+const packageInfo = require('../package.json');
 const { createUpdateInstaller } = require('./update-install');
 
 const CHECK_INTERVAL = 6 * 60 * 60 * 1000;
 const RETRY_INTERVAL = 5 * 60 * 1000;
 
 class Updates {
-  constructor({ currentVersion = require('../package.json').version, check = getUpdateStatus,
+  constructor({ currentVersion = packageInfo.version,
+    upstreamVersion = currentVersion === packageInfo.version && packageInfo.clideckUpdatePolicy === 'local'
+      ? packageInfo.clideckUpstreamVersion : undefined, check = getUpdateStatus,
     installer = createUpdateInstaller(), onChange = () => {}, now = Date.now,
     schedule = setTimeout, cancel = clearTimeout } = {}) {
     this.currentVersion = currentVersion;
+    this.comparisonVersion = upstreamVersion || currentVersion;
     this.checkRegistry = check;
     this.installer = installer;
     this.onChange = onChange;
@@ -41,7 +45,7 @@ class Updates {
     this.checking = Promise.resolve().then(async () => {
       try {
         const [result, capability] = await Promise.all([
-          this.checkRegistry({ currentVersion: this.currentVersion }), this.installer.capability(),
+          this.checkRegistry({ currentVersion: this.comparisonVersion }), this.installer.capability(),
         ]);
         this.publish({ ...capability, ...result });
       } catch {

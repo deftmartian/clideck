@@ -86,6 +86,14 @@ function migrateLegacy({ dataDir, home = homedir(), legacyDir = join(home, '.cli
       ...([0, 10, 30].includes(legacy.notifyMinWork) && { minWorkSec: legacy.notifyMinWork }),
     };
   }
+  const oldVoice = legacy.pluginSettings?.['voice-input'] || legacy.plugins?.['voice-input'];
+  if (oldVoice && !config.plugins?.['voice-input']) {
+    const settings = oldVoice.settings || oldVoice;
+    merged.plugins = { ...(config.plugins || {}), 'voice-input': { enabled: settings.enabled === true || oldVoice.enabled === true, settings: {
+      backend: settings.backend || 'openai', 'openai-api-key': settings.openaiApiKey || '', language: settings.language || 'auto',
+      shortcut: settings.hotkey || 'F4', 'replacements-file': settings.replacementsFile || '',
+    } } };
+  }
   merged.sessionThemes = { ...(config.sessionThemes || {}) };
   const ids = new Set(sessions.map((session) => session.id));
   const imported = [];

@@ -229,3 +229,14 @@ test('Codex parser removes its footer and transient status', () => {
   assert.equal(codex.cleanAgentText('READY\n\ngpt-5.6-sol default · ~/project'), 'READY');
   assert.equal(codex.cleanAgentText('Working (2s • esc to interrupt)\n\nplaceholder'), '');
 });
+
+test('repeated screen reads stay isolated and invalidate on output and resize', () => {
+  const screen = new Screen(80, 8);
+  screen.write('Original\r\n');
+  screen.lines().push('Caller mutation');
+  assert.deepEqual(screen.lines(), ['Original']);
+  screen.write('Updated');
+  assert.deepEqual(screen.lines(), ['Original', 'Updated']);
+  screen.resize(20, 5);
+  assert.deepEqual(screen.lines(), ['Original', 'Updated']);
+});

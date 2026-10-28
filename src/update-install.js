@@ -5,6 +5,7 @@ const { dirname, join } = require('path');
 
 const REGISTRY = 'https://registry.npmjs.org';
 const PACKAGE_ROOT = join(__dirname, '..');
+const LOCAL_UPDATE_INSTRUCTION = 'This is a local fork. Build and verify a fork tarball, then coordinate installation and restart outside CliDeck.';
 
 function runNpm(node, cli, args, timeout = 10_000) {
   return new Promise((resolve, reject) => {
@@ -74,7 +75,12 @@ function npmCli(node) {
 function createUpdateInstaller({ root = PACKAGE_ROOT, node = process.execPath, run = runNpm,
   findNpm = npmCli } = {}) {
   const source = fs.existsSync(join(root, '.git'));
+  const localFork = () => {
+    try { return JSON.parse(fs.readFileSync(join(root, 'package.json'), 'utf8')).clideckUpdatePolicy === 'local'; }
+    catch { return false; } // target() still rejects missing or invalid metadata.
+  };
   async function target() {
+    if (localFork()) throw new Error(LOCAL_UPDATE_INSTRUCTION);
     if (source) throw new Error('source');
     if (JSON.parse(fs.readFileSync(join(root, 'package.json'), 'utf8')).name !== 'clideck') throw new Error('package');
     const cli = findNpm(node);
@@ -89,11 +95,13 @@ function createUpdateInstaller({ root = PACKAGE_ROOT, node = process.execPath, r
   }
   return {
     async capability() {
+      if (localFork()) return { canInstall: false, instruction: LOCAL_UPDATE_INSTRUCTION };
       if (source) return { canInstall: false, instruction: 'Update your source checkout, then restart CliDeck.' };
       try { await target(); return { canInstall: true }; }
       catch { return { canInstall: false, instruction: 'Run npm install -g clideck@latest, then restart CliDeck.' }; }
     },
     async install(version) {
+      if (localFork()) throw new Error(LOCAL_UPDATE_INSTRUCTION);
       if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)) throw new Error('Invalid update version.');
       try {
         const { cli, prefix } = await target();

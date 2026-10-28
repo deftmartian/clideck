@@ -21,9 +21,11 @@ class FakeTerminal {
   open(host) { const viewport = document.createElement("div"); viewport.className = "xterm-viewport"; host.appendChild(viewport); this.textarea = document.createElement("textarea"); host.appendChild(this.textarea); }
   attachCustomKeyEventHandler() {} onData() {} onScroll() {} onResize() { return { dispose() {} }; } registerLinkProvider() {} reset() {} clear() {}
   write(data, done) { this.writes.push({ data, done }); }
-  finish(index) { const done = this.writes[index]?.done; if (done) { this.writes[index].done = null; done(); } }
+  // Address OSC writes explicitly: terminal resets also use the parser queue now.
+  oscWrite(index) { return this.writes.filter(({ data }) => String(data).includes("\x1b]52;"))[index]; }
+  finish(index) { const write = this.oscWrite(index); const done = write?.done; if (done) { write.done = null; done(); } }
   async parse(index) {
-    const match = String(this.writes[index]?.data || "").match(/\x1b\]52;([^\x07]*)\x07/);
+    const match = String(this.oscWrite(index)?.data || "").match(/\x1b\]52;([^\x07]*)\x07/);
     return match ? this.osc52(match[1]) : false;
   }
   resize(cols, rows) { this.cols = cols; this.rows = rows; } scrollToBottom() {} focus() { this.textarea.focus(); }

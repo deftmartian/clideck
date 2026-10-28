@@ -118,7 +118,7 @@ test('ask target listings include identity, provider, and live state', () => {
   ]);
 });
 
-test('ask addressing resolves projects, local names, and global unique fallbacks', () => {
+test('ask addressing keeps local names scoped and requires explicit cross-project targets', () => {
   const projects = [
     { id: 'main', name: 'Main' },
     { id: 'other', name: 'Other' },
@@ -130,7 +130,8 @@ test('ask addressing resolves projects, local names, and global unique fallbacks
   const entries = [local, remote, unique];
 
   assert.equal(resolveAskTarget(entries, 'reviewer', { caller, projects }).entry.id, local.id);
-  assert.equal(resolveAskTarget(entries, 'Architect', { caller, projects }).entry.id, unique.id);
+  assert.equal(resolveAskTarget(entries, 'Architect', { caller, projects }).error, 'unknown_target');
+  assert.equal(resolveAskTarget(entries, '@Other/Architect', { caller, projects }).entry.id, unique.id);
   assert.equal(resolveAskTarget(entries, '@other/reviewer', { caller, projects }).entry.id, remote.id);
   assert.equal(resolveAskTarget(entries, '@MAIN/Reviewer', { caller, projects }).entry.id, local.id);
 });

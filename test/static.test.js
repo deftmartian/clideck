@@ -28,8 +28,9 @@ test('server exposes the app and xterm runtime assets', async (context) => {
   assert.equal(await unicode.text(), readFileSync(require.resolve('@xterm/addon-unicode11'), 'utf8'));
   const html = await app.text();
   const addonScript = html.indexOf('src="/vendor/addon-unicode11.js"');
+  // The fork serves the staged build when present: xterm is bundled and app.js becomes /build/app-<hash>.js.
   assert.ok(addonScript > html.indexOf('src="/vendor/xterm.js"'));
-  assert.ok(addonScript < html.indexOf('src="/js/app.js"'));
+  assert.ok(addonScript >= 0 && addonScript < html.indexOf('<script type="module"'));
 
   const mermaid = await fetch(`${httpUrl}/vendor/mermaid.js`);
   assert.equal(mermaid.status, 200);

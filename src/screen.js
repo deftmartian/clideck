@@ -39,6 +39,7 @@ class Screen {
     this.maxHistoryLines = Math.max(200, Number(maxHistoryLines));
     this.x = 0;
     this.y = 0;
+    this.cachedLines = null;
     this.history = [];
     this.screen = Array.from({ length: this.rows }, () => []);
     this.state = 'normal';
@@ -47,6 +48,7 @@ class Screen {
   }
 
   resize(cols, rows) {
+    this.cachedLines = null;
     this.cols = Math.max(20, Number(cols || this.cols));
     const nextRows = Math.max(5, Number(rows || this.rows));
     while (this.screen.length > nextRows) this.history.push(this.screen.shift() || []);
@@ -192,6 +194,7 @@ class Screen {
   }
 
   write(data) {
+    this.cachedLines = null;
     for (const character of Array.from(String(data || ''))) {
       if (this.state === 'osc') {
         if (character === '\x07') {
@@ -245,10 +248,12 @@ class Screen {
   }
 
   lines() {
+    if (this.cachedLines) return this.cachedLines.slice();
     const lines = [...this.history, ...this.screen]
       .map((row) => rowText(row).replace(/[ \t]+$/g, ''));
     while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
-    return lines.slice(-this.maxHistoryLines);
+    this.cachedLines = lines.slice(-this.maxHistoryLines);
+    return this.cachedLines.slice();
   }
 }
 

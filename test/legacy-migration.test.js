@@ -133,3 +133,16 @@ test('fresh and already-imported Claude, Gemini and Pi sessions launch with thei
     assert.equal(migrateLegacy(f), null); // a 2.0.1 migration marker must not prevent the fix
   }
 });
+
+test('fork voice settings migrate from pluginSettings without activating unrelated plugins', t => {
+  const f=fixture(t);
+  const config=JSON.parse(readFileSync(join(f.legacyDir,'config.json'),'utf8'));
+  config.pluginSettings={'voice-input':{enabled:true,backend:'local',openaiApiKey:'fixture-secret',hotkey:'F6',replacementsFile:'/tmp/words'}};
+  f.write(f.legacyDir,'config.json',config);
+  migrateLegacy(f);
+  const next=JSON.parse(readFileSync(join(f.dataDir,'config.json'),'utf8'));
+  assert.equal(next.plugins['voice-input'].enabled,true);
+  assert.equal(next.plugins['voice-input'].settings.backend,'local');
+  assert.equal(next.plugins['voice-input'].settings['openai-api-key'],'fixture-secret');
+  assert.equal(next.plugins['voice-input'].settings.shortcut,'F6');
+});

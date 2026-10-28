@@ -39,6 +39,8 @@ function listSessionAgents(entries, sessions, coordinator, caller, projects = []
       lastPreview: String((live && session.latestUpdate) || entry.lastFinal || '').trim().slice(0, 200),
       address: sessionAddress(entry, projects),
       caller: entry.id === caller.entry.id,
+      spawned: Boolean(entry.spawnedBySessionId),
+      spawnedBySessionId: entry.spawnedBySessionId || null,
     }];
   });
 }

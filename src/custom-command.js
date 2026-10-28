@@ -49,7 +49,7 @@ function createCustomCommandProvider(commandConfig) {
       createLaunch(options) {
         const [command, ...args] = parseCommand(commandConfig.command);
         const launch = native.createLaunch({ ...options, command, extraArgs: [...args, ...(options.extraArgs || [])] });
-        return { ...launch, args: [...args, ...(launch.args || [])], env: { ...commandConfig.env, ...launch.env } };
+        return { ...launch, ...(Array.isArray(launch.extraArgs) ? {extraArgs: []} : {}), args: [...(launch.extraArgs || args), ...(launch.args || [])], env: { ...commandConfig.env, ...launch.env } };
       },
     };
   }

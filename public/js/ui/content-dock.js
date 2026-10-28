@@ -20,6 +20,7 @@ import { registerReadAlongSurface, matchable } from "./read-along.js";
 import { MAX_VIEWER_TEXT, docTextIndex, normalizeWithMap, partAt, textParts, textFingerprint } from "./doc-text.js";
 
 const KIND_ICON = {
+  "$core/files": icon('<path d="M3 7h7l2 2h9v11H3z"/><path d="M3 7V4h7l2 3"/>'),
   csv: icon('<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 4v16"/>'),
   terminal: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17l6-5-6-5"/><path d="M12 19h8"/></svg>',
   text: icon('<path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/><path d="M10 12h5M10 16h5"/>'),
@@ -80,7 +81,15 @@ export function initContentDock() {
   termPanel = document.getElementById("term-panel");
   if (!tabsEl || !bodyEl) return;
   store.on("active", renderDock);
-  store.on("reset", () => { for (const entry of docks.values()) releaseEntry(entry); docks.clear(); renderDock(); });   // NB: pendingCloses deliberately survives — see its comment
+  store.on("reset", () => {
+    for (const [sid, entry] of docks) {
+      const keep = entry.items.filter(item => item.workspaceDef?.build);
+      for (const item of entry.items) if (!keep.includes(item)) releaseItemNode(item);
+      if (keep.length) { entry.items = keep; if (!keep.some(item => item.id === entry.activeId)) entry.activeId = null; }
+      else docks.delete(sid);
+    }
+    renderDock();
+  });   // NB: pendingCloses deliberately survives — see its comment
   store.on("session:remove", (id) => { pendingCloses.delete(id); const entry = docks.get(id); if (entry) releaseEntry(entry); if (docks.delete(id)) renderDock(); });
   store.on("content:closed", onContentClosed);
   onViewersChange(() => { resetPluginViewerNodes(); renderDock(); });
@@ -101,6 +110,8 @@ export function presentInDock(ev) {
   if (isTombstoned(ev.sessionId, ev.contentId)) return;
   const entry = docks.get(ev.sessionId) || { items: [], activeId: null };
   docks.set(ev.sessionId, entry);
+  // Replayed immutable assets must not duplicate tabs or steal focus from an editor.
+  if (entry.items.some(item => item.id === ev.contentId)) return;
   let item = ev.replaces ? entry.items.find((it) => it.id === ev.replaces) : null;
   if (item) { releaseItemNode(item); item.id = ev.contentId; item.kind = ev.kind; item.name = ev.name; item.url = ev.url; item.sourcePath = ev.sourcePath || ""; item.sessionId = ev.sessionId; }   // swap in place
   else { item = { id: ev.contentId, kind: ev.kind, name: ev.name, url: ev.url, sourcePath: ev.sourcePath || "", sessionId: ev.sessionId, node: null, built: false }; entry.items.push(item); }
@@ -506,13 +517,18 @@ function renderDock() {
   showRail(dropArmed && bare);
 }
 
+export function showTerminalTab() {
+  const entry = docks.get(store.activeId);
+  if (entry && entry.activeId !== TERMINAL_TAB) { entry.activeId = TERMINAL_TAB; renderDock(); }
+}
+
 function terminalTab(on) {
   const tab = h("div", "cd-tab cd-tab-term" + (on ? " on" : ""));
   tab.setAttribute("role", "tab"); tab.setAttribute("aria-selected", String(on));
   tab.append(spanIcon("terminal"));
   const label = h("span", "cd-tab-name"); label.textContent = "Terminal";
   tab.appendChild(label);
-  tab.addEventListener("click", () => { const e = docks.get(store.activeId); if (e) { e.activeId = TERMINAL_TAB; renderDock(); } });
+  tab.addEventListener("click", showTerminalTab);
   return tab;
 }
 function docTab(it, on, entry) {
@@ -550,6 +566,9 @@ export function onTerminalTabShown(fn) { onTerminalShown = typeof fn === "functi
 
 function bodyFor(item) {
   if (item.built && item.node) return item.node;
+  if (item.workspace && item.workspaceDef.build) {
+    item.node = item.workspaceDef.build(); item.built = true; return item.node;
+  }
   if (item.workspace) {
     item.node = pluginFrame(item.pluginId, item.workspaceDef.src, workspaceContext(item), { className: "plugin-frame plugin-workspace", title: item.name, onClose: () => dropLocally(item.sessionId, item.id) });
     item.built = true; return item.node;
@@ -757,7 +776,7 @@ function spanIcon(kind) { const s = h("span", "cd-tab-ic"); s.innerHTML = iconFo
 function closeItem(sid, id) {
   const entry = docks.get(sid); if (!entry) return;
   const item = entry.items.find((it) => it.id === id); if (!item) return;
-  if (item.workspace) { dropLocally(sid, id); return; }
+  if (item.workspace) { if (item.node?._beforeClose && !item.node._beforeClose()) return; dropLocally(sid, id); return; }
   tombstone(sid, id);
   closeContent(sid, id);   // durable: the engine drops the asset, so replay cannot bring this tab back
   dropLocally(sid, id);
@@ -828,7 +847,7 @@ function dropLocally(sid, id) {
 
 function releaseItemNode(item) {
   if (!item) return;
-  if (item.node) { disposePluginFrame(item.node); releasePreviews(item.node); if (item.node.remove) item.node.remove(); }
+  if (item.node) { item.node._dispose?.(); disposePluginFrame(item.node); releasePreviews(item.node); if (item.node.remove) item.node.remove(); }
   item.node = null; item.built = false;
 }
 function releaseEntry(entry) { for (const item of (entry && entry.items) || []) releaseItemNode(item); }
