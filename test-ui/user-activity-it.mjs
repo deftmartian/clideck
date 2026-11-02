@@ -94,8 +94,9 @@ try {
   ok("untrusted composition sends nothing", inputs().length === 0);
 
   ws.clear(); terminal.dataHandler("x"); terminal.dataHandler("\x1b[12;40R"); terminal.dataHandler("\x1b[I");
+  // Fork: the server's headless terminal owns query replies, so the browser drops the CPR instead of sending it.
   ok("raw xterm data, including protocol replies, is never marked",
-    inputs().length === 3 && inputs().every((m) => !("userActivity" in m)) && inputs()[1].data === "\x1b[12;40R");
+    inputs().length === 2 && inputs().every((m) => !("userActivity" in m)) && inputs()[1].data === "\x1b[I");
 
   ws.clear();
   mount._fire("paste", { type: "paste", isTrusted: true, target: terminal.textarea, clipboardData: { getData: () => "hello" } });

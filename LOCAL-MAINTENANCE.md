@@ -1,15 +1,15 @@
 # CliDeck v2 fork maintenance
 
-This branch carries the retained fork features on upstream `cb83166` (CliDeck
-2.5.0). The old `integration/full-stack` history is preserved separately.
+This branch carries the retained fork features on upstream `c0bd335` (CliDeck
+2.6.0). The old `integration/full-stack` history is preserved separately.
 The v2 engine and plugin SDK replace v1; Autopilot is retired.
 
 ## Local upstream integration
 
-`main` is the only fork branch: upstream 2.5.0 plus one fork commit, followed
-by the 2.5.0-fork.8 changes. The fork commit was rebuilt from the installed
-`2.4.0-fork.7` package and re-parented onto `70f6b9c`, the upstream commit it
-was built from, before rebasing onto 2.5.0. When rebasing again, rebase the
+`main` is the only fork branch: upstream 2.6.0 plus one fork commit, followed
+by the 2.5.0-fork.8 and 2.6.0-fork.9 changes. The fork commit was rebuilt from
+the installed `2.4.0-fork.7` package and re-parented onto `70f6b9c`, the
+upstream commit it was built from, before rebasing onto 2.5.0 and then 2.6.0. When rebasing again, rebase the
 fork commit range onto the new upstream release and bump `version` and
 `clideckUpstreamVersion` in `package.json`.
 
@@ -23,6 +23,22 @@ The package also never carried these fork test lanes, which are lost:
 and the `src/fork/package-check` preflight. Their npm scripts were removed;
 sections below that mention them describe coverage that must be rewritten.
 `tools/run-ui-tests.js` was recreated.
+
+## 2.6.0-fork.9
+
+- Rebased onto upstream 2.6.0 (Task Manager, terminal search, typing guard,
+  per-session read-aloud).
+- The typing guard covers the fork input path: `userActivity` is accepted on
+  frame and attachment inputs, terminal drafts and the mobile control keys are
+  marked, and activity-only frames insert nothing. Prompts from the browser
+  still mark activity before the fork's attachment-draft refusal.
+- Ask failures `user_typing` and `delivery_interrupted` join the fork's
+  `cancelled`, `provider_error` and `no_answer` as HTTP 409.
+- The browser still drops terminal query replies (the server's headless
+  terminal owns them); `test-ui/user-activity-it.mjs` asserts that instead of
+  upstream's forwarded CPR.
+- Mobile composer and terminal-draft typing stays local until commit, so it
+  does not hold off asks while being written.
 
 ## 2.5.0-fork.8
 
